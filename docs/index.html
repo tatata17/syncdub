@@ -1,115 +1,259 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>syncdub 吹き替え音声シンクロツール 使い方</title>
 <meta name="description" content="日本語吹き替え音声を、きれいな英語版の映像に合わせて1本の動画にするWindows向けツール「syncdub」の使い方と更新履歴。">
+<script>try{var t=localStorage.getItem("theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
 <style>
-:root{--bg:#f6f7fb;--card:#fff;--fg:#1f2430;--sub:#5d6575;--line:#dfe3ec;--acc:#2f6fd0;--acc2:#1a9e57;--warn:#fff4d6;--warnb:#e5b94a;--tip:#e8f3ff;--tipb:#8ab8ee;--code:#eef1f7}
-[data-theme=dark]{--bg:#14171d;--card:#1c2029;--fg:#e6e9ef;--sub:#9aa3b4;--line:#2d3340;--acc:#6ea4f5;--acc2:#43c07f;--warn:#3a3219;--warnb:#a98a2b;--tip:#16283d;--tipb:#3d6ca8;--code:#262b36}
+/* ===== 共通デザイン(3つの使い方ページで同じものを使います) ===== */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1d2430; --muted:#5d6877; --line:#dde2ea;
+  --accent:#0f7b8a; --accent-ink:#ffffff; --accent-soft:#e3f3f5; --warn:#fff4dc; --warn-line:#ecd29a;
+  --code:#eef1f5; --warn-ink:#8a4a10; --shadow:0 1px 2px rgba(20,30,50,.06),0 6px 20px rgba(20,30,50,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#9aa6b6; --line:#2a3443;
+    --accent:#4cc3d3; --accent-ink:#06222a; --accent-soft:#12303a; --warn:#2c2616; --warn-line:#6d5a22;
+    --code:#202a37; --warn-ink:#e9a46f; --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#9aa6b6; --line:#2a3443;
+  --accent:#4cc3d3; --accent-ink:#06222a; --accent-soft:#12303a; --warn:#2c2616; --warn-line:#6d5a22;
+  --code:#202a37; --warn-ink:#e9a46f; --shadow:none;
+}
 *{box-sizing:border-box}
-html{scroll-behavior:smooth;scroll-padding-top:64px}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 "Yu Gothic UI","Hiragino Sans","Meiryo",sans-serif}
-a{color:var(--acc)}
-.top{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line)}
-.logo{display:flex;align-items:center;gap:8px;font-weight:700}
-.logo svg{width:28px;height:28px}
-.top .sp{flex:1}
-.top button,.top a.btn{font:inherit;font-size:14px;padding:4px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none}
-#tocbtn{display:none}
-.wrap{max-width:1040px;margin:0 auto;padding:20px 16px 60px;display:grid;grid-template-columns:220px 1fr;gap:28px}
-nav.toc{position:sticky;top:70px;align-self:start;font-size:14px;max-height:calc(100vh - 90px);overflow:auto}
-nav.toc b{display:block;margin-bottom:6px;color:var(--sub)}
-nav.toc ol{margin:0;padding-left:1.4em}
-nav.toc a{text-decoration:none;color:var(--fg)}
-nav.toc a:hover{color:var(--acc)}
-main section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 24px 18px;margin-bottom:18px}
-h1{font-size:28px;margin:6px 0 4px}
-h2{font-size:22px;margin:14px 0 6px;padding-bottom:6px;border-bottom:2px solid var(--acc)}
-h2 small{color:var(--acc);font-size:.7em;margin-right:6px}
-h3{font-size:17px;margin:18px 0 4px}
-.hero{background:linear-gradient(135deg,#1e3c8c,#3a78d0);color:#fff;border:0}
-.hero p,.hero li{color:#eaf1ff}.hero h1{color:#fff}.hero code{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.4);color:#fff}
-.dl{display:inline-block;margin:8px 10px 4px 0;padding:10px 20px;background:#fff;color:#1e3c8c;font-weight:700;border-radius:8px;text-decoration:none}
-.ver{font-size:14px;opacity:.9}
-.box{border-left:5px solid;border-radius:6px;padding:8px 14px;margin:12px 0}
-.tip{background:var(--tip);border-color:var(--tipb)}.warn{background:var(--warn);border-color:var(--warnb)}
-table{border-collapse:collapse;width:100%;margin:10px 0;font-size:15px}
-th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
-th{background:var(--code)}
-kbd,code{background:var(--code);border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:.9em}
-.mock{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--bg);font-size:12px;margin:10px 0}
-.mock .tr{position:relative;height:46px;margin:4px 0;border:1px solid var(--line);background:var(--card);border-radius:4px;overflow:hidden}
-.mock .b{position:absolute;top:0;bottom:0;font-weight:700;padding:2px 4px;font-size:12px}
-.mock .lbl{position:absolute;right:6px;top:2px;color:var(--sub)}
-.mock .p{position:absolute;top:0;bottom:0;width:3px;background:var(--acc2)}
-.mock .wave{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--acc);opacity:.6}
-.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:13px;margin-top:6px}.legend i{display:inline-block;width:14px;height:14px;vertical-align:-2px;border-radius:3px;margin-right:4px}
-.cl{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin:10px 0;background:var(--bg)}
-.cl h4{margin:2px 0;font-size:16px}.cl .tag{font-size:12px;background:var(--acc);color:#fff;border-radius:10px;padding:1px 8px;margin-left:6px}
-.cl ul{margin:4px 0 6px;padding-left:1.3em}
-details.cl>summary{cursor:pointer;font-weight:700}
-main section{overflow-x:auto}.start{background:rgba(255,255,255,.14);border-radius:10px;padding:10px 16px;margin:12px 0}.start b.t{display:block;font-size:17px}.start ol{margin:4px 0 0;padding-left:1.4em}.start li{color:#fff}
-footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
-@media(max-width:820px){.wrap{display:block}#tocbtn{display:inline-block}nav.toc{display:none;position:fixed;top:54px;left:8px;right:8px;z-index:20;max-height:calc(100vh - 70px);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;box-shadow:0 8px 24px rgba(0,0,0,.25);font-size:16px}nav.toc li{padding:5px 0}nav.toc.open{display:block}main section{padding:6px 14px 14px}}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.85 "Yu Gothic UI","Hiragino Sans","Noto Sans JP","Meiryo",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:3px}
+p{margin:10px 0}
+ul,ol{padding-left:1.4em;margin:8px 0}
+li{margin:4px 0}
+code,kbd{font:.9em/1.4 "Cascadia Mono",Consolas,monospace;background:var(--code);border:1px solid var(--line);padding:.08em .4em;border-radius:5px;overflow-wrap:anywhere}
+kbd{border-bottom-width:2px}
+pre{background:var(--code);border:1px solid var(--line);padding:14px 16px;border-radius:10px;overflow:auto;line-height:1.6;font:14px/1.6 "Cascadia Mono",Consolas,monospace}
+pre code{background:none;border:none;padding:0}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:2px;border-radius:6px}
+
+/* ヘッダー */
+header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--panel) 92%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1120px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
+.logo{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-ink);font:700 13px/1 "Cascadia Mono",Consolas,monospace;flex:none}
+.brand{font-weight:700;letter-spacing:.02em;white-space:nowrap}
+.brand small{font-weight:400;color:var(--muted);margin-left:8px}
+.spacer{flex:1}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);
+  padding:8px 16px;border-radius:999px;font-weight:700;text-decoration:none;cursor:pointer;font-size:15px;line-height:1.4}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent;color:var(--accent)}
+.icon-btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;height:38px;padding:0 14px;cursor:pointer;font:inherit;font-size:14px;white-space:nowrap}
+.icon-btn:hover{border-color:var(--accent);color:var(--accent)}
+.toc-btn{display:none;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:10px;height:38px;padding:0 14px;font:inherit;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap}
+
+/* レイアウトと目次 */
+.layout{max-width:1120px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:220px minmax(0,1fr);gap:40px}
+nav.toc{position:sticky;top:72px;align-self:start;max-height:calc(100vh - 90px);overflow:auto;padding:28px 0}
+nav.toc ol{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+nav.toc li{margin:0}
+nav.toc a{display:block;padding:5px 12px;margin-left:-2px;border-left:2px solid transparent;color:var(--muted);text-decoration:none;font-size:14.5px;line-height:1.5}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.on{color:var(--accent);border-left-color:var(--accent);font-weight:700}
+nav.toc .tn{display:inline-block;min-width:1.9em;color:var(--muted);font:12.5px/1 "Cascadia Mono",Consolas,monospace}
+main{padding:28px 0 80px;min-width:0}
+
+/* ヒーロー(いちばん上の紹介) */
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px 28px 24px;box-shadow:var(--shadow);margin-top:0}
+.hero h1{margin:0 0 6px;font-size:clamp(26px,4.5vw,36px);line-height:1.3}
+.hero>p:not(.note){margin:.4em 0;color:var(--muted)}
+.feat{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:18px 0 0;padding:0;list-style:none}
+.feat li{background:var(--accent-soft);border-radius:12px;padding:10px 14px;font-size:15px;line-height:1.6;margin:0}
+.hero .row{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:18px;align-items:center}
+.hero .note{margin-bottom:0}
+.ver{font-size:14px;color:var(--muted)}
+.quick{background:var(--accent-soft);border-radius:12px;padding:12px 18px;margin:16px 0 0}
+.quick>b{display:block;font-size:17px}
+.quick ol{margin:4px 0 0}
+
+/* 章 */
+section{margin-top:44px}
+h2{font-size:24px;margin:0 0 14px;line-height:1.4;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h2 .n{display:inline-block;min-width:1.9em;height:1.9em;line-height:1.9em;text-align:center;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-size:.7em;margin-right:10px;vertical-align:.12em}
+h3{font-size:18px;margin:26px 0 8px}
+
+/* 注意書き: note=ヒント・補足 / warn=注意 */
+.note,.warn{border-radius:12px;padding:12px 16px;margin:16px 0;font-size:15px;border:1px solid var(--line)}
+.note{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.warn{background:var(--warn);border-color:var(--warn-line)}
+.lb{display:block;margin-bottom:2px}
+.note>.lb{color:var(--accent)}
+.warn>.lb{color:var(--warn-ink)}
+.muted{color:var(--muted)}
+p.muted{font-size:14px}
+
+/* 表(スマホでは1行=1枚のカードになります) */
+.table-wrap{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:none}
+th{background:var(--accent-soft);white-space:nowrap}
+td:first-child{min-width:8.5em}
+
+/* 手順 */
+.steps{counter-reset:s;list-style:none;padding:0;margin:12px 0}
+.steps>li{counter-increment:s;position:relative;padding:4px 0 10px 44px;margin:0}
+.steps>li::before{content:counter(s);position:absolute;left:0;top:3px;width:30px;height:30px;line-height:30px;text-align:center;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-weight:700}
+.steps>li>strong:first-child{display:block}
+
+/* 小さなカード */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;box-shadow:var(--shadow)}
+.card h4{margin:0 0 4px;font-size:15px;color:var(--accent)}
+.card p{margin:0;font-size:14.5px;line-height:1.7}
+
+/* 画面のイメージ図(説明用の図) */
+.mock{margin:18px 0 6px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);font-size:13px;line-height:1.5}
+.mock .bar{background:var(--code);padding:6px 12px;border-bottom:1px solid var(--line);color:var(--muted)}
+.mock .muted{color:var(--muted)}
+.mock .b{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:0 9px;background:var(--panel);margin:2px 2px 2px 0;white-space:nowrap}
+.mock .b.go{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+.mock fieldset{border:1px solid var(--line);border-radius:8px;margin:0;padding:4px 10px 8px;min-width:0}
+.mock legend{padding:0 6px;font-weight:700;color:var(--accent)}
+.mock .list{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.mock .list div{border-bottom:1px solid var(--line)}
+.mock .list div:last-child{border-bottom:none}
+.mock .list div:first-child{background:var(--code);font-weight:700}
+.mock .list div.sel{background:var(--accent-soft)}
+.mock .tabs span{display:inline-block;padding:2px 10px;border:1px solid var(--line);border-bottom:none;border-radius:6px 6px 0 0;margin-right:4px;color:var(--muted)}
+.mock .tabs span.on{background:var(--accent-soft);color:var(--ink);font-weight:700}
+.mock-cap{color:var(--muted);font-size:13.5px;margin:4px 0 14px}
+
+/* 更新履歴(日付ごと。新しい日だけ開いておき、古い日は折りたたみ) */
+.day,.fold{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:12px 0;box-shadow:var(--shadow)}
+.day>summary,.fold>summary{cursor:pointer;list-style:none}
+.day>summary::-webkit-details-marker,.fold>summary::-webkit-details-marker{display:none}
+.day>summary::before,.fold>summary::before{content:"▸";display:inline-block;width:1.2em;color:var(--muted)}
+.day[open]>summary::before,.fold[open]>summary::before{content:"▾"}
+.fold>summary{font-weight:700}
+.day .d{font-weight:700;font-size:17px}
+.day .vr{color:var(--muted);font-size:13.5px;margin-left:8px}
+.day .new{font-size:12px;color:var(--accent-ink);background:var(--accent);border-radius:999px;padding:1px 9px;margin-left:8px;font-weight:700}
+.day ul{margin:8px 0 2px}
+.day .tag{font-size:12px;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:0 8px;margin-right:6px;white-space:nowrap}
+
+footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var(--muted);font-size:14px}
+
+@media (max-width:820px){
+  .logo{display:none}
+  .layout{grid-template-columns:1fr;gap:0}
+  .toc-btn{display:inline-flex;align-items:center}
+  .top-in{gap:8px;padding:8px 12px}
+  .btn.ghost{padding:6px 12px;font-size:14px}
+  nav.toc{display:none;position:fixed;top:58px;left:10px;right:10px;max-height:72vh;overflow:auto;padding:10px;z-index:30;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+  nav.toc.open{display:block}
+  nav.toc ol{border:none}
+  nav.toc a{border:none;border-radius:8px;margin:0;padding:9px 12px;font-size:16px}
+  nav.toc a.on{background:var(--accent-soft)}
+  .brand{font-size:15px;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .brand small{display:none}
+  .icon-btn{padding:0 10px;font-size:13px}
+  .hero{padding:20px 18px}
+}
+/* スマホでは、表を「1行=1枚のカード」に並べ替える(横に狭くならないように) */
+@media (max-width:640px){
+  .table-wrap{border:none;background:none;overflow:visible}
+  .table-wrap table,.table-wrap tbody,.table-wrap tr,.table-wrap td{display:block;width:100%}
+  .table-wrap tr:first-child{display:none}
+  .table-wrap tr{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:0 0 10px;padding:8px 12px;box-shadow:var(--shadow)}
+  .table-wrap td{border:none;padding:3px 0}
+  .table-wrap td:first-child{font-weight:700;padding-top:2px}
+  .table-wrap td[data-label]:not(:first-child)::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted);letter-spacing:.04em}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+
+/* ===== このページだけの部品 ===== */
+.mock.pad{padding:10px;background:var(--bg);font-size:12px}
+.mock .tr{position:relative;height:46px;margin:4px 0;border:1px solid var(--line);background:var(--panel);border-radius:4px;overflow:hidden}
+.mock .seg{position:absolute;top:0;bottom:0;font-weight:700;padding:2px 4px;font-size:12px}
+.mock .lbl{position:absolute;right:6px;top:2px;color:var(--muted)}
+.mock .p{position:absolute;top:0;bottom:0;width:3px;background:#1a9e57}
+.mock .wave{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--accent);opacity:.6}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-top:8px}
+.legend i{display:inline-block;width:14px;height:14px;vertical-align:-2px;border-radius:3px;margin-right:4px}
 </style>
 </head>
 <body>
-<div class="top">
- <div class="logo"><svg viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="12" fill="#2f6fd0"/><g fill="#fff"><rect x="10" y="18" width="4" height="8"/><rect x="16" y="10" width="4" height="24"/><rect x="22" y="14" width="4" height="16"/><rect x="28" y="6" width="4" height="32"/><rect x="34" y="12" width="4" height="20"/><rect x="40" y="16" width="4" height="12"/></g><g fill="#ffaa3c"><rect x="14" y="40" width="4" height="8"/><rect x="20" y="36" width="4" height="16"/><rect x="26" y="32" width="4" height="24"/><rect x="32" y="38" width="4" height="12"/><rect x="38" y="34" width="4" height="20"/><rect x="44" y="40" width="4" height="8"/></g></svg>syncdub</div>
- <span class="sp"></span>
- <button id="tocbtn" type="button">目次</button>
- <a class="btn" href="https://github.com/tatata17/syncdub">GitHub</a>
- <button id="theme" type="button">暗い表示</button>
-</div>
-<div class="wrap">
-<nav class="toc" id="toc"><b>目次</b><ol start="0">
- <li><a href="#about">はじめに</a></li>
- <li><a href="#install">必要なものと導入</a></li>
- <li><a href="#basic">かんたんな使い方</a></li>
- <li><a href="#manual">手動調整の使い方</a></li>
- <li><a href="#keys">ショートカット</a></li>
- <li><a href="#update">更新と元に戻す</a></li>
- <li><a href="#trouble">困ったとき</a></li>
- <li><a href="#files">ファイルの場所</a></li>
- <li><a href="#history">更新履歴</a></li>
-</ol></nav>
+<header class="top">
+  <div class="top-in">
+    <button class="toc-btn" id="tocBtn" type="button" aria-expanded="false" aria-controls="toc">目次</button>
+    <span class="logo" aria-hidden="true">sd</span>
+    <div class="brand">syncdub<small>使い方ガイド</small></div>
+    <div class="spacer"></div>
+    <a class="btn ghost" href="https://github.com/tatata17/syncdub">GitHub</a>
+    <button class="icon-btn" id="theme" type="button" aria-label="ライト/ダークを切り替え" title="ライト/ダークを切り替え">暗い表示</button>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc" id="toc" aria-label="目次">
+  <ol>
+    <li><a href="#about"><span class="tn"></span>はじめに</a></li>
+    <li><a href="#install"><span class="tn">01</span>必要なものと導入</a></li>
+    <li><a href="#basic"><span class="tn">02</span>かんたんな使い方</a></li>
+    <li><a href="#manual"><span class="tn">03</span>手動調整の使い方</a></li>
+    <li><a href="#keys"><span class="tn">04</span>ショートカット</a></li>
+    <li><a href="#update"><span class="tn">05</span>更新のしかた</a></li>
+    <li><a href="#trouble"><span class="tn">06</span>困ったとき</a></li>
+    <li><a href="#files"><span class="tn">07</span>ファイルの場所</a></li>
+    <li><a href="#history"><span class="tn">08</span>更新履歴</a></li>
+  </ol>
+</nav>
+
 <main>
 <section class="hero" id="about">
- <h1>syncdub 吹き替え音声シンクロツール</h1>
- <p>TV録画などに入っている<b>日本語吹き替えの音声</b>を、きれいな<b>英語版の映像</b>に合わせて、1本の動画(mkv)にするWindows向けのツールです。映像は再エンコードせず、そのままコピーします。</p>
- <ul>
-  <li>音の波形を照合して、CMや暗転、カットされた場面を<b>自動で見つけて</b>合わせます</li>
-  <li>うまくいかない所は、波形と画面を見ながら<b>手動で指定</b>(同じ場面・CM・暗転・カット)</li>
-  <li>出来上がりは、日本語音声が最初(既定)・英語音声も残った mkv</li>
-  <li>ファイルは1つだけ(<code>syncdub.pyw</code>)。更新はGitHub経由で自動</li>
- </ul>
- <div class="start"><b class="t">まずはこの3ステップ</b>
-  <ol><li>下のボタンから <code>syncdub.pyw</code> を保存して、ダブルクリックで起動</li>
-  <li>「かんたん」タブに、英語版の映像と日本語の録画をドロップして「自動で合わせる」</li>
-  <li>結果を確認して「合成スタート」</li></ol>
-  <span style="font-size:14px">うまくいかないときだけ「手動調整」タブを使います(上級者向け)。</span></div>
- <a class="dl" id="dl" href="https://raw.githubusercontent.com/tatata17/syncdub/main/syncdub.pyw" download>syncdub.pyw をダウンロード</a>
- <span class="ver" id="latest">最新版を確認中…</span>
- <div class="box tip" style="color:var(--fg)"><b>ヒント</b> ソフトの中で、ボタンや入力欄にマウスを乗せると、そのはたらきの説明(ツールチップ)が出ます。分からなくなったら乗せてみてください。</div>
+  <h1>syncdub 吹き替え音声シンクロツール</h1>
+  <p>TV録画などに入っている<b>日本語吹き替えの音声</b>を、きれいな<b>英語版の映像</b>に合わせて、1本の動画(mkv)にするWindows向けのツールです。映像は再エンコードせず、そのままコピーします。</p>
+  <ul class="feat">
+    <li>音の波形を照合して、CMや暗転、カットされた場面を<b>自動で見つけて</b>合わせます</li>
+    <li>うまくいかない所は、波形と画面を見ながら<b>手動で指定</b>(同じ場面・CM・暗転・カット)</li>
+    <li>出来上がりは、日本語音声が最初(既定)・英語音声も残った mkv</li>
+    <li>ファイルは1つだけ(<code>syncdub.pyw</code>)。更新はGitHub経由で自動</li>
+  </ul>
+  <div class="quick"><b>まずはこの3ステップ</b>
+    <ol>
+      <li>下のボタンから <code>syncdub.pyw</code> を保存して、ダブルクリックで起動</li>
+      <li>「かんたん」タブに、英語版の映像と日本語の録画をドロップして「自動で合わせる」</li>
+      <li>結果を確認して「合成スタート」</li>
+    </ol>
+    <span class="muted">うまくいかないときだけ「手動調整」タブを使います(上級者向け)。</span>
+  </div>
+  <div class="row">
+    <a class="btn" id="dl" href="https://github.com/tatata17/syncdub/raw/main/syncdub.pyw">⬇ syncdub.pyw をダウンロード</a>
+    <span class="ver" id="ver"></span>
+  </div>
+  <p class="note"><b class="lb">ヒント</b>ソフトの中で、ボタンや入力欄にマウスを乗せると、そのはたらきの説明(ツールチップ)が出ます。分からなくなったら乗せてみてください。</p>
 </section>
 
 <section id="install">
- <h2><small>01</small>必要なものと導入</h2>
- <table>
+ <h2><span class="n">01</span>必要なものと導入</h2>
+ <div class="table-wrap"><table>
   <tr><th>必要なもの</th><th>必須?</th><th>説明</th></tr>
   <tr><td>Python 3</td><td>必須</td><td>このソフトを動かすための土台です。python.org から入れます。インストール画面の「Add python.exe to PATH」には<b>必ずチェック</b>を入れてください。<code>tcl/tk</code> のチェックは外さないでください(外すと画面が出ません)。</td></tr>
   <tr><td>numpy</td><td>必須</td><td>音の計算に使う部品です。コマンドプロンプトで <code>pip install numpy</code></td></tr>
   <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。入れかたは下の「ffmpeg の入れかた」を見てください。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
-  <tr><td>tkinterdnd2</td><td>任意</td><td>入れると、ファイルのドラッグ&ドロップが使えます。<code>pip install tkinterdnd2</code>。入れなくても、クリックでファイルを選べます。</td></tr>
- </table>
+  <tr><td>tkinterdnd2</td><td>任意</td><td>入れると、ファイルのドラッグ&amp;ドロップが使えます。<code>pip install tkinterdnd2</code>。入れなくても、クリックでファイルを選べます。</td></tr>
+ </table></div>
  <h3>ffmpeg の入れかた(PATH とは?)</h3>
  <p><b>PATH</b> は、「どのフォルダにいても、名前を打つだけでそのソフトを呼び出せる」ようにする Windows の設定です。syncdub は ffmpeg を名前で呼び出すので、ここが通っていないと「読み込めない」エラーになります。次のどちらかで入れてください。</p>
- <div class="box tip"><b>かんたんな方法(おすすめ)</b> Windows 10/11 なら、<b>コマンドプロンプト</b>(スタートメニューで「cmd」と検索)に次を貼り付けて Enter。PATH も自動で設定されます。
-  <p style="margin:6px 0"><code>winget install Gyan.FFmpeg</code></p>
+ <div class="note"><b class="lb">かんたんな方法(おすすめ)</b>Windows 10/11 なら、<b>コマンドプロンプト</b>(スタートメニューで「cmd」と検索)に次を貼り付けて Enter。PATH も自動で設定されます。
+  <p><code>winget install Gyan.FFmpeg</code></p>
   終わったら、<b>コマンドプロンプトを閉じて開き直し</b>、<code>ffmpeg -version</code> と打って版の情報が出れば完了です。syncdub は一度終了して、起動し直してください。</div>
- <details class="cl"><summary>手動で入れる方法(上でうまくいかないとき)</summary>
+ <details class="fold"><summary>手動で入れる方法(上でうまくいかないとき)</summary>
   <ol>
    <li><a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev の ffmpeg ビルド</a>から「release builds」の <code>ffmpeg-release-essentials.zip</code> をダウンロードします。</li>
    <li>zip を展開し、中身のフォルダを <code>C:\ffmpeg</code> のような分かりやすい場所に置きます(<code>C:\ffmpeg\bin</code> の中に <code>ffmpeg.exe</code> と <code>ffprobe.exe</code> があれば正解)。</li>
@@ -117,47 +261,48 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
    <li>上の欄(ユーザー環境変数)の <code>Path</code> を選んで「編集」→「新規」で <code>C:\ffmpeg\bin</code> を追加し、OK を押して閉じます。</li>
    <li>コマンドプロンプトを開き直して、<code>ffmpeg -version</code> と <code>ffprobe -version</code> で確認します。</li>
   </ol>
-  <p style="font-size:14px;color:var(--sub)">困ったときは「Windows PATH 通す」で検索すると、画像つきの解説がたくさん見つかります。</p>
+  <p class="muted">困ったときは「Windows PATH 通す」で検索すると、画像つきの解説がたくさん見つかります。</p>
  </details>
- <ol>
-  <li>上の「ダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
+ <h3>syncdub を置いて起動する</h3>
+ <ol class="steps">
+  <li>上の「syncdub.pyw をダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
   <li>好きなフォルダに置いて、ダブルクリックで起動します。</li>
  </ol>
- <div class="box tip"><b>ヒント</b> 設定ファイルや旧版のバックアップは、<code>syncdub.pyw</code> と同じフォルダにできます。専用のフォルダに置くのがおすすめです。</div>
+ <div class="note"><b class="lb">ヒント</b>設定ファイルや旧版のバックアップは、<code>syncdub.pyw</code> と同じフォルダにできます。専用のフォルダに置くのがおすすめです。</div>
 </section>
 
 <section id="basic">
- <h2><small>02</small>かんたんな使い方</h2>
+ <h2><span class="n">02</span>かんたんな使い方</h2>
  <p>「かんたん」タブで、上から順に4つ進めるだけです。</p>
- <ol>
-  <li><b>ファイルを選ぶ</b> … 「英語版の映像」と「日本語の録画」の枠に、ファイルをドロップ(またはクリックして選択)します。読み込みが終わるまで待ちます。</li>
-  <li><b>自動で合わせる</b> … 「自動で合わせる」ボタンを押します。音を照合して、対応する場所を探します(長い動画は数分かかります)。<br>※ ファイルを選んだだけでは始まりません。</li>
-  <li><b>結果を確認</b> … 区間(A, B, C…)の表が出ます。行を選ぶと、その区間の先頭を聞き比べられます。「要確認」の行は特に確かめてください。</li>
-  <li><b>合成する</b> … 保存先を確かめて「合成スタート」。出来上がると「完成しました」と出ます。</li>
+ <ol class="steps">
+  <li><strong>ファイルを選ぶ</strong>「英語版の映像」と「日本語の録画」の枠に、ファイルをドロップ(またはクリックして選択)します。読み込みが終わるまで待ちます。</li>
+  <li><strong>自動で合わせる</strong>「自動で合わせる」ボタンを押します。音を照合して、対応する場所を探します(長い動画は数分かかります)。<br>※ ファイルを選んだだけでは始まりません。</li>
+  <li><strong>結果を確認</strong>区間(A, B, C…)の表が出ます。行を選ぶと、その区間の先頭を聞き比べられます。「要確認」の行は特に確かめてください。</li>
+  <li><strong>合成する</strong>保存先を確かめて「合成スタート」。出来上がると「完成しました」と出ます。</li>
  </ol>
  <h3>出来上がったファイルの確認</h3>
  <p>保存先(既定は英語版と同じフォルダの <code>〜_jpdub.mkv</code>)に、1本の mkv ができます。映像は英語版のまま、音声は<b>日本語(最初・既定)と英語の2本</b>入っています。プレーヤー(VLC など)の「音声」メニューで切り替えられます。「フォルダを開く」ボタンで場所を開けます。</p>
- <div class="box warn"><b>注意</b> 声だけの場面(BGMや効果音が少ない所)は、音の照合が当たりにくく、「要確認」になることがあります。その場合は手動調整で『同じ場面』を足してください。</div>
+ <div class="warn"><b class="lb">注意</b>声だけの場面(BGMや効果音が少ない所)は、音の照合が当たりにくく、「要確認」になることがあります。その場合は手動調整で「同じ場面」を足してください。</div>
 </section>
 
 <section id="manual">
- <h2><small>03</small>手動調整の使い方</h2>
+ <h2><span class="n">03</span>手動調整の使い方</h2>
  <p>自動でうまくいかないときや、自分で細かく決めたいときに使う、「手動調整」タブです。上が英語版、下が日本語の録画の波形です。</p>
- <div class="mock" aria-label="手動調整画面の図(イメージ)">
+ <div class="mock pad" role="img" aria-label="手動調整画面の図(イメージ)">
   <div class="tr"><div class="wave"></div>
-   <div class="b" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
-   <div class="b" style="left:32%;width:34%;background:#d5e5ff;color:#2f6fd0">B</div>
-   <div class="b" style="left:66%;width:30%;background:#d8f3dd;color:#1a8a4a">C</div>
+   <div class="seg" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
+   <div class="seg" style="left:32%;width:34%;background:#d5e5ff;color:#2f6fd0">B</div>
+   <div class="seg" style="left:66%;width:30%;background:#d8f3dd;color:#1a8a4a">C</div>
    <div class="p" style="left:32%"></div><div class="lbl">英語版</div></div>
   <div class="tr"><div class="wave"></div>
-   <div class="b" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
-   <div class="b" style="left:32%;width:14%;background:repeating-linear-gradient(45deg,#cfd2d8,#cfd2d8 4px,#e8eaee 4px,#e8eaee 8px);color:#555">CM</div>
-   <div class="b" style="left:46%;width:30%;background:#d5e5ff;color:#2f6fd0">B</div>
-   <div class="b" style="left:76%;width:22%;background:#d8f3dd;color:#1a8a4a">C</div>
+   <div class="seg" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
+   <div class="seg" style="left:32%;width:14%;background:repeating-linear-gradient(45deg,#cfd2d8,#cfd2d8 4px,#e8eaee 4px,#e8eaee 8px);color:#555">CM</div>
+   <div class="seg" style="left:46%;width:30%;background:#d5e5ff;color:#2f6fd0">B</div>
+   <div class="seg" style="left:76%;width:22%;background:#d8f3dd;color:#1a8a4a">C</div>
    <div class="p" style="left:46%"></div><div class="lbl">日本語の録画</div></div>
   <div class="legend"><span><i style="background:#d5e5ff"></i>同じ色 = 英語と日本語で対応する区間</span><span><i style="background:#cfd2d8"></i>灰色の斜線 = 使わない部分(CMなど)</span><span><i style="background:#1a9e57"></i>緑の線 = 「同じ場面」の点</span></div>
-  <div style="color:var(--sub);margin-top:4px">※ 説明用のイメージ図です</div>
  </div>
+ <p class="mock-cap">※ 実際の画面を単純化した説明用の図です。</p>
  <h3>① 同じ場面を登録する</h3>
  <ol>
   <li>上(英語)と下(日本語)の波形をクリックして、<b>同じ場面</b>(同じフレーム)にカーソルを置きます。画面は左右のプレビューで確認できます。</li>
@@ -165,12 +310,12 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
  </ol>
  <p>「A 音で探して合わせる」は、英語側のカーソル付近の音をもとに、日本語側の位置を自動で探して合わせます。「登録するとき、音で微調整する」にチェックすると、登録のたびに数フレーム分を音に合わせて補正します。</p>
  <h3>② 特別な部分を指定する(波形をドラッグして範囲を選んでから、ボタン)</h3>
- <table>
+ <div class="table-wrap"><table>
   <tr><th>ボタン</th><th>選ぶ範囲</th><th>意味</th></tr>
   <tr><td>CM</td><td>下(日本語)</td><td>日本語にだけあるCM。使いません</td></tr>
   <tr><td>暗転・長さ違い</td><td>上と下の両方</td><td>同じ場面だが長さが違う(暗転など)。速さを少し変える / 無音で埋める / 切る、から選びます</td></tr>
   <tr><td>カット</td><td>上(英語)</td><td>日本語版でカットされた場面。無音にするか、英語版の音を使うか選びます</td></tr>
- </table>
+ </table></div>
  <h3>③ 確認して合成</h3>
  <p>下の「指定の一覧」で、行をクリックするとその場所に移動します。ダブルクリックで編集、Delete で削除できます。⚠ が出たときは、音の速さが大きく変わる区間があります(暗転などなら「暗転・長さ違い」で指定してください)。最後に「合成スタート」です。</p>
  <h3>波形の見かた・操作</h3>
@@ -181,28 +326,28 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <li><b>←→</b>: 1コマ移動(Shift: 1秒、Ctrl: 10コマ)</li>
   <li><b>Space・▶再生</b>: カーソル位置から約20秒を再生。もう一度押すと止まります</li>
  </ul>
- <div class="box tip"><b>ヒント</b> 間違えたら Ctrl+Z で戻せます。「設定を保存」で作業内容を json に残せるので、あとで続きから再開できます。</div>
+ <div class="note"><b class="lb">ヒント</b>間違えたら Ctrl+Z で戻せます。「設定を保存」で作業内容を json に残せるので、あとで続きから再開できます。</div>
 </section>
 
 <section id="keys">
- <h2><small>04</small>ショートカット</h2>
- <table>
+ <h2><span class="n">04</span>ショートカット</h2>
+ <div class="table-wrap"><table>
   <tr><th>キー</th><th>動き</th></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>Y</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>やり直し</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>設定を保存 / 名前を付けて保存</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>設定を開く</td></tr>
-  <tr><td><kbd>S</kbd> / <kbd>A</kbd></td><td>『同じ場面』を登録 / 音で探して合わせる</td></tr>
+  <tr><td><kbd>S</kbd> / <kbd>A</kbd></td><td>「同じ場面」を登録 / 音で探して合わせる</td></tr>
   <tr><td><kbd>Tab</kbd></td><td>上下の波形の切り替え</td></tr>
   <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Ctrl</kbd>+<kbd>+</kbd> <kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>波形の拡大・縮小</td></tr>
   <tr><td><kbd>Home</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>波形を全体表示</td></tr>
   <tr><td><kbd>Esc</kbd></td><td>範囲の選択を解除</td></tr>
   <tr><td>一覧で <kbd>Ctrl</kbd>+<kbd>A</kbd> / <kbd>Delete</kbd></td><td>全選択 / 選んだ行を削除(Shift・Ctrl+クリックで複数選択)</td></tr>
- </table>
+ </table></div>
 </section>
 
 <section id="update">
- <h2><small>05</small>更新と元に戻す</h2>
+ <h2><span class="n">05</span>更新のしかた</h2>
  <ul>
   <li>起動時に新しい版があるか自動で確認します(右上の「起動時に更新を確認」で切り替え)。「更新を確認」ボタンで手動でも確認できます。</li>
   <li>更新すると、旧版は <code>syncdub_backups</code> フォルダに残ります(5つまで)。</li>
@@ -211,75 +356,133 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
 </section>
 
 <section id="trouble">
- <h2><small>06</small>困ったとき</h2>
- <table>
+ <h2><span class="n">06</span>困ったとき</h2>
+ <div class="table-wrap"><table>
   <tr><th>症状</th><th>原因と対処</th></tr>
-  <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります(「01 必要なもの」の入れかたを参照)。<code>ffmpeg -version</code> を確認してください。</td></tr>
-  <tr><td>「要確認」が出る</td><td>声だけの場面などは照合が弱いです。その区間の先頭を聞き比べて、ずれていたら手動調整で『同じ場面』を登録します。</td></tr>
-  <tr><td>後半に向かって少しずつずれる</td><td>録画と英語版で速さが微妙に違うことがあります。区間の終わり近くにも『同じ場面』を1つ登録してください。</td></tr>
+  <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります(「01 必要なものと導入」の「ffmpeg の入れかた」を参照)。<code>ffmpeg -version</code> を確認してください。</td></tr>
+  <tr><td>「要確認」が出る</td><td>声だけの場面などは照合が弱いです。その区間の先頭を聞き比べて、ずれていたら手動調整で「同じ場面」を登録します。</td></tr>
+  <tr><td>後半に向かって少しずつずれる</td><td>録画と英語版で速さが微妙に違うことがあります。区間の終わり近くにも「同じ場面」を1つ登録してください。</td></tr>
   <tr><td>暗転の長さが違って音が速く/遅くなる</td><td>「暗転・長さ違い」で、上下の範囲を指定してください(速さを変える / 無音で埋める / 切る)。</td></tr>
   <tr><td>再生しても音が出ない</td><td>ffmpeg が必要です。また、Windows の音量・出力先を確認してください。</td></tr>
-  <tr><td>ドラッグ&ドロップが効かない</td><td><code>pip install tkinterdnd2</code> を実行して、再起動してください。クリックしてファイルを選ぶこともできます。</td></tr>
-  <tr><td>「区間を判定できませんでした」と出る</td><td>音が少ない場面や、短い録画(数十秒など)で出ることがあります。最新版に更新して、もう一度「自動で合わせる」を押してください。それでもだめなら、手動調整で『同じ場面』を登録します。</td></tr>
+  <tr><td>ドラッグ&amp;ドロップが効かない</td><td><code>pip install tkinterdnd2</code> を実行して、再起動してください。クリックしてファイルを選ぶこともできます。</td></tr>
+  <tr><td>「区間を判定できませんでした」と出る</td><td>音が少ない場面や、短い録画(数十秒など)で出ることがあります。最新版に更新して、もう一度「自動で合わせる」を押してください。それでもだめなら、手動調整で「同じ場面」を登録します。</td></tr>
   <tr><td>つなぎ目で「プツッ」と音が聞こえる</td><td>最新版では、つなぎ目の処理を改善しています。更新してから作り直してください。</td></tr>
   <tr><td>手動調整の「指定の一覧」が見えない・狭い</td><td>画面の高さが足りないときに起こります。ウィンドウを縦に広げてください(最新版では見えやすく改善済み)。</td></tr>
   <tr><td>ダブルクリックしても起動しない</td><td>Python が入っていないか、<code>tcl/tk</code> を外してインストールした可能性があります。Python を入れ直してください(上の「必要なもの」参照)。</td></tr>
   <tr><td>更新に失敗した・調子が悪い</td><td>「元に戻す」で前の版に戻せます。</td></tr>
- </table>
- <p style="font-size:14px;color:var(--sub)">ここにない症状は、<a href="https://github.com/tatata17/syncdub/issues">GitHub の Issues</a> に、画面の様子とどのファイルで起きたかを書いてください。</p>
+ </table></div>
+ <p class="muted">ここにない症状は、<a href="https://github.com/tatata17/syncdub/issues">GitHub の Issues</a> に、画面の様子とどのファイルで起きたかを書いてください。</p>
 </section>
 
 <section id="files">
- <h2><small>07</small>ファイルの場所</h2>
- <table>
+ <h2><span class="n">07</span>ファイルの場所</h2>
+ <div class="table-wrap"><table>
   <tr><th>ファイル</th><th>内容</th></tr>
   <tr><td><code>syncdub.pyw</code></td><td>本体(これ1つで動きます)</td></tr>
   <tr><td><code>syncdub_settings.json</code></td><td>設定(更新確認のオン/オフ)。本体と同じフォルダ</td></tr>
   <tr><td><code>syncdub_backups/</code></td><td>更新前の旧版(最大5つ)</td></tr>
   <tr><td>出来上がりの mkv</td><td>保存先に指定した場所(既定は英語版と同じフォルダの <code>〜_jpdub.mkv</code>)。作業中の一時ファイルは Windows の一時フォルダに作られ、終わると消えます</td></tr>
   <tr><td>プロジェクト(.json)</td><td>「設定を保存」で作る、作業内容の保存ファイル(任意)</td></tr>
- </table>
+ </table></div>
 </section>
 
 <section id="history">
- <h2><small>08</small>更新履歴</h2>
- <p style="color:var(--sub);font-size:14px">新しい順です。<span id="hver"></span></p>
- <div id="cl">読み込んでいます…</div>
+ <h2><span class="n">08</span>更新履歴</h2>
+ <p>新しい順です。同じ日の更新はまとめています。過去の日付は、クリックで開きます。</p>
+ <div id="cl"><p class="muted">読み込んでいます…</p></div>
+ <noscript><p><a href="https://github.com/tatata17/syncdub/blob/main/docs/changelog.json">更新履歴(GitHub)</a></p></noscript>
 </section>
+
+<footer>
+  <a href="https://github.com/tatata17/syncdub">GitHub リポジトリ</a> ・ 不具合やご要望は <a href="https://github.com/tatata17/syncdub/issues">Issues</a> へ
+</footer>
 </main>
 </div>
-<footer>syncdub — <a href="https://github.com/tatata17/syncdub">GitHub リポジトリ</a> / このページは <code>docs/index.html</code> から公開されています</footer>
+
+<script>window.DOC={repo:"tatata17/syncdub",file:"syncdub.pyw",changelog:"changelog.json",changelogPath:"docs/changelog.json"};</script>
 <script>
 (function(){
- var root=document.documentElement,btn=document.getElementById('theme');
- function get(){try{return localStorage.getItem('theme')}catch(e){return null}}
- function set(v){try{localStorage.setItem('theme',v)}catch(e){}}
- var t=get()||(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
- function apply(t){root.setAttribute('data-theme',t);btn.textContent=t==='dark'?'明るい表示':'暗い表示'}
- apply(t);btn.onclick=function(){t=t==='dark'?'light':'dark';set(t);apply(t)};
- var toc=document.getElementById('toc');
- document.getElementById('tocbtn').onclick=function(e){e.stopPropagation();toc.classList.toggle('open')};
- document.addEventListener('click',function(e){if(!toc.contains(e.target))toc.classList.remove('open')});
- document.addEventListener('keydown',function(e){if(e.key==='Escape')toc.classList.remove('open')});
- toc.addEventListener('click',function(e){if(e.target.tagName==='A')toc.classList.remove('open')});
- function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
- fetch('https://raw.githubusercontent.com/tatata17/syncdub/main/version.json',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
-  document.getElementById('latest').textContent='最新版: v'+j.version;
-  document.getElementById('hver').textContent='最新版は v'+j.version+' です。';
- }).catch(function(){document.getElementById('latest').textContent='(最新版を取得できませんでした)'});
- fetch('changelog.json',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
-  var byDate={},order=[];
-  list.forEach(function(e){if(!byDate[e.date]){byDate[e.date]=[];order.push(e.date)}byDate[e.date].push(e)});
-  var h='';
-  order.forEach(function(d,i){
-   var inner='';
-   byDate[d].forEach(function(e){
-    inner+='<div class="cl"><h4>v'+esc(e.version)+(e.tags||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>'}).join('')+'</h4><ul>'+e.notes.map(function(n){return '<li>'+esc(n)+'</li>'}).join('')+'</ul></div>';
-   });
-   h+=i===0?'<h3>'+esc(d)+'</h3>'+inner:'<details class="cl"><summary>'+esc(d)+'(クリックで開きます)</summary>'+inner+'</details>';
+  var C=window.DOC||{};
+  var root=document.documentElement;
+  function $(id){return document.getElementById(id);}
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+
+  // 明るい/暗い表示の切り替え(選んだものはこのブラウザに覚える)
+  var themeBtn=$("theme");
+  function isDark(){var t=root.getAttribute("data-theme");return t?t==="dark":matchMedia("(prefers-color-scheme: dark)").matches;}
+  function syncTheme(){themeBtn.textContent=isDark()?"明るい表示":"暗い表示";}
+  themeBtn.addEventListener("click",function(){
+    var next=isDark()?"light":"dark";root.setAttribute("data-theme",next);
+    try{localStorage.setItem("theme",next);}catch(e){}
+    syncTheme();
   });
-  document.getElementById('cl').innerHTML=h;
- }).catch(function(){document.getElementById('cl').innerHTML='更新履歴を読み込めませんでした。<a href="https://github.com/tatata17/syncdub/blob/main/docs/changelog.json">changelog.json</a> を直接ご覧ください。'});
+  syncTheme();
+
+  // スマホの目次(ボタンで開閉。項目を押す・外を押す・Esc で閉じる)
+  var toc=$("toc"),tocBtn=$("tocBtn");
+  function closeToc(){toc.classList.remove("open");tocBtn.setAttribute("aria-expanded","false");}
+  tocBtn.addEventListener("click",function(ev){ev.stopPropagation();var o=toc.classList.toggle("open");tocBtn.setAttribute("aria-expanded",o?"true":"false");});
+  toc.addEventListener("click",function(ev){if(ev.target.closest("a"))closeToc();});
+  document.addEventListener("click",function(ev){if(!toc.contains(ev.target))closeToc();});
+  document.addEventListener("keydown",function(ev){if(ev.key==="Escape")closeToc();});
+
+  // 今読んでいる章を目次で強調
+  var links=[].slice.call(document.querySelectorAll("nav.toc a"));
+  var map={};links.forEach(function(a){map[a.getAttribute("href").slice(1)]=a;});
+  if("IntersectionObserver" in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){
+      if(e.isIntersecting){links.forEach(function(a){a.classList.remove("on");});var a=map[e.target.id];if(a)a.classList.add("on");}
+    });},{rootMargin:"-20% 0px -70% 0px"});
+    Object.keys(map).forEach(function(id){var el=$(id);if(el)io.observe(el);});
+  }
+
+  // 表の各セルに見出しの名前を付ける(スマホのカード表示で使う)
+  [].forEach.call(document.querySelectorAll(".table-wrap table"),function(t){
+    var head=[].map.call(t.rows[0].cells,function(c){return c.textContent.trim();});
+    [].slice.call(t.rows,1).forEach(function(r){[].forEach.call(r.cells,function(c,i){if(head[i])c.setAttribute("data-label",head[i]);});});
+  });
+
+  // 最新版の表示
+  var raw="https://raw.githubusercontent.com/"+C.repo+"/main/";
+  var ver=$("ver");
+  fetch(raw+"version.json",{cache:"no-store"}).then(function(r){return r.json();}).then(function(j){
+    ver.textContent="最新版: v"+j.version+(j.date?"("+j.date+")":"");
+    var n=$("notes");
+    if(n&&j.notes){n.innerHTML='<p class="note"><b class="lb">最新版の更新内容(v'+esc(j.version)+')</b>'+esc([].concat(j.notes).join("\n")).replace(/\n/g,"<br>")+'</p>';}
+  }).catch(function(){ver.textContent="";});
+
+  // ダウンロード(そのままだと GitHub が画面に文字を表示してしまうので、ファイルとして保存させる)
+  var dl=$("dl"),fallback="https://github.com/"+C.repo+"/raw/main/"+C.file;
+  dl.addEventListener("click",function(ev){
+    ev.preventDefault();
+    fetch(raw+C.file,{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.blob();}).then(function(b){
+      var a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=C.file;document.body.appendChild(a);a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},1000);
+    }).catch(function(){location.href=fallback;});
+  });
+
+  // 更新履歴(changelog.json から。日付ごとにまとめ、新しい日だけ開く)
+  var box=$("cl");
+  if(box&&C.changelog){
+    fetch(C.changelog,{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(data){
+      var list=Array.isArray(data)?data:(data.releases||[]),days=[],idx={};
+      list.forEach(function(r){var d=r.date||"";if(!(d in idx)){idx[d]=days.length;days.push({date:d,rel:[]});}days[idx[d]].rel.push(r);});
+      box.innerHTML=days.map(function(day,i){
+        var v=day.rel.map(function(r){return "v"+r.version;});
+        var vr=v.length>1?v[v.length-1]+"〜"+v[0]:v[0];
+        var items=[];
+        day.rel.forEach(function(r){
+          var tags=(r.tags||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>';}).join("");
+          [].concat(r.notes||[]).forEach(function(n,j){items.push("<li>"+(j===0?tags:"")+esc(n)+"</li>");});
+        });
+        var head='<span class="d">'+esc(day.date)+'</span><span class="vr">'+esc(vr)+'</span>'+(i===0?'<span class="new">最新</span>':"");
+        return i===0?'<div class="day">'+head+"<ul>"+items.join("")+"</ul></div>"
+                    :'<details class="day"><summary>'+head+"</summary><ul>"+items.join("")+"</ul></details>";
+      }).join("");
+    }).catch(function(){
+      box.innerHTML='<p>読み込めませんでした。<a href="https://github.com/'+C.repo+'/blob/main/'+C.changelogPath+'">GitHub の更新履歴</a>をご覧ください。</p>';
+    });
+  }
 })();
 </script>
 </body>
