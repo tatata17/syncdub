@@ -10,3 +10,6 @@
 
 ## 公開手順
 `syncdub.pyw` の `APP_VERSION` と `version.json` の `version` を同じ値に上げてから push する。
+
+## 使い方ページ
+`docs/index.html` (GitHub Pages: Settings → Pages → Branch `main` / `/docs`)。更新履歴は `docs/changelog.json` に新しい順で追記する。

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>syncdub 吹き替え音声シンクロツール 使い方</title>
+<meta name="description" content="日本語吹き替え音声を、きれいな英語版の映像に合わせて1本の動画にするWindows向けツール「syncdub」の使い方と更新履歴。">
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--fg:#1f2430;--sub:#5d6575;--line:#dfe3ec;--acc:#2f6fd0;--acc2:#1a9e57;--warn:#fff4d6;--warnb:#e5b94a;--tip:#e8f3ff;--tipb:#8ab8ee;--code:#eef1f7}
+[data-theme=dark]{--bg:#14171d;--card:#1c2029;--fg:#e6e9ef;--sub:#9aa3b4;--line:#2d3340;--acc:#6ea4f5;--acc2:#43c07f;--warn:#3a3219;--warnb:#a98a2b;--tip:#16283d;--tipb:#3d6ca8;--code:#262b36}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.8 "Yu Gothic UI","Hiragino Sans","Meiryo",sans-serif}
+a{color:var(--acc)}
+.top{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--card);border-bottom:1px solid var(--line)}
+.logo{display:flex;align-items:center;gap:8px;font-weight:700}
+.logo svg{width:28px;height:28px}
+.top .sp{flex:1}
+.top button,.top a.btn{font:inherit;font-size:14px;padding:4px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none}
+#tocbtn{display:none}
+.wrap{max-width:1040px;margin:0 auto;padding:20px 16px 60px;display:grid;grid-template-columns:220px 1fr;gap:28px}
+nav.toc{position:sticky;top:70px;align-self:start;font-size:14px;max-height:calc(100vh - 90px);overflow:auto}
+nav.toc b{display:block;margin-bottom:6px;color:var(--sub)}
+nav.toc ol{margin:0;padding-left:1.4em}
+nav.toc a{text-decoration:none;color:var(--fg)}
+nav.toc a:hover{color:var(--acc)}
+main section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 24px 18px;margin-bottom:18px}
+h1{font-size:28px;margin:6px 0 4px}
+h2{font-size:22px;margin:14px 0 6px;padding-bottom:6px;border-bottom:2px solid var(--acc)}
+h2 small{color:var(--acc);font-size:.7em;margin-right:6px}
+h3{font-size:17px;margin:18px 0 4px}
+.hero{background:linear-gradient(135deg,#1e3c8c,#3a78d0);color:#fff;border:0}
+.hero p,.hero li{color:#eaf1ff}.hero h1{color:#fff}.hero code{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.4);color:#fff}
+.dl{display:inline-block;margin:8px 10px 4px 0;padding:10px 20px;background:#fff;color:#1e3c8c;font-weight:700;border-radius:8px;text-decoration:none}
+.ver{font-size:14px;opacity:.9}
+.box{border-left:5px solid;border-radius:6px;padding:8px 14px;margin:12px 0}
+.tip{background:var(--tip);border-color:var(--tipb)}.warn{background:var(--warn);border-color:var(--warnb)}
+table{border-collapse:collapse;width:100%;margin:10px 0;font-size:15px}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+kbd,code{background:var(--code);border:1px solid var(--line);border-radius:4px;padding:0 5px;font-size:.9em}
+.mock{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--bg);font-size:12px;margin:10px 0}
+.mock .tr{position:relative;height:46px;margin:4px 0;border:1px solid var(--line);background:var(--card);border-radius:4px;overflow:hidden}
+.mock .b{position:absolute;top:0;bottom:0;font-weight:700;padding:2px 4px;font-size:12px}
+.mock .lbl{position:absolute;right:6px;top:2px;color:var(--sub)}
+.mock .p{position:absolute;top:0;bottom:0;width:3px;background:var(--acc2)}
+.mock .wave{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--acc);opacity:.6}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:13px;margin-top:6px}.legend i{display:inline-block;width:14px;height:14px;vertical-align:-2px;border-radius:3px;margin-right:4px}
+.cl{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin:10px 0;background:var(--bg)}
+.cl h4{margin:2px 0;font-size:16px}.cl .tag{font-size:12px;background:var(--acc);color:#fff;border-radius:10px;padding:1px 8px;margin-left:6px}
+.cl ul{margin:4px 0 6px;padding-left:1.3em}
+details.cl>summary{cursor:pointer;font-weight:700}
+footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
+@media(max-width:820px){.wrap{display:block}#tocbtn{display:inline-block}nav.toc{display:none;position:static;max-height:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px}nav.toc.open{display:block}main section{padding:6px 14px 14px}}
+</style>
+</head>
+<body>
+<div class="top">
+ <div class="logo"><svg viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="12" fill="#2f6fd0"/><g fill="#fff"><rect x="10" y="18" width="4" height="8"/><rect x="16" y="10" width="4" height="24"/><rect x="22" y="14" width="4" height="16"/><rect x="28" y="6" width="4" height="32"/><rect x="34" y="12" width="4" height="20"/><rect x="40" y="16" width="4" height="12"/></g><g fill="#ffaa3c"><rect x="14" y="40" width="4" height="8"/><rect x="20" y="36" width="4" height="16"/><rect x="26" y="32" width="4" height="24"/><rect x="32" y="38" width="4" height="12"/><rect x="38" y="34" width="4" height="20"/><rect x="44" y="40" width="4" height="8"/></g></svg>syncdub</div>
+ <span class="sp"></span>
+ <button id="tocbtn" type="button">目次</button>
+ <a class="btn" href="https://github.com/tatata17/syncdub">GitHub</a>
+ <button id="theme" type="button">暗い表示</button>
+</div>
+<div class="wrap">
+<nav class="toc" id="toc"><b>目次</b><ol>
+ <li><a href="#about">はじめに</a></li>
+ <li><a href="#install">必要なものと導入</a></li>
+ <li><a href="#basic">かんたんな使い方</a></li>
+ <li><a href="#manual">手動調整の使い方</a></li>
+ <li><a href="#keys">ショートカット</a></li>
+ <li><a href="#update">更新と元に戻す</a></li>
+ <li><a href="#trouble">困ったとき</a></li>
+ <li><a href="#files">ファイルの場所</a></li>
+ <li><a href="#history">更新履歴</a></li>
+</ol></nav>
+<main>
+<section class="hero" id="about">
+ <h1>syncdub 吹き替え音声シンクロツール</h1>
+ <p>TV録画などに入っている<b>日本語吹き替えの音声</b>を、きれいな<b>英語版の映像</b>に合わせて、1本の動画(mkv)にするWindows向けのツールです。映像は再エンコードせず、そのままコピーします。</p>
+ <ul>
+  <li>音の波形を照合して、CMや暗転、カットされた場面を<b>自動で見つけて</b>合わせます</li>
+  <li>うまくいかない所は、波形と画面を見ながら<b>手動で指定</b>(同じ場面・CM・暗転・カット)</li>
+  <li>出来上がりは、日本語音声が最初(既定)・英語音声も残った mkv</li>
+  <li>ファイルは1つだけ(<code>syncdub.pyw</code>)。更新はGitHub経由で自動</li>
+ </ul>
+ <a class="dl" id="dl" href="https://raw.githubusercontent.com/tatata17/syncdub/main/syncdub.pyw" download>syncdub.pyw をダウンロード</a>
+ <span class="ver" id="latest">最新版を確認中…</span>
+</section>
+
+<section id="install">
+ <h2><small>01</small>必要なものと導入</h2>
+ <table>
+  <tr><th>必要なもの</th><th>説明</th></tr>
+  <tr><td>Python 3</td><td>python.org から入れます(「Add python.exe to PATH」にチェック)</td></tr>
+  <tr><td>numpy</td><td><code>pip install numpy</code></td></tr>
+  <tr><td>ffmpeg / ffprobe</td><td>PATH の通った場所に置きます(<code>ffmpeg -version</code> が動けばOK)</td></tr>
+  <tr><td>tkinterdnd2(任意)</td><td><code>pip install tkinterdnd2</code>。入れるとファイルのドラッグ&ドロップが使えます</td></tr>
+ </table>
+ <ol>
+  <li>上の「ダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
+  <li>好きなフォルダに置いて、ダブルクリックで起動します。</li>
+ </ol>
+ <div class="box tip"><b>ヒント</b> 設定ファイルや旧版のバックアップは、<code>syncdub.pyw</code> と同じフォルダにできます。専用のフォルダに置くのがおすすめです。</div>
+</section>
+
+<section id="basic">
+ <h2><small>02</small>かんたんな使い方</h2>
+ <p>「かんたん」タブで、上から順に4つ進めるだけです。</p>
+ <ol>
+  <li><b>ファイルを選ぶ</b> … 「英語版の映像」と「日本語の録画」の枠に、ファイルをドロップ(またはクリックして選択)します。読み込みが終わるまで待ちます。</li>
+  <li><b>自動で合わせる</b> … 「自動で合わせる」ボタンを押します。音を照合して、対応する場所を探します(長い動画は数分かかります)。<br>※ ファイルを選んだだけでは始まりません。</li>
+  <li><b>結果を確認</b> … 区間(A, B, C…)の表が出ます。行を選ぶと、その区間の先頭を聞き比べられます。「要確認」の行は特に確かめてください。</li>
+  <li><b>合成する</b> … 保存先を確かめて「合成スタート」。出来上がると「完成しました」と出ます。</li>
+ </ol>
+ <div class="box warn"><b>注意</b> 声だけの場面(BGMや効果音が少ない所)は、音の照合が当たりにくく、「要確認」になることがあります。その場合は手動調整で『同じ場面』を足してください。</div>
+</section>
+
+<section id="manual">
+ <h2><small>03</small>手動調整の使い方</h2>
+ <p>自動でうまくいかないときや、自分で細かく決めたいときに使う、「手動調整」タブです。上が英語版、下が日本語の録画の波形です。</p>
+ <div class="mock" aria-label="手動調整画面の図(イメージ)">
+  <div class="tr"><div class="wave"></div>
+   <div class="b" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
+   <div class="b" style="left:32%;width:34%;background:#d5e5ff;color:#2f6fd0">B</div>
+   <div class="b" style="left:66%;width:30%;background:#d8f3dd;color:#1a8a4a">C</div>
+   <div class="p" style="left:32%"></div><div class="lbl">英語版</div></div>
+  <div class="tr"><div class="wave"></div>
+   <div class="b" style="left:2%;width:30%;background:#ffd5db;color:#c0394d">A</div>
+   <div class="b" style="left:32%;width:14%;background:repeating-linear-gradient(45deg,#cfd2d8,#cfd2d8 4px,#e8eaee 4px,#e8eaee 8px);color:#555">CM</div>
+   <div class="b" style="left:46%;width:30%;background:#d5e5ff;color:#2f6fd0">B</div>
+   <div class="b" style="left:76%;width:22%;background:#d8f3dd;color:#1a8a4a">C</div>
+   <div class="p" style="left:46%"></div><div class="lbl">日本語の録画</div></div>
+  <div class="legend"><span><i style="background:#d5e5ff"></i>同じ色 = 英語と日本語で対応する区間</span><span><i style="background:#cfd2d8"></i>灰色の斜線 = 使わない部分(CMなど)</span><span><i style="background:#1a9e57"></i>緑の線 = 「同じ場面」の点</span></div>
+  <div style="color:var(--sub);margin-top:4px">※ 説明用のイメージ図です</div>
+ </div>
+ <h3>① 同じ場面を登録する</h3>
+ <ol>
+  <li>上(英語)と下(日本語)の波形をクリックして、<b>同じ場面</b>(同じフレーム)にカーソルを置きます。画面は左右のプレビューで確認できます。</li>
+  <li>「S この2つは『同じ場面』」を押します。登録した点が音合わせの基準になります。</li>
+ </ol>
+ <p>「A 音で探して合わせる」は、英語側のカーソル付近の音をもとに、日本語側の位置を自動で探して合わせます。「登録するとき、音で微調整する」にチェックすると、登録のたびに数フレーム分を音に合わせて補正します。</p>
+ <h3>② 特別な部分を指定する(波形をドラッグして範囲を選んでから、ボタン)</h3>
+ <table>
+  <tr><th>ボタン</th><th>選ぶ範囲</th><th>意味</th></tr>
+  <tr><td>CM</td><td>下(日本語)</td><td>日本語にだけあるCM。使いません</td></tr>
+  <tr><td>暗転・長さ違い</td><td>上と下の両方</td><td>同じ場面だが長さが違う(暗転など)。速さを少し変える / 無音で埋める / 切る、から選びます</td></tr>
+  <tr><td>カット</td><td>上(英語)</td><td>日本語版でカットされた場面。無音にするか、英語版の音を使うか選びます</td></tr>
+ </table>
+ <h3>③ 確認して合成</h3>
+ <p>下の「指定の一覧」で、行をクリックするとその場所に移動します。ダブルクリックで編集、Delete で削除できます。⚠ が出たときは、音の速さが大きく変わる区間があります(暗転などなら「暗転・長さ違い」で指定してください)。最後に「合成スタート」です。</p>
+ <h3>波形の見かた・操作</h3>
+ <ul>
+  <li><b>ドラッグ</b>: 範囲を選ぶ / <b>クリック</b>: カーソルを置く</li>
+  <li><b>マウスホイール・↑↓キー</b>: 拡大縮小(Reaper風。上下は同じ縮尺になります)</li>
+  <li><b>Shift+ホイール・右ドラッグ</b>: 横にずらす</li>
+  <li><b>←→</b>: 1コマ移動(Shift: 1秒、Ctrl: 10コマ)</li>
+  <li><b>Space・▶再生</b>: カーソル位置から約20秒を再生。もう一度押すと止まります</li>
+ </ul>
+ <div class="box tip"><b>ヒント</b> 間違えたら Ctrl+Z で戻せます。「設定を保存」で作業内容を json に残せるので、あとで続きから再開できます。</div>
+</section>
+
+<section id="keys">
+ <h2><small>04</small>ショートカット</h2>
+ <table>
+  <tr><th>キー</th><th>動き</th></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>Y</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>やり直し</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>設定を保存 / 名前を付けて保存</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>設定を開く</td></tr>
+  <tr><td><kbd>S</kbd> / <kbd>A</kbd></td><td>『同じ場面』を登録 / 音で探して合わせる</td></tr>
+  <tr><td><kbd>Tab</kbd></td><td>上下の波形の切り替え</td></tr>
+  <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Ctrl</kbd>+<kbd>+</kbd> <kbd>Ctrl</kbd>+<kbd>-</kbd></td><td>波形の拡大・縮小</td></tr>
+  <tr><td><kbd>Home</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>波形を全体表示</td></tr>
+  <tr><td><kbd>Esc</kbd></td><td>範囲の選択を解除</td></tr>
+  <tr><td>一覧で <kbd>Ctrl</kbd>+<kbd>A</kbd> / <kbd>Delete</kbd></td><td>全選択 / 選んだ行を削除(Shift・Ctrl+クリックで複数選択)</td></tr>
+ </table>
+</section>
+
+<section id="update">
+ <h2><small>05</small>更新と元に戻す</h2>
+ <ul>
+  <li>起動時に新しい版があるか自動で確認します(右上の「起動時に更新を確認」で切り替え)。「更新を確認」ボタンで手動でも確認できます。</li>
+  <li>更新すると、旧版は <code>syncdub_backups</code> フォルダに残ります(5つまで)。</li>
+  <li>新しい版で調子が悪いときは、「元に戻す」で1つ前の版に戻せます。</li>
+ </ul>
+</section>
+
+<section id="trouble">
+ <h2><small>06</small>困ったとき</h2>
+ <table>
+  <tr><th>症状</th><th>原因と対処</th></tr>
+  <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります。<code>ffmpeg -version</code> を確認してください。</td></tr>
+  <tr><td>「要確認」が出る</td><td>声だけの場面などは照合が弱いです。その区間の先頭を聞き比べて、ずれていたら手動調整で『同じ場面』を登録します。</td></tr>
+  <tr><td>後半に向かって少しずつずれる</td><td>録画と英語版で速さが微妙に違うことがあります。区間の終わり近くにも『同じ場面』を1つ登録してください。</td></tr>
+  <tr><td>暗転の長さが違って音が速く/遅くなる</td><td>「暗転・長さ違い」で、上下の範囲を指定してください(速さを変える / 無音で埋める / 切る)。</td></tr>
+  <tr><td>再生しても音が出ない</td><td>ffmpeg が必要です。また、Windows の音量・出力先を確認してください。</td></tr>
+  <tr><td>ドラッグ&ドロップが効かない</td><td><code>pip install tkinterdnd2</code> を実行して、再起動してください。クリックしてファイルを選ぶこともできます。</td></tr>
+  <tr><td>更新に失敗した・調子が悪い</td><td>「元に戻す」で前の版に戻せます。</td></tr>
+ </table>
+</section>
+
+<section id="files">
+ <h2><small>07</small>ファイルの場所</h2>
+ <table>
+  <tr><th>ファイル</th><th>内容</th></tr>
+  <tr><td><code>syncdub.pyw</code></td><td>本体(これ1つで動きます)</td></tr>
+  <tr><td><code>syncdub_settings.json</code></td><td>設定(更新確認のオン/オフ)。本体と同じフォルダ</td></tr>
+  <tr><td><code>syncdub_backups/</code></td><td>更新前の旧版(最大5つ)</td></tr>
+  <tr><td>出来上がりの mkv</td><td>保存先に指定した場所。出力の隣に、作業用のファイルは残りません</td></tr>
+  <tr><td>プロジェクト(.json)</td><td>「設定を保存」で作る、作業内容の保存ファイル(任意)</td></tr>
+ </table>
+</section>
+
+<section id="history">
+ <h2><small>08</small>更新履歴</h2>
+ <p style="color:var(--sub);font-size:14px">新しい順です。<span id="hver"></span></p>
+ <div id="cl">読み込んでいます…</div>
+</section>
+</main>
+</div>
+<footer>syncdub — <a href="https://github.com/tatata17/syncdub">GitHub リポジトリ</a> / このページは <code>docs/index.html</code> から公開されています</footer>
+<script>
+(function(){
+ var root=document.documentElement,btn=document.getElementById('theme');
+ function get(){try{return localStorage.getItem('theme')}catch(e){return null}}
+ function set(v){try{localStorage.setItem('theme',v)}catch(e){}}
+ var t=get()||(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+ function apply(t){root.setAttribute('data-theme',t);btn.textContent=t==='dark'?'明るい表示':'暗い表示'}
+ apply(t);btn.onclick=function(){t=t==='dark'?'light':'dark';set(t);apply(t)};
+ var toc=document.getElementById('toc');
+ document.getElementById('tocbtn').onclick=function(){toc.classList.toggle('open')};
+ toc.addEventListener('click',function(e){if(e.target.tagName==='A')toc.classList.remove('open')});
+ function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+ fetch('https://raw.githubusercontent.com/tatata17/syncdub/main/version.json',{cache:'no-store'}).then(function(r){return r.json()}).then(function(j){
+  document.getElementById('latest').textContent='最新版: v'+j.version;
+  document.getElementById('hver').textContent='最新版は v'+j.version+' です。';
+ }).catch(function(){document.getElementById('latest').textContent='(最新版を取得できませんでした)'});
+ fetch('changelog.json',{cache:'no-store'}).then(function(r){return r.json()}).then(function(list){
+  var byDate={},order=[];
+  list.forEach(function(e){if(!byDate[e.date]){byDate[e.date]=[];order.push(e.date)}byDate[e.date].push(e)});
+  var h='';
+  order.forEach(function(d,i){
+   var inner='';
+   byDate[d].forEach(function(e){
+    inner+='<div class="cl"><h4>v'+esc(e.version)+(e.tags||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>'}).join('')+'</h4><ul>'+e.notes.map(function(n){return '<li>'+esc(n)+'</li>'}).join('')+'</ul></div>';
+   });
+   h+=i===0?'<h3>'+esc(d)+'</h3>'+inner:'<details class="cl"><summary>'+esc(d)+'(クリックで開きます)</summary>'+inner+'</details>';
+  });
+  document.getElementById('cl').innerHTML=h;
+ }).catch(function(){document.getElementById('cl').innerHTML='更新履歴を読み込めませんでした。<a href="https://github.com/tatata17/syncdub/blob/main/docs/changelog.json">changelog.json</a> を直接ご覧ください。'});
+})();
+</script>
+</body>
+</html>
