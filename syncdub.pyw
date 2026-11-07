@@ -20,6 +20,8 @@ import os
 import urllib.request
 import io
 import queue
+import shutil
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -233,6 +235,15 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0):
 
 
 def main(argv=None):
+    tmp = []  # 作業用の一時ファイルは、成功・失敗にかかわらず最後に必ず消す
+    try:
+        _main(argv, tmp)
+    finally:
+        for f in tmp:
+            Path(f).unlink(missing_ok=True)
+
+
+def _main(argv, tmp):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project")
     ap.add_argument("--dry-run", action="store_true", help="ffmpegを実行せずコマンドを表示")
@@ -281,7 +292,10 @@ def main(argv=None):
     for w in warns:
         print("警告:", w, file=sys.stderr)
 
-    script = base / (pp.stem + ".filter.txt")
+    fd, script = tempfile.mkstemp(prefix="syncdub_", suffix=".filter.txt")
+    os.close(fd)
+    script = Path(script)
+    tmp.append(script)
     script.write_text(filt, encoding="utf-8")
 
     if a.audio_only:
@@ -323,7 +337,7 @@ def main(argv=None):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.5"
+APP_VERSION = "2026.11.07.6"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -331,7 +345,20 @@ TEST_BASE = os.environ.get("SYNCDUB_TEST_BASE")  # 試験用: ローカルサー
 SR = 8000          # 波形・解析用のサンプルレート
 PYR = 64           # 波形ピラミッドの縮約率
 NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
-BAND_COLORS = ["#4c8bf5", "#e8833a", "#3aa76d", "#b455d6", "#d4a017", "#d9534f"]
+# 区間ごとの色(薄い色=帯、濃い色=文字や境界線)。英語側・日本語側で同じ区間は同じ色になる
+PASTEL = ["#ffd9d9", "#d9e8ff", "#dcf3d2", "#fff1c9", "#e8dcff", "#ffdcee", "#d3f2f1", "#ece9cf"]
+DARK = ["#c0392b", "#2f6fd0", "#2e8b3d", "#b8860b", "#7b4fd0", "#c2307a", "#1f8f8c", "#7a7a2a"]
+FIT_JA = {"stretch": "伸縮して合わせる", "pad": "足りない分は無音で埋める", "trim": "余った分は切り捨てる"}
+JA_FIT = {v: k for k, v in FIT_JA.items()}
+
+
+def seg_letter(i):
+    """0→A, 1→B, … 25→Z, 26→AA"""
+    i, out = i + 1, ""
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = chr(65 + r) + out
+    return out
 
 
 # ------------------------------------------------------------------ GitHub自己更新
@@ -791,13 +818,15 @@ def auto_align(en, jp, progress=lambda f, m: None):
 
 class Track(tk.Canvas):
     def __init__(self, master, app, key, title, **kw):
-        super().__init__(master, height=110, bg="#15171c", highlightthickness=1,
-                         highlightbackground="#444", takefocus=True, **kw)
+        super().__init__(master, height=104, bg="#fbfbfd", highlightthickness=1,
+                         highlightbackground="#bbb", takefocus=True, **kw)
         self.app, self.key, self.title = app, key, title
         self.media = None
         self.vs, self.vspan = 0.0, 60.0
         self.cursor, self.mark = 0.0, None
-        self.bands = []
+        self.bands = []      # [(開始, 終了, 区間番号)]
+        self.sel = None      # 選択中の区間番号
+        self.gap_text = ""   # どの区間にも入らない部分に出す説明
         self._pan = None
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self.on_click)
@@ -847,50 +876,89 @@ class Track(tk.Canvas):
         W, H = self.winfo_width(), self.winfo_height()
         if W < 10:
             return
-        mid = (H - 22) / 2 + 2
-        self.create_line(0, mid, W, mid, fill="#2c303a")
+        body = H - 22  # 波形エリアの高さ (下は目盛り)
+        mid = body / 2
+        v1 = self.vs + self.vspan
+        # --- 区間の色帯 (波形の下地)
+        for a, b, i in self.bands:
+            xa, xb = self.x_of(a), self.x_of(b)
+            if xb < 0 or xa > W:
+                continue
+            self.create_rectangle(max(xa, 0), 0, min(xb, W), body, fill=PASTEL[i % len(PASTEL)], outline="")
+        # --- どの区間にも入らない部分(英語側=無音になる / 日本語側=使われない)
+        if self.bands:
+            cur, gaps = self.vs, []
+            for a, b in sorted((a, b) for a, b, _ in self.bands):
+                if a > cur:
+                    gaps.append((cur, min(a, v1)))
+                cur = max(cur, b)
+                if cur >= v1:
+                    break
+            if cur < v1:
+                gaps.append((cur, v1))
+            for a, b in gaps:
+                if b <= a:
+                    continue
+                xa, xb = max(self.x_of(a), 0), min(self.x_of(b), W)
+                self.create_rectangle(xa, 0, xb, body, fill="#cfd2d8", stipple="gray50", outline="")
+                if xb - xa > 110 and self.gap_text:
+                    self.create_text((xa + xb) / 2, 12, text=self.gap_text, fill="#555", font=("", 8))
+        # --- 作成中の区間 (S で始まりを決めたあと、カーソルまで)
+        if self.mark is not None and self.cursor > self.mark:
+            xa, xb = self.x_of(self.mark), self.x_of(self.cursor)
+            self.create_rectangle(xa, 0, xb, body, fill="#d7f5e2", outline="#1a9e57", dash=(4, 2), width=2)
+            if xb - xa > 60:
+                self.create_text((xa + xb) / 2, body - 10, text="作成中の区間", fill="#1a7a47", font=("", 8, "bold"))
+        self.create_line(0, mid, W, mid, fill="#c9cfd8")
+        # --- 波形
         m = self.media
         if m is None:
-            self.create_text(W / 2, H / 2, text="(未読み込み)", fill="#888")
+            self.create_text(W / 2, H / 2, text="(ファイルを読み込むとここに波形が出ます)", fill="#888")
         else:
-            env = m.envelope(self.vs, self.vs + self.vspan, W)
-            amp = (H - 26) / 2 * 0.95 / m.scale
+            env = m.envelope(self.vs, v1, W)
+            amp = (body - 6) / 2 * 0.95 / m.scale
             if env and env[0] == "env":
                 _, cols, mn, mx = env
                 top = np.column_stack([cols, mid - np.clip(mx * amp, -1e4, 1e4)])
                 bot = np.column_stack([cols, mid - np.clip(mn * amp, -1e4, 1e4)])[::-1]
                 pts = np.vstack([top, bot]).ravel().tolist()
-                self.create_polygon(pts, fill="#6fa8dc", outline="#6fa8dc")
+                self.create_polygon(pts, fill="#3b6ea5", outline="#3b6ea5")
             elif env:
                 _, xs, ys = env
                 pts = np.column_stack([xs, mid - ys * amp]).ravel().tolist()
-                self.create_line(pts, fill="#6fa8dc")
-        # 区間の帯
+                self.create_line(pts, fill="#3b6ea5")
+        # --- 区間の境界線・名前(A, B, C…)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
             if xb < 0 or xa > W:
                 continue
-            col = BAND_COLORS[i % len(BAND_COLORS)]
-            self.create_rectangle(max(xa, 0), H - 22, min(xb, W), H - 12, fill=col, outline="")
-            if xb - xa > 16:
-                self.create_text(max(xa, 0) + 3, H - 17, text=str(i + 1), anchor="w",
-                                 fill="white", font=("", 7, "bold"))
-        # 目盛り
+            col = DARK[i % len(DARK)]
+            w = 3 if i == self.sel else 1
+            for x in (xa, xb):
+                if 0 <= x <= W:
+                    self.create_line(x, 0, x, body, fill=col, width=w)
+            if i == self.sel:
+                self.create_line(max(xa, 0), 1, min(xb, W), 1, fill=col, width=3)
+                self.create_line(max(xa, 0), body - 1, min(xb, W), body - 1, fill=col, width=3)
+            if xb - xa > 14:
+                self.create_text(max(xa, 0) + 5, 11, text=seg_letter(i), anchor="w", fill=col, font=("", 12, "bold"))
+        # --- 目盛り
+        self.create_rectangle(0, body, W, H, fill="#eef0f4", outline="")
         step = next((s for s in (0.05, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600)
                      if s * W / self.vspan >= 70), 3600)
         t = np.ceil(self.vs / step) * step
-        while t < self.vs + self.vspan:
+        while t < v1:
             x = self.x_of(t)
-            self.create_line(x, H - 12, x, H, fill="#777")
-            self.create_text(x + 2, H - 6, text=tc(t)[:12] if step < 1 else tc(t)[:8],
-                             anchor="w", fill="#aaa", font=("", 7))
+            self.create_line(x, body, x, body + 5, fill="#777")
+            self.create_text(x + 2, body + 12, text=tc(t)[:12] if step < 1 else tc(t)[:8],
+                             anchor="w", fill="#666", font=("", 7))
             t += step
         if self.mark is not None:
             x = self.x_of(self.mark)
-            self.create_line(x, 0, x, H - 12, fill="#3ddc84", width=2, dash=(4, 2))
+            self.create_line(x, 0, x, body, fill="#1a9e57", width=2, dash=(4, 2))
         x = self.x_of(self.cursor)
-        self.create_line(x, 0, x, H - 12, fill="#ff4d4d", width=1)
-        self.create_text(4, 3, text=self.title, anchor="nw", fill="#ddd", font=("", 9, "bold"))
+        self.create_line(x, 0, x, body, fill="#e0262d", width=1)
+        self.create_text(W - 6, 11, text=self.title, anchor="e", fill="#333", font=("", 9, "bold"))
 
 
 # ------------------------------------------------------------------ アプリ
@@ -900,7 +968,7 @@ class App(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("syncdub - 吹き替え音声シンクロツール")
-        self.geometry("1180x860")
+        self.geometry("1280x900")
         self.media = {"en": None, "jp": None}
         self.segs = []
         self.active = "en"
@@ -935,25 +1003,35 @@ class App(_TkBase):
         self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
         top = ttk.Frame(self.manual, padding=6)
         top.pack(fill="x")
-        ttk.Label(top, text="英語版映像").grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="英語版の映像").grid(row=0, column=0, sticky="w")
         self.en_ent = ttk.Entry(top, textvariable=self.en_var)
         self.en_ent.grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(top, text="参照", command=lambda: self._browse(self.en_var)).grid(row=0, column=2)
-        ttk.Label(top, text="日本語録画").grid(row=1, column=0, sticky="w")
+        ttk.Label(top, text="日本語の録画").grid(row=1, column=0, sticky="w")
         self.jp_ent = ttk.Entry(top, textvariable=self.jp_var)
         self.jp_ent.grid(row=1, column=1, sticky="ew", padx=4)
         ttk.Button(top, text="参照", command=lambda: self._browse(self.jp_var)).grid(row=1, column=2)
         f = ttk.Frame(top)
         f.grid(row=1, column=3, padx=6)
-        ttk.Label(f, text="音声#").pack(side="left")
+        ttk.Label(f, text="日本語の音声番号").pack(side="left")
         ttk.Spinbox(f, from_=0, to=9, width=3, textvariable=self.jp_ast).pack(side="left")
-        ttk.Button(top, text="読み込み", command=self.load_media).grid(row=0, column=3, rowspan=1, padx=6)
-        ttk.Button(top, text="プロジェクトを開く", command=self.open_project).grid(row=0, column=4, padx=2)
-        ttk.Button(top, text="保存", command=self.save_project).grid(row=1, column=4, padx=2)
+        ttk.Button(top, text="読み込む", command=self.load_media).grid(row=0, column=3, rowspan=1, padx=6)
+        ttk.Button(top, text="設定を開く", command=self.open_project).grid(row=0, column=4, padx=2)
+        ttk.Button(top, text="設定を保存", command=self.save_project).grid(row=1, column=4, padx=2)
         top.columnconfigure(1, weight=1)
 
-        self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準)"),
-                   "jp": Track(self.manual, self, "jp", "日本語録画")}
+        tk.Label(self.manual, justify="left", anchor="w", bg="#fff8e1", fg="#444", font=("", 9), wraplength=1120,
+                 text="【使い方】 区間 =「英語版のここ」と「日本語録画のここ」は同じ場面、という1組の範囲です。\n"
+                      "① 上(英語版)の波形をクリックして場面を選ぶ → ② 下(日本語録画)で同じ場面をクリック (A キーで自動で合わせることもできます) → "
+                      "③「区間の始まり」を決める → 終わりの場面でも①②を行い →「区間の終わり」で追加。\n"
+                      "同じ色(A・B・C…)の帯が、英語と日本語で対応する区間です。灰色の斜線は、区間に入っていない部分"
+                      "(英語側=無音になる / 日本語側=使われない。CMなど)です。"
+                 ).pack(fill="x", padx=6, pady=(2, 0))
+
+        self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準の映像)"),
+                   "jp": Track(self.manual, self, "jp", "日本語の録画")}
+        self.tr["en"].gap_text = "ここは日本語の音がなく、無音になります"
+        self.tr["jp"].gap_text = "使われない部分 (CMなど)"
         self.tr["en"].pack(fill="x", padx=6, pady=(2, 2))
         self.tr["jp"].pack(fill="x", padx=6, pady=(2, 2))
 
@@ -962,10 +1040,10 @@ class App(_TkBase):
         self.pv = {}
         self.ent = {}
         self.fr_lbl = {}
-        for col, (k, name) in enumerate((("en", "英語版"), ("jp", "日本語録画"))):
+        for col, (k, name) in enumerate((("en", "英語版 (カーソル位置の画面)"), ("jp", "日本語の録画 (カーソル位置の画面)"))):
             fr = ttk.LabelFrame(mid, text=name)
             fr.grid(row=0, column=0 if k == "en" else 2, padx=4, sticky="n")
-            lab = tk.Label(fr, width=44, height=10, bg="black", fg="#888", text="(プレビュー)")
+            lab = tk.Label(fr, width=40, height=8, bg="black", fg="#888", text="(プレビュー)")
             lab.pack(padx=4, pady=4)
             self.pv[k] = lab
             row = ttk.Frame(fr)
@@ -982,15 +1060,25 @@ class App(_TkBase):
             ttk.Button(row, text="▶ 再生", width=7, command=lambda k=k: self.play(k)).pack(side="right")
         ctr = ttk.Frame(mid)
         ctr.grid(row=0, column=1, padx=8, sticky="n")
-        for text, cmd in (("S 開始点を打つ", self.mark_start), ("E 終了点→区間追加", self.mark_end),
-                          ("A 自動吸着 (日本語側)", self.auto_snap), ("開始点を取消", self.mark_clear),
-                          ("区間を検証", self.verify)):
-            ttk.Button(ctr, text=text, width=20, command=cmd).pack(pady=2)
-        self.mark_lbl = ttk.Label(ctr, text="開始点: なし", foreground="#2a7")
-        self.mark_lbl.pack(pady=4)
-        ttk.Label(ctr, text="自動吸着の窓(秒)/探索(±秒)").pack()
+        for n, (text, cmd, tip) in enumerate((
+                ("A  日本語側を自動で合わせる", self.auto_snap,
+                 "英語側のカーソル位置の音を手がかりに、日本語側のカーソルを同じ音の場所へ動かします"),
+                ("S  区間の『始まり』を決める", self.mark_start,
+                 "今の英語側・日本語側のカーソル位置を、同じ場面の始まりとして記録します"),
+                ("E  区間の『終わり』を決めて追加", self.mark_end,
+                 "始まりから今のカーソル位置までを、1つの区間(色つきの帯)として追加します"),
+                ("始まりを取り消す", self.mark_clear, "S で決めた始まりを取り消します"),
+                ("ズレをチェック", self.verify,
+                 "各区間の先頭・中央・末尾で、英語と日本語の音のズレ(ミリ秒)を測って表に出します"))):
+            cell = ttk.Frame(ctr)
+            cell.grid(row=n // 2, column=n % 2, padx=5, pady=3, sticky="n")
+            ttk.Button(cell, text=text, width=28, command=cmd).pack()
+            tk.Label(cell, text=tip, fg="#777", font=("", 8), wraplength=250, justify="left").pack()
+        self.mark_lbl = ttk.Label(ctr, text="始まり: まだ決めていません", foreground="#2a7")
+        self.mark_lbl.grid(row=3, column=0, columnspan=2, pady=(4, 0))
+        ttk.Label(ctr, text="自動で合わせる設定: 音を比べる長さ(秒) / 探す範囲(±秒)").grid(row=4, column=0, columnspan=2)
         sf = ttk.Frame(ctr)
-        sf.pack()
+        sf.grid(row=5, column=0, columnspan=2)
         self.win_v, self.srch_v = tk.StringVar(value="8"), tk.StringVar(value="60")
         ttk.Entry(sf, textvariable=self.win_v, width=5).pack(side="left")
         ttk.Entry(sf, textvariable=self.srch_v, width=5).pack(side="left", padx=4)
@@ -999,9 +1087,10 @@ class App(_TkBase):
         mid2 = ttk.Frame(self.manual, padding=(6, 2))
         mid2.pack(fill="both", expand=True)
         cols = ("n", "es", "ee", "js", "je", "ratio", "fit", "lag", "note")
-        heads = ("#", "EN開始", "EN終了", "JP開始", "JP終了", "速度比", "差の扱い", "検証ズレ(ms)", "メモ")
-        widths = (30, 100, 100, 100, 100, 70, 70, 140, 200)
-        self.tree = ttk.Treeview(mid2, columns=cols, show="headings", height=6, selectmode="browse")
+        heads = ("区間", "英語版 開始", "英語版 終了", "日本語 開始", "日本語 終了", "速さの違い", "長さが違うとき",
+                 "ズレ ms (先頭/中央/末尾)", "メモ")
+        widths = (44, 100, 100, 100, 100, 70, 150, 150, 150)
+        self.tree = ttk.Treeview(mid2, columns=cols, show="headings", height=4, selectmode="browse")
         for c, h, w in zip(cols, heads, widths):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w")
@@ -1021,7 +1110,7 @@ class App(_TkBase):
         ttk.Button(bot, text="参照", command=self.pick_out).pack(side="left")
         self.render_btn = ttk.Button(bot, text="合成", command=self.render)
         self.render_btn.pack(side="left", padx=6)
-        self.log = tk.Text(self.manual, height=5, bg="#111", fg="#cfc", font=("Consolas", 9))
+        self.log = tk.Text(self.manual, height=3, bg="#111", fg="#cfc", font=("Consolas", 9))
         self.log.pack(fill="x", padx=6, pady=(0, 2))
         self._build_easy()
 
@@ -1092,7 +1181,7 @@ class App(_TkBase):
         r3.pack(fill="both", expand=True, padx=8, pady=6)
         cols = ("n", "en", "jp", "st")
         self.etree = ttk.Treeview(r3, columns=cols, show="headings", height=5, selectmode="browse")
-        for c, h, w in zip(cols, ("#", "英語版の時間", "日本語録画の時間", "状態"), (36, 220, 220, 330)):
+        for c, h, w in zip(cols, ("区間", "英語版の時間", "日本語録画の時間", "状態"), (50, 220, 220, 330)):
             self.etree.heading(c, text=h)
             self.etree.column(c, width=w, anchor="w")
         self.etree.tag_configure("warn", background="#ffe9c7")
@@ -1217,7 +1306,7 @@ class App(_TkBase):
             flag = s.get("flag", "")
             st = "手動で設定" if "conf" not in s else ("要確認: " + flag if flag else "OK")
             self.etree.insert("", "end", iid=str(i), tags=("warn",) if flag else (), values=(
-                i + 1, f"{self.short(s['en_start'])} 〜 {self.short(s['en_end'])}",
+                seg_letter(i), f"{self.short(s['en_start'])} 〜 {self.short(s['en_end'])}",
                 f"{self.short(s['jp_start'])} 〜 {self.short(je)}", st))
         self.easy_render.state(["disabled"] if (not self.segs) else ["!disabled"])
 
@@ -1225,6 +1314,7 @@ class App(_TkBase):
         s = self.etree.selection()
         if s and self.media["en"]:
             seg = self.segs[int(s[0])]
+            self._select_seg(int(s[0]))
             self.set_cursor("en", seg["en_start"], scroll=True)
             self.set_cursor("jp", seg["jp_start"], scroll=True)
 
@@ -1511,7 +1601,7 @@ class App(_TkBase):
             return
         self.start = (self.tr["en"].cursor, self.tr["jp"].cursor)
         self.tr["en"].mark, self.tr["jp"].mark = self.start
-        self.mark_lbl.config(text=f"開始点: EN {tc(self.start[0])[3:]} / JP {tc(self.start[1])[3:]}")
+        self.mark_lbl.config(text=f"始まり: 英語 {tc(self.start[0])[3:]} / 日本語 {tc(self.start[1])[3:]}")
         for t in self.tr.values():
             t.redraw()
 
@@ -1520,17 +1610,17 @@ class App(_TkBase):
         for t in self.tr.values():
             t.mark = None
             t.redraw()
-        self.mark_lbl.config(text="開始点: なし")
+        self.mark_lbl.config(text="始まり: まだ決めていません")
 
     def mark_end(self):
         st = getattr(self, "start", None)
         if not st:
-            self.say("先に開始点を打ってください (S)")
+            self.say("先に「区間の始まり」を決めてください (S キー)")
             return
         es, js = st
         ee, je = self.tr["en"].cursor, self.tr["jp"].cursor
         if ee <= es or je <= js:
-            self.say("終了点は開始点より後にしてください")
+            self.say("終わりは、始まりより後の場面にしてください")
             return
         seg = {"en_start": es, "en_end": ee, "jp_start": js,
                "jp_end": None if abs((je - js) - (ee - es)) <= 0.002 else je,
@@ -1548,14 +1638,16 @@ class App(_TkBase):
             jd = (s["jp_end"] - s["jp_start"]) if s["jp_end"] is not None else en_d
             r = jd / en_d
             self.tree.insert("", "end", iid=str(i), tags=("warn",) if abs(r - 1) > 0.02 else (), values=(
-                i + 1, tc(s["en_start"]), tc(s["en_end"]), tc(s["jp_start"]),
-                tc(s["jp_end"]) if s["jp_end"] is not None else "(同尺)",
-                f"{r:.4f}", s["fit"], s.get("lag", ""), s["note"]))
+                seg_letter(i), tc(s["en_start"]), tc(s["en_end"]), tc(s["jp_start"]),
+                tc(s["jp_end"]) if s["jp_end"] is not None else "(同じ長さ)",
+                f"{r:.4f}", FIT_JA.get(s["fit"], s["fit"]), s.get("lag", ""), s["note"]))
         self.tr["en"].bands = [(s["en_start"], s["en_end"], i) for i, s in enumerate(self.segs)]
         self.tr["jp"].bands = [(s["jp_start"], s["jp_start"] + ((s["jp_end"] - s["jp_start"]) if s["jp_end"] is not None else s["en_end"] - s["en_start"]), i)
                                for i, s in enumerate(self.segs)]
         for t in self.tr.values():
             t.redraw()
+        for t in self.tr.values():
+            t.sel = None
         self.refresh_easy()
 
     def sel_idx(self):
@@ -1567,8 +1659,14 @@ class App(_TkBase):
         if i is None or not self.media["en"]:
             return
         s = self.segs[i]
+        self._select_seg(i)
         self.set_cursor("en", s["en_start"], scroll=True)
         self.set_cursor("jp", s["jp_start"], scroll=True)
+
+    def _select_seg(self, i):
+        for t in self.tr.values():
+            t.sel = i
+            t.redraw()
 
     def del_seg(self):
         i = self.sel_idx()
@@ -1586,16 +1684,16 @@ class App(_TkBase):
         d.transient(self)
         vars_ = {}
         fe, fj = self.fps("en"), self.fps("jp")
-        rows = [("EN開始", "en_start", fe), ("EN終了", "en_end", fe), ("JP開始", "jp_start", fj),
-                ("JP終了 (空欄=同尺)", "jp_end", fj)]
+        rows = [("英語版 開始", "en_start", fe), ("英語版 終了", "en_end", fe), ("日本語 開始", "jp_start", fj),
+                ("日本語 終了 (空欄=英語と同じ長さ)", "jp_end", fj)]
         for r, (lab, key, fp) in enumerate(rows):
             ttk.Label(d, text=lab).grid(row=r, column=0, sticky="w", padx=6, pady=3)
             v = tk.StringVar(value="" if s[key] is None else tc(s[key]))
             ttk.Entry(d, textvariable=v, width=18).grid(row=r, column=1, padx=6)
             vars_[key] = (v, fp)
-        ttk.Label(d, text="差の扱い").grid(row=4, column=0, sticky="w", padx=6)
-        fit = tk.StringVar(value=s["fit"])
-        ttk.Combobox(d, textvariable=fit, values=["stretch", "pad", "trim"], width=15, state="readonly").grid(row=4, column=1)
+        ttk.Label(d, text="長さが違うとき").grid(row=4, column=0, sticky="w", padx=6)
+        fit = tk.StringVar(value=FIT_JA.get(s["fit"], s["fit"]))
+        ttk.Combobox(d, textvariable=fit, values=list(FIT_JA.values()), width=24, state="readonly").grid(row=4, column=1)
         ttk.Label(d, text="メモ").grid(row=5, column=0, sticky="w", padx=6, pady=3)
         note = tk.StringVar(value=s["note"])
         ttk.Entry(d, textvariable=note, width=28).grid(row=5, column=1, padx=6)
@@ -1611,12 +1709,16 @@ class App(_TkBase):
             except ValueError as ex:
                 messagebox.showerror("入力エラー", str(ex), parent=d)
                 return
-            new["fit"], new["note"] = fit.get(), note.get()
+            new["fit"], new["note"] = JA_FIT.get(fit.get(), "stretch"), note.get()
             self.segs[i] = new
             self.segs.sort(key=lambda x: x["en_start"])
             d.destroy()
             self.refresh()
-        ttk.Button(d, text="OK", command=ok).grid(row=6, column=0, columnspan=2, pady=8)
+        tk.Label(d, fg="#777", font=("", 8), justify="left", wraplength=360,
+                 text="「長さが違うとき」: 英語側と日本語側で区間の長さが違う場合の扱いです。\n"
+                      "伸縮=速さを少し変えて合わせる / 無音で埋める=足りない所を無音に / 切り捨てる=余った所を切る"
+                 ).grid(row=6, column=0, columnspan=2, padx=6)
+        ttk.Button(d, text="OK", command=ok).grid(row=7, column=0, columnspan=2, pady=8)
 
     # ---------- 自動吸着 / 検証 ----------
     def _params(self):
@@ -1753,17 +1855,16 @@ class App(_TkBase):
         out = Path(self.out_path.get())
         if out.exists() and not messagebox.askyesno("上書き確認", f"{out.name} は既にあります。上書きしますか?"):
             return
-        # 設定ファイルは保存先の隣に自動で作る(質問しない)
-        if not self.proj_path:
-            self.proj_path = str(out.with_name(out.stem + ".syncdub.json"))
-        self.save_project(ask=False)
-        proj = self.proj_path
+        # 設定ファイルは一時フォルダに作り、合成が終わったら消す(出力の隣にゴミを残さない)
+        tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
+        proj = str(tmpd / "project.json")
+        Path(proj).write_text(json.dumps(self.project_dict(), ensure_ascii=False), encoding="utf-8")
         self._busy(True)
         self.rbar.start(12)
         self.open_btn.pack_forget()
         self.easy_done.config(text="合成しています…(動画の長さによって数分かかります)", fg="#333")
         self.say("合成中…")
-        self.logw(f"--- 合成開始: {proj}")
+        self.logw(f"--- 合成開始: {out.name}")
 
         def work():
             buf = io.StringIO()
@@ -1777,6 +1878,8 @@ class App(_TkBase):
             except (ValueError, KeyError, SystemExit) as ex:
                 buf.write(f"エラー: {ex}")
                 ok = False
+            finally:
+                shutil.rmtree(tmpd, ignore_errors=True)
             self.q.put(lambda: self._render_done(buf.getvalue(), ok))
         threading.Thread(target=work, daemon=True).start()
 
