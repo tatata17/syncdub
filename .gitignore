@@ -1,0 +1,5 @@
+syncdub_backups/
+syncdub_settings.json
+*.bak
+*.new
+__pycache__/
