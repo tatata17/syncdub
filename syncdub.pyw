@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.11"
+APP_VERSION = "2026.11.07.12"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1286,7 +1286,7 @@ class App(_TkBase):
         for k in ("s", "a", "space", "Left", "Right", "Tab", "Up", "Down", "Escape", "Home"):
             self.bind_all(f"<KeyPress-{k}>" if len(k) > 1 else f"<Key-{k}>", self._key)
         # ボタンを押したあと、フォーカスが残って Space/Enter で再実行されないようにする
-        self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus))
+        self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus), add="+")
         for seq, fn in (("<Control-z>", self.undo), ("<Control-Z>", self.undo), ("<Control-y>", self.redo),
                         ("<Control-Y>", self.redo)):
             self.bind_all(seq, lambda e, fn=fn: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else fn())
