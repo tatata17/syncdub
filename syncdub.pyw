@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.16"
+APP_VERSION = "2026.11.07.17"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1564,7 +1564,7 @@ class App(_TkBase):
         self.auto_btn.pack(side="left", ipadx=14, ipady=4)
         self.pbar = ttk.Progressbar(r2, mode="determinate", maximum=100)
         self.pbar.pack(side="left", fill="x", expand=True, padx=12)
-        self.auto_msg = tk.Label(c2, text="ファイルを2つ選ぶと、自動で解析が始まります。", justify="left", anchor="w",
+        self.auto_msg = tk.Label(c2, text="ファイルを2つ選んだら、「自動で合わせる」を押してください。", justify="left", anchor="w",
                                  wraplength=1050, fg="#333")
         self.auto_msg.pack(fill="x", padx=12, pady=(2, 8))
 
@@ -1601,7 +1601,7 @@ class App(_TkBase):
         self.easy_render.pack(side="left", padx=10, ipadx=14, ipady=4)
         r5 = ttk.Frame(c4)
         r5.pack(fill="x", padx=8, pady=(0, 8))
-        self.rbar = ttk.Progressbar(r5, mode="indeterminate", length=160)
+        self.rbar = ttk.Progressbar(r5, mode="determinate", length=160)
         self.rbar.pack(side="left")
         self.easy_done = tk.Label(r5, text="", anchor="w", fg="#2a7")
         self.easy_done.pack(side="left", padx=10)
@@ -1636,7 +1636,7 @@ class App(_TkBase):
 
     def _maybe_load(self):
         if self.en_var.get().strip() and self.jp_var.get().strip():
-            self._auto_after_load = True
+            self._auto_after_load = False  # 自動検出は「自動で合わせる」ボタンを押したときだけ
             self.load_media()
         else:
             self.say("もう一方のファイルも選んでください")
@@ -1899,6 +1899,9 @@ class App(_TkBase):
         if getattr(self, "_auto_after_load", False):
             self._auto_after_load = False
             self.run_auto()
+        else:
+            self.pbar.config(value=0)
+            self.auto_msg.config(text="読み込みました。「自動で合わせる」を押すと、自動で合わせます。\n(手動で合わせる場合は「手動調整」タブへ)", fg="#333")
 
     # ---------- カーソル ----------
     def fps(self, k):
@@ -2425,6 +2428,7 @@ class App(_TkBase):
         proj = str(tmpd / "project.json")
         Path(proj).write_text(json.dumps(self.project_dict(), ensure_ascii=False), encoding="utf-8")
         self._busy(True)
+        self.rbar.config(mode="indeterminate")
         self.rbar.start(12)
         self.open_btn.pack_forget()
         self.easy_done.config(text="合成しています…(動画の長さによって数分かかります)", fg="#333")
@@ -2451,6 +2455,7 @@ class App(_TkBase):
     def _render_done(self, text, ok):
         self.logw(text)
         self.rbar.stop()
+        self.rbar.config(mode="determinate", value=0)  # 止まっているときは空にする (緑のブロックを残さない)
         self._busy(False)
         if ok:
             self.easy_done.config(text=f"✔ 完成しました: {Path(self.out_path.get()).name}", fg="#1f6f43")

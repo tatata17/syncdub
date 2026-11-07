@@ -1,1 +1,1 @@
-{"version": "2026.11.07.16", "file": "syncdub.pyw", "notes": "ショートカット追加: Ctrl+S/O(保存・開く), Ctrl+Shift+Z, Ctrl++/-/0(拡大縮小)"}
+{"version": "2026.11.07.17", "file": "syncdub.pyw", "notes": "自動で合わせるは「自動で合わせる」ボタンを押したときだけ実行 / 待機中の緑バーを空表示に"}
