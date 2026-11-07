@@ -374,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.22"
+APP_VERSION = "2026.11.07.23"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -805,11 +805,55 @@ def auto_align(en, jp, progress=lambda f, m: None):
         bounds.append((b2, sure1 or sure2))
         progress(0.75 + 0.2 * (i + 1) / max(len(rr) - 1, 1), "境界を調整しています…")
 
+    # ---- 5.5) 一定のずれとみなした区間でも、細かい窓で測り直して「速度のずれ」を見つける (短い録画でも効く)
+    def refine_drift(en_s, en_e, f):
+        """f=(切片, 傾き, 一致度)。区間内を2秒窓で測り、日本語録画との時刻の差が直線的に変化していれば、その直線を返す。"""
+        if en_e - en_s < 3.0:
+            return f
+        wl, rad = 2.0, 0.3
+        pts_t, pts_o = [], []
+        for t in np.arange(en_s, en_e - wl + 1e-9, 0.5):
+            a = esl(t, wl)
+            if not loud(a):
+                continue
+            a0 = a - a.mean()
+            o_exp = off_at(f, t + wl / 2)
+            b = jsl(t + o_exp - rad, wl + 2 * rad)
+            if np.abs(b).max() < 1e-6:
+                continue
+            nc = _nc_local(a0, b)
+            k = int(nc.argmax())
+            z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
+            if z >= 6:
+                pts_t.append(t + wl / 2)
+                pts_o.append(o_exp - rad + k / fs)
+        if len(pts_t) < 5 or pts_t[-1] - pts_t[0] < 0.5 * (en_e - en_s):
+            return f
+        tt, oo = np.array(pts_t), np.array(pts_o)
+        keep = np.ones(len(tt), bool)
+        A = None
+        for _ in range(3):  # 外れ値を除いて引き直す
+            if keep.sum() < 5:
+                return f
+            A = np.polyfit(tt[keep], oo[keep], 1)
+            res = np.abs(np.polyval(A, tt) - oo)
+            keep = res < max(0.01, 2.5 * float(np.median(res[keep])))
+        if keep.sum() < 5 or tt[keep][-1] - tt[keep][0] < 0.5 * (en_e - en_s):
+            return f
+        res = np.abs(np.polyval(A, tt[keep]) - oo[keep])
+        const_res = np.abs(float(np.median(oo[keep])) - oo[keep])
+        # 傾きが小さい or 一定のずれと変わらない精度なら採用しない (誤検出で歪ませない)
+        if abs(A[0]) < 2e-4 or abs(A[0]) > 0.03 or np.median(res) > 0.015 or np.median(res) > 0.7 * np.median(const_res):
+            return f
+        return (float(A[1]), float(A[0]), f[2])
+
     # ---- 6) 区間リストを組み立てる
     segs = []
     for i, ((lb, s, e), f) in enumerate(zip(rr, fits)):
         en_s = t0e if i == 0 else bounds[i - 1][0]
         en_e = e_end if i == len(rr) - 1 else bounds[i][0]
+        if abs(f[1]) <= 2e-4:
+            f = refine_drift(en_s, en_e, f)
         jp_s = en_s + off_at(f, en_s)
         jp_e = en_e + off_at(f, en_e)
         # 日本語録画の範囲外にはみ出す分は詰める
