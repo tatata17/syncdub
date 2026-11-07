@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.10"
+APP_VERSION = "2026.11.07.11"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1966,24 +1966,31 @@ class App(_TkBase):
         def work():
             try:
                 run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-t", "20", "-i", m.path,
-                     "-map", f"0:a:{m.astream}", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", wav])
+                     "-map", f"0:a:{m.astream}", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", wav],
+                    timeout=60, stdin=subprocess.DEVNULL)
+                ok, err = True, ""
             except Exception as ex:  # noqa: BLE001
-                self.q.put(lambda: self.say(f"再生用の音を作れませんでした: {str(ex)[-80:]}"))
-                self._playing = False
-                return
-            if not self._playing:
-                return
+                ok, err = False, str(getattr(ex, "stderr", "") or ex)[-80:]
+            self.q.put(lambda: self._play_ready(ok, wav, err))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _play_ready(self, ok, wav, err):
+        """再生用の音ができたあと、メインスレッドで再生を始める (別スレッドからの再生で固まるのを避ける)。"""
+        playing, self._playing = self._playing, False
+        if not playing:
+            return  # 準備中にもう一度押された = 取り消し
+        if not ok:
+            self.say(f"再生用の音を作れませんでした: {err}")
+            return
+        try:
             if os.name == "nt":
                 import winsound
                 self._sound_until = time.time() + 20
-                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
             else:
-                try:
-                    self.play_proc = subprocess.Popen(["ffplay", "-v", "quiet", "-nodisp", "-autoexit", wav], **NOWIN)
-                except FileNotFoundError:
-                    self.q.put(lambda: self.say("再生できる環境がありません (ffplay が必要です)"))
-            self._playing = False
-        threading.Thread(target=work, daemon=True).start()
+                self.play_proc = subprocess.Popen(["ffplay", "-v", "quiet", "-nodisp", "-autoexit", wav], **NOWIN)
+        except Exception as ex:  # noqa: BLE001
+            self.say(f"再生できませんでした: {ex}")
 
     # ---------- 指定 (同じ場面 / CM / 暗転・長さ違い / カット) ----------
     KIND_JA = {"pt": "同じ場面", "cm": "CM", "dim": "暗転・長さ違い", "cut": "カット"}
