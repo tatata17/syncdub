@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.12"
+APP_VERSION = "2026.11.07.13"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1439,7 +1439,6 @@ class App(_TkBase):
         self.status.pack(side="bottom", fill="x", padx=6, pady=(0, 4))
         h = ttk.Frame(self, padding=(8, 6, 8, 0))
         h.pack(fill="x")
-        ttk.Label(h, text="syncdub  吹き替え音声シンクロツール", font=("", 13, "bold")).pack(side="left")
         ttk.Label(h, text=f"v{APP_VERSION}", foreground="#888").pack(side="right", padx=(8, 0))
         self.auto_upd = tk.BooleanVar(value=self._setting("auto_update", True))
         ttk.Checkbutton(h, text="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto).pack(side="right", padx=4)
