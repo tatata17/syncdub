@@ -23,6 +23,7 @@ import queue
 import shutil
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -352,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.8"
+APP_VERSION = "2026.11.07.9"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1190,6 +1191,7 @@ class App(_TkBase):
         self.segs = []         # items から自動計算した区間 (エンジンに渡す)
         self.extra_segs = []   # 英語版の音声をそのまま使う区間
         self.warns = []
+        self.undo_st, self.redo_st, self._last = [], [], []  # 元に戻す用
         self.auto_flags = None  # 自動検出直後の「要確認」情報 (手で直すと消える)
         self.active = "en"
         self.proj_path = None
@@ -1208,6 +1210,9 @@ class App(_TkBase):
             self.bind_all(f"<KeyPress-{k}>" if len(k) > 1 else f"<Key-{k}>", self._key)
         # ボタンを押したあと、フォーカスが残って Space/Enter で再実行されないようにする
         self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus))
+        for seq, fn in (("<Control-z>", self.undo), ("<Control-Z>", self.undo), ("<Control-y>", self.redo),
+                        ("<Control-Y>", self.redo)):
+            self.bind_all(seq, lambda e, fn=fn: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else fn())
         self.bind_all("<Shift-Left>", self._key)
         self.bind_all("<Shift-Right>", self._key)
         self.bind_all("<Control-Left>", self._key)
@@ -1857,20 +1862,51 @@ class App(_TkBase):
         self.pv[k].config(image=img, text="", width=img.width(), height=img.height())
 
     def play(self, k):
+        """カーソル位置から約20秒の音を再生 (もう一度押すと停止)。"""
+        if os.name == "nt" and time.time() < getattr(self, "_sound_until", 0):
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+            self._sound_until = 0
+            self.say("再生を止めました")
+            return
         if self.play_proc and self.play_proc.poll() is None:
             self.play_proc.terminate()
             self.play_proc = None
+            self.say("再生を止めました")
+            return
+        if getattr(self, "_playing", False):
+            self._playing = False
+            self.say("再生を止めました")
             return
         m = self.media[k]
         if not m:
             return
         t = max(0.0, self.tr[k].cursor + m.voff)
-        try:
-            self.play_proc = subprocess.Popen(
-                ["ffplay", "-v", "quiet", "-nodisp", "-autoexit", "-ss", f"{t:.3f}", "-t", "20",
-                 "-ast", str(m.astream), "-i", m.path], **NOWIN)
-        except FileNotFoundError:
-            self.say("ffplay が見つかりません (ffmpeg と同じ場所に入れてください)")
+        self.say("再生中… (もう一度押すと止まります)")
+        wav = str(Path(tempfile.gettempdir()) / f"syncdub_play_{k}.wav")
+        self._playing = True
+
+        def work():
+            try:
+                run(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-t", "20", "-i", m.path,
+                     "-map", f"0:a:{m.astream}", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", wav])
+            except Exception as ex:  # noqa: BLE001
+                self.q.put(lambda: self.say(f"再生用の音を作れませんでした: {str(ex)[-80:]}"))
+                self._playing = False
+                return
+            if not self._playing:
+                return
+            if os.name == "nt":
+                import winsound
+                self._sound_until = time.time() + 20
+                winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            else:
+                try:
+                    self.play_proc = subprocess.Popen(["ffplay", "-v", "quiet", "-nodisp", "-autoexit", wav], **NOWIN)
+                except FileNotFoundError:
+                    self.q.put(lambda: self.say("再生できる環境がありません (ffplay が必要です)"))
+            self._playing = False
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- 指定 (同じ場面 / CM / 暗転・長さ違い / カット) ----------
     KIND_JA = {"pt": "同じ場面", "cm": "CM", "dim": "暗転・長さ違い", "cut": "カット"}
@@ -1978,7 +2014,13 @@ class App(_TkBase):
         return res["v"]
 
     # ---------- 指定 → 区間 ----------
-    def rebuild(self):
+    def rebuild(self, track=True):
+        import copy
+        if track and self.items != self._last:
+            self.undo_st.append(self._last)
+            del self.undo_st[:-100]
+            self.redo_st.clear()
+        self._last = copy.deepcopy(self.items)
         m = self.media
         if all(m.values()):
             en_rng = (min(0.0, m["en"].a_origin), m["en"].end)
@@ -2032,6 +2074,26 @@ class App(_TkBase):
             t.sel = None
             t.redraw()
         self.refresh_easy()
+
+    def undo(self):
+        if not self.undo_st:
+            self.say("これ以上、元に戻せません")
+            return
+        self.redo_st.append(self._last)
+        self.items = self.undo_st.pop()
+        self.auto_flags = None
+        self.rebuild(track=False)
+        self.say("元に戻しました (Ctrl+Z) / やり直し: Ctrl+Y")
+
+    def redo(self):
+        if not self.redo_st:
+            self.say("やり直す操作がありません")
+            return
+        self.undo_st.append(self._last)
+        self.items = self.redo_st.pop()
+        self.auto_flags = None
+        self.rebuild(track=False)
+        self.say("やり直しました (Ctrl+Y)")
 
     def item_idx(self):
         s = self.itree.selection()

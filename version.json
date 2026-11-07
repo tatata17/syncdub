@@ -1,1 +1,1 @@
-{"version": "2026.11.07.8", "file": "syncdub.pyw", "notes": "ボタン後のフォーカス残りによる二重登録を防止 / 同じ場所の重複登録を無視"}
+{"version": "2026.11.07.9", "file": "syncdub.pyw", "notes": "Ctrl+Zで元に戻す/Ctrl+Yでやり直し / 再生ボタンを修正 (ffplay不要でWindowsでも再生)"}
