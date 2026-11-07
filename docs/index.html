@@ -245,24 +245,14 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
   <tr><th>必要なもの</th><th>必須?</th><th>説明</th></tr>
   <tr><td>Python 3</td><td>必須</td><td>このソフトを動かすための土台です。python.org から入れます。インストール画面の「Add python.exe to PATH」には<b>必ずチェック</b>を入れてください。<code>tcl/tk</code> のチェックは外さないでください(外すと画面が出ません)。</td></tr>
   <tr><td>numpy</td><td>必須</td><td>音の計算に使う部品です。コマンドプロンプトで <code>pip install numpy</code></td></tr>
-  <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。入れかたは下の「ffmpeg の入れかた」を見てください。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
+  <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「full」版を使い、「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。入れかたは下の「ffmpeg の入れかた」を見てください。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
   <tr><td>tkinterdnd2</td><td>任意</td><td>入れると、ファイルのドラッグ&amp;ドロップが使えます。<code>pip install tkinterdnd2</code>。入れなくても、クリックでファイルを選べます。</td></tr>
  </table></div>
  <h3>ffmpeg の入れかた(PATH とは?)</h3>
- <p><b>PATH</b> は、「どのフォルダにいても、名前を打つだけでそのソフトを呼び出せる」ようにする Windows の設定です。syncdub は ffmpeg を名前で呼び出すので、ここが通っていないと「読み込めない」エラーになります。次のどちらかで入れてください。</p>
- <div class="note"><b class="lb">かんたんな方法(おすすめ)</b>Windows 10/11 なら、<b>コマンドプロンプト</b>(スタートメニューで「cmd」と検索)に次を貼り付けて Enter。PATH も自動で設定されます。
-  <p><code>winget install Gyan.FFmpeg</code></p>
-  終わったら、<b>コマンドプロンプトを閉じて開き直し</b>、<code>ffmpeg -version</code> と打って版の情報が出れば完了です。syncdub は一度終了して、起動し直してください。</div>
- <details class="fold"><summary>手動で入れる方法(上でうまくいかないとき)</summary>
-  <ol>
-   <li><a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev の ffmpeg ビルド</a>から「release builds」の <code>ffmpeg-release-essentials.zip</code> をダウンロードします。</li>
-   <li>zip を展開し、中身のフォルダを <code>C:\ffmpeg</code> のような分かりやすい場所に置きます(<code>C:\ffmpeg\bin</code> の中に <code>ffmpeg.exe</code> と <code>ffprobe.exe</code> があれば正解)。</li>
-   <li>スタートメニューで「環境変数」と検索 →「システム環境変数の編集」→「環境変数」ボタン。</li>
-   <li>上の欄(ユーザー環境変数)の <code>Path</code> を選んで「編集」→「新規」で <code>C:\ffmpeg\bin</code> を追加し、OK を押して閉じます。</li>
-   <li>コマンドプロンプトを開き直して、<code>ffmpeg -version</code> と <code>ffprobe -version</code> で確認します。</li>
-  </ol>
-  <p class="muted">困ったときは「Windows PATH 通す」で検索すると、画像つきの解説がたくさん見つかります。</p>
- </details>
+<p>syncdub は ffmpeg を名前で呼び出すので、<b>PATH が通っている</b>必要があります。通っていないと「読み込めない」エラーになります。ffmpeg は「full」版を使います。</p>
+<p><b>PATH</b> は、「どのフォルダにいても、名前を打つだけでそのソフトを呼び出せる」ようにする Windows の設定です。</p>
+<div class="note"><b class="lb">かんたんな方法(おすすめ)</b>Windows 10/11 なら、<b>コマンドプロンプト</b>(スタートメニューで「cmd」と検索)に次を貼り付けて Enter。full 版が入り、PATH も自動で設定されます。<p><code>winget install Gyan.FFmpeg</code></p>終わったら、<b>コマンドプロンプトを閉じて開き直し</b>、<code>ffmpeg -version</code> と打って版の情報が出れば完了です。syncdub は一度終了して、起動し直してください。</div>
+<details class="fold"><summary>手動で入れる方法(上でうまくいかないとき)</summary><ol><li><a href="https://www.gyan.dev/ffmpeg/builds/" target="_blank" rel="noopener">gyan.dev の ffmpeg ビルド</a>から「release builds」の <code>ffmpeg-release-full.7z</code> をダウンロードします(<code>.7z</code> は、7-Zip などで展開します)。</li><li>展開したフォルダを <code>C:\ffmpeg</code> のような分かりやすい場所に置きます(<code>C:\ffmpeg\bin</code> の中に <code>ffmpeg.exe</code> と <code>ffprobe.exe</code> があれば正解)。</li><li>スタートメニューで「環境変数」と検索 →「システム環境変数の編集」→「環境変数」ボタン。</li><li>上の欄(ユーザー環境変数)の <code>Path</code> を選んで「編集」→「新規」で <code>C:\ffmpeg\bin</code> を追加し、OK を押して閉じます。</li><li>コマンドプロンプトを開き直して、<code>ffmpeg -version</code> と <code>ffprobe -version</code> で確認します。</li></ol><p class="muted">困ったときは「Windows PATH 通す」で検索すると、画像つきの解説がたくさん見つかります。</p></details>
  <h3>syncdub を置いて起動する</h3>
  <ol class="steps">
   <li>上の「syncdub.pyw をダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
