@@ -204,9 +204,23 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             outs = "".join(f"[s{tag}{i}]" for i in range(n))
             lines.append(f"[{idx}:a:{ai}]{fmt},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{fmt}[s{tag}0]")
     warns = []
+
+    def src_end(x):
+        return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
+
+    def continuous(a, b):
+        """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
+        if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
+            return False
+        if a.english:
+            return True
+        return abs(src_end(a) - b.jp_start) < 2e-3
+
     for i, s in enumerate(segs):
         D = s.dur
         f = min(fade, D / 2)
+        f_in = 0.0 if i > 0 and continuous(segs[i - 1], s) else f
+        f_out = 0.0 if i + 1 < len(segs) and continuous(s, segs[i + 1]) else f
         if s.silent or (s.english and not ne):
             lines.append(f"anullsrc=r={sr}:cl={layout},atrim=0:{D:.6f},asetpts=PTS-STARTPTS[o{i}]")
         else:
@@ -232,9 +246,10 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             chain.append(f"apad=whole_dur={D:.6f}")
             chain.append(f"atrim=0:{D:.6f}")
             chain.append("asetpts=PTS-STARTPTS")
-            if f > 0:
-                chain.append(f"afade=t=in:d={f:.4f}")
-                chain.append(f"afade=t=out:st={D - f:.6f}:d={f:.4f}")
+            if f_in > 0:
+                chain.append(f"afade=t=in:d={f_in:.4f}:curve=hsin")
+            if f_out > 0:
+                chain.append(f"afade=t=out:st={D - f_out:.6f}:d={f_out:.4f}:curve=hsin")
             lines.append(src + ",".join(chain) + f"[o{i}]")
         labels.append(f"[o{i}]")
     if lead > 1e-6:  # 英語版の映像先頭がコンテナ開始より遅い分だけ、先頭に無音を置く
@@ -287,7 +302,7 @@ def _main(argv, tmp):
 
     sr = int(proj.get("sample_rate", 48000))
     layout = proj.get("channel_layout", "stereo")
-    fade = float(proj.get("fade_ms", 5)) / 1000
+    fade = float(proj.get("fade_ms", 8)) / 1000
     jp_a = int(proj.get("jp_audio_stream", 0))
     jp_off, en_off = video_start_offset(jp), video_start_offset(en)
     single = bool(a.audio_only)
@@ -353,7 +368,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.17"
+APP_VERSION = "2026.11.07.18"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
