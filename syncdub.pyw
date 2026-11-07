@@ -374,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.24"
+APP_VERSION = "2026.11.07.25"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -580,6 +580,29 @@ def _nc_local(a, b):
     return c / loc
 
 
+def _phat_local(a, b, fs):
+    """位相相関(白色化した相関)。吹き替えの声のように「共通しない音」が大きくても、BGM・効果音の一致を拾いやすい。
+    長さ len(b)-len(a)+1 の配列を返す。"""
+    n, m = len(a), len(b)
+    N = 1 << int(np.ceil(np.log2(m + n)))
+    G = np.fft.rfft(b - b.mean(), N) * np.conj(np.fft.rfft(a - a.mean(), N))
+    G = G / (np.abs(G) + 1e-9)
+    f = np.fft.rfftfreq(N, 1 / fs)
+    G = G * ((f > 250) & (f < fs * 0.48))
+    return np.fft.irfft(G, N)[: m - n + 1]
+
+
+def _best_peak(a0, b, fs):
+    """通常の正規化相関と位相相関の両方で一番はっきりした山を探し、(位置, 突出度z) を返す。"""
+    best = (0, -1.0)
+    for c in (_nc_local(a0, b), _phat_local(a0, b, fs)):
+        k = int(c.argmax())
+        z = (c[k] - c.mean()) / (c.std() + 1e-9)
+        if z > best[1]:
+            best = (k, float(z))
+    return best
+
+
 def auto_align(en, jp, progress=lambda f, m: None):
     """英語版(en)の各時刻に対応する日本語録画(jp)の時刻を自動で見つけ、区間リストを返す。
 
@@ -634,6 +657,8 @@ def auto_align(en, jp, progress=lambda f, m: None):
     N = 1 << int(np.ceil(np.log2(len(jx) + n)))
     FJ = np.fft.rfft(jx, N)
     ej = np.concatenate([[0], np.cumsum(jx ** 2)])
+    _f = np.fft.rfftfreq(N, 1 / fs)
+    fmask = (_f > 250) & (_f < fs * 0.48)
     cand = []
     starts = np.linspace(t0e, max(e_end - W, t0e), K)
     for q, t in enumerate(starts):
@@ -644,15 +669,19 @@ def auto_align(en, jp, progress=lambda f, m: None):
         c = np.fft.irfft(FJ * np.conj(np.fft.rfft(a0, N)), N)[: len(jx) - n + 1]
         loc = np.sqrt(np.maximum(ej[n:] - ej[:-n], 0) + 1e-9) * np.sqrt((a0 ** 2).sum())
         nc = c / loc
-        mu, sd = nc.mean(), nc.std() + 1e-9
-        for _ in range(2):
-            k = int(nc.argmax())
-            z = (nc[k] - mu) / sd
-            if z >= 8:
-                cand.append(((jo + k / fs) - t, z))
-            lo, hi = max(0, k - int(fs)), min(len(nc), k + int(fs))
-            nc = nc.copy()
-            nc[lo:hi] = mu
+        Gp = FJ * np.conj(np.fft.rfft(a0, N))
+        Gp = Gp / (np.abs(Gp) + 1e-9) * fmask
+        pc = np.fft.irfft(Gp, N)[: len(jx) - n + 1]
+        for arr in (nc, pc):
+            mu, sd = arr.mean(), arr.std() + 1e-9
+            for _ in range(2):
+                k = int(arr.argmax())
+                z = (arr[k] - mu) / sd
+                if z >= 8:
+                    cand.append(((jo + k / fs) - t, z))
+                lo, hi = max(0, k - int(fs)), min(len(arr), k + int(fs))
+                arr = arr.copy()
+                arr[lo:hi] = mu
         progress(0.02 + 0.28 * (q + 1) / K, "全体の音を照合しています…")
     del FJ
     if not cand:
@@ -689,9 +718,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 b = jsl(t + o - RAD, WL + 2 * RAD)
                 if np.abs(b).max() < 1e-6:
                     continue
-                nc = _nc_local(a0, b)
-                k = int(nc.argmax())
-                z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
+                k, z = _best_peak(a0, b, fs)
                 if z > best[2]:
                     best = (ci, o - RAD + k / fs, z)
             if best[2] >= ZM:
@@ -699,6 +726,16 @@ def auto_align(en, jp, progress=lambda f, m: None):
             if wi % 20 == 0:
                 progress(0.30 + 0.45 * wi / len(wts), "区間を判定しています…")
 
+        # 測れたオフセットが近いもの(0.15秒以内)は、候補が別でも同じ相手として扱う (山の取り違えで区間が細切れになるのを防ぐ)
+        li = [i for i in range(len(wts)) if lab[i] >= 0]
+        if li:
+            li.sort(key=lambda i: off_i[i])
+            cid = 0
+            lab[li[0]] = cid
+            for a_, b_ in zip(li, li[1:]):
+                if off_i[b_] - off_i[a_] > 0.15:
+                    cid += 1
+                lab[b_] = cid
         # ---- 3) 平滑化: 短すぎる孤立区間を除き、同じ相手に挟まれた空白を埋める
         def runs_of(l):
             r, s = [], 0
@@ -710,6 +747,26 @@ def auto_align(en, jp, progress=lambda f, m: None):
         for lb, s, e in runs_of(list(lab)):
             if lb >= 0 and e - s + 1 < MINRUN:
                 lab[s:e + 1] = -1
+        # 日本語側の時刻が前後に逆戻りする組み合わせは、実際にはありえない(=偽の一致)。根拠の弱いほうを捨てる。
+        def _runs_pos():
+            return [(lb, s_, e_) for lb, s_, e_ in runs_of(list(lab)) if lb >= 0]
+
+        def _span(r):
+            lb, s_, e_ = r
+            m_ = lab[s_:e_ + 1] == lb
+            o_ = float(np.median(off_i[s_:e_ + 1][m_]))
+            return wts[s_] + WL / 2 + o_, wts[e_] + WL / 2 + o_, float(z_i[s_:e_ + 1][m_].sum())  # 窓の中心で比べる
+        changed = True
+        while changed:
+            changed = False
+            runs_ = _runs_pos()
+            for i_ in range(len(runs_) - 1):
+                a_, b_ = _span(runs_[i_]), _span(runs_[i_ + 1])
+                if b_[0] < a_[1] - 1.0:
+                    weak = runs_[i_] if a_[2] < b_[2] else runs_[i_ + 1]
+                    lab[weak[1]:weak[2] + 1] = np.where(lab[weak[1]:weak[2] + 1] == weak[0], -1, lab[weak[1]:weak[2] + 1])
+                    changed = True
+                    break
         inferred = np.zeros(len(wts), bool)
         rr = runs_of(list(lab))
         for i in range(1, len(rr) - 1):
@@ -834,9 +891,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
             b = jsl(t + o_exp - rad, wl + 2 * rad)
             if np.abs(b).max() < 1e-6:
                 continue
-            nc = _nc_local(a0, b)
-            k = int(nc.argmax())
-            z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
+            k, z = _best_peak(a0, b, fs)
             if z >= 6:
                 pts_t.append(t + wl / 2)
                 pts_o.append(o_exp - rad + k / fs)
