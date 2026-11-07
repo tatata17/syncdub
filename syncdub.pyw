@@ -352,7 +352,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.7"
+APP_VERSION = "2026.11.07.8"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1206,6 +1206,8 @@ class App(_TkBase):
             self.after(1500, lambda: self.check_update(False))
         for k in ("s", "a", "space", "Left", "Right", "Tab", "Up", "Down", "Escape", "Home"):
             self.bind_all(f"<KeyPress-{k}>" if len(k) > 1 else f"<Key-{k}>", self._key)
+        # ボタンを押したあと、フォーカスが残って Space/Enter で再実行されないようにする
+        self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus))
         self.bind_all("<Shift-Left>", self._key)
         self.bind_all("<Shift-Right>", self._key)
         self.bind_all("<Control-Left>", self._key)
@@ -1893,6 +1895,12 @@ class App(_TkBase):
             t.redraw()
         self.update_sel_label()
 
+    def _unfocus(self):
+        try:
+            self.tr[self.active].focus_set()
+        except Exception:  # noqa: BLE001
+            pass
+
     def add_point(self):
         if not all(self.media.values()):
             self.say("先に映像と録画を読み込んでください")
@@ -1903,6 +1911,9 @@ class App(_TkBase):
             if r and r[2] > 8:
                 tj = r[0]
                 self.set_cursor("jp", tj)
+        if any(i["k"] == "pt" and abs(i["en"] - te) < 0.02 and abs(i["jp"] - tj) < 0.02 for i in self.items):
+            self.say("同じ場所はすでに登録されています")
+            return
         self.items.append({"k": "pt", "en": te, "jp": tj, "note": ""})
         self.auto_flags = None
         self.rebuild()
