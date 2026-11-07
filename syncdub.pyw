@@ -323,7 +323,7 @@ def main(argv=None):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.4"
+APP_VERSION = "2026.11.07.5"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -504,6 +504,288 @@ def xcorr_find(ref, ref_t, tgt, tgt_t, win=8.0, search=60.0):
     return s0 + k / SR, float(nc[k]), float(z)
 
 
+# ------------------------------------------------------------------ 自動検出
+
+def _nc_local(a, b):
+    """a(基準) と b(探索範囲) の正規化相関を全ラグで返す。長さ len(b)-len(a)+1。"""
+    n, m = len(a), len(b)
+    N = 1 << int(np.ceil(np.log2(m + n)))
+    c = np.fft.irfft(np.fft.rfft(b, N) * np.conj(np.fft.rfft(a, N)), N)[: m - n + 1]
+    e = np.concatenate([[0], np.cumsum(b.astype(np.float64) ** 2)])
+    loc = np.sqrt(np.maximum(e[n:] - e[:-n], 0) + 1e-9) * np.sqrt((a.astype(np.float64) ** 2).sum() + 1e-12)
+    return c / loc
+
+
+def auto_align(en, jp, progress=lambda f, m: None):
+    """英語版(en)の各時刻に対応する日本語録画(jp)の時刻を自動で見つけ、区間リストを返す。
+
+    戻り値: (segs, info)
+      segs: [{"en_start","en_end","jp_start","jp_end"(等速ならNone),"fit","note","lag","conf","flag"}]
+      info: {"unused_jp": [(a,b)...], "ok": bool, "msg": str}
+    """
+    def dec(m):  # 4kHzに間引き(解析用)
+        x = m.x
+        n = len(x) // 2 * 2
+        return x[:n].reshape(-1, 2).mean(1).astype(np.float64)
+    fs = SR / 2
+    ex, jx = dec(en), dec(jp)
+    eo, jo = en.a_origin, jp.a_origin
+    j_dur = len(jx) / fs
+    t0e = max(eo, 0.0)           # 英語側の解析開始(映像の先頭)
+    e_end = eo + len(ex) / fs    # 英語側の終端
+    e_dur = e_end - t0e
+
+    def esl(t, L):  # 英語側の切り出し (時刻→サンプル)
+        i = int(round((t - eo) * fs))
+        n = int(round(L * fs))
+        out = np.zeros(n)
+        a, b = max(i, 0), min(i + n, len(ex))
+        if b > a:
+            out[a - i: b - i] = ex[a:b]
+        return out
+
+    def jsl(t, L):
+        i = int(round((t - jo) * fs))
+        n = int(round(L * fs))
+        out = np.zeros(n)
+        a, b = max(i, 0), min(i + n, len(jx))
+        if b > a:
+            out[a - i: b - i] = jx[a:b]
+        return out
+
+    # ---- 英語側の「音がある所」の目安
+    hop_rms = int(fs)
+    nr = len(ex) // hop_rms
+    rms_all = np.sqrt((ex[: nr * hop_rms].reshape(nr, hop_rms) ** 2).mean(1)) if nr else np.array([0.0])
+    rms_thr = max(0.1 * float(np.percentile(rms_all, 75)), 1e-4)
+
+    def loud(a):
+        return float(np.sqrt((a ** 2).mean())) >= rms_thr
+
+    # ---- 1) 全体から「ありそうなオフセット(日本語時刻-英語時刻)」を集める
+    progress(0.02, "全体の音を照合しています…")
+    W = 8.0
+    n = int(W * fs)
+    K = int(min(28, max(6, e_dur / 25)))
+    N = 1 << int(np.ceil(np.log2(len(jx) + n)))
+    FJ = np.fft.rfft(jx, N)
+    ej = np.concatenate([[0], np.cumsum(jx ** 2)])
+    cand = []
+    starts = np.linspace(t0e, max(e_end - W, t0e), K)
+    for q, t in enumerate(starts):
+        a = esl(t, W)
+        if not loud(a):
+            continue
+        a0 = a - a.mean()
+        c = np.fft.irfft(FJ * np.conj(np.fft.rfft(a0, N)), N)[: len(jx) - n + 1]
+        loc = np.sqrt(np.maximum(ej[n:] - ej[:-n], 0) + 1e-9) * np.sqrt((a0 ** 2).sum())
+        nc = c / loc
+        mu, sd = nc.mean(), nc.std() + 1e-9
+        for _ in range(2):
+            k = int(nc.argmax())
+            z = (nc[k] - mu) / sd
+            if z >= 8:
+                cand.append(((jo + k / fs) - t, z))
+            lo, hi = max(0, k - int(fs)), min(len(nc), k + int(fs))
+            nc = nc.copy()
+            nc[lo:hi] = mu
+        progress(0.02 + 0.28 * (q + 1) / K, "全体の音を照合しています…")
+    del FJ
+    if not cand:
+        return [], {"ok": False, "unused_jp": [],
+                    "msg": "音が一致する部分が見つかりませんでした。別の音声番号を試すか、「手動調整」タブをお使いください。"}
+    cand.sort()
+    clusters, cur = [], [cand[0]]
+    for o, z in cand[1:]:
+        if o - cur[-1][0] <= 0.15:
+            cur.append((o, z))
+        else:
+            clusters.append(cur)
+            cur = [(o, z)]
+    clusters.append(cur)
+    offs = [float(np.median([o for o, _ in c])) for c in clusters]
+
+    # ---- 2) 英語側を窓で区切り、各窓がどのオフセットに合うか判定
+    WL, HOP, RAD = 5.0, 2.0, 0.5
+    nw = int(WL * fs)
+    wts = np.arange(t0e, max(e_end - WL, t0e) + 1e-9, HOP)
+    lab = np.full(len(wts), -1)
+    off_i = np.zeros(len(wts))
+    z_i = np.zeros(len(wts))
+    for wi, t in enumerate(wts):
+        a = esl(t, WL)
+        if not loud(a):
+            lab[wi] = -2
+            continue
+        a0 = a - a.mean()
+        best = (-1, 0.0, 0.0)
+        for ci, o in enumerate(offs):
+            b = jsl(t + o - RAD, WL + 2 * RAD)
+            if np.abs(b).max() < 1e-6:
+                continue
+            nc = _nc_local(a0, b)
+            k = int(nc.argmax())
+            z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
+            if z > best[2]:
+                best = (ci, o - RAD + k / fs, z)
+        if best[2] >= 7:
+            lab[wi], off_i[wi], z_i[wi] = best[0], best[1], best[2]
+        if wi % 20 == 0:
+            progress(0.30 + 0.45 * wi / len(wts), "区間を判定しています…")
+
+    # ---- 3) 平滑化: 短すぎる孤立区間を除き、同じ相手に挟まれた空白を埋める
+    def runs_of(l):
+        r, s = [], 0
+        for i in range(1, len(l) + 1):
+            if i == len(l) or l[i] != l[s]:
+                r.append((l[s], s, i - 1))
+                s = i
+        return r
+    for lb, s, e in runs_of(list(lab)):
+        if lb >= 0 and e - s + 1 < 2:
+            lab[s:e + 1] = -1
+    inferred = np.zeros(len(wts), bool)
+    rr = runs_of(list(lab))
+    for i in range(1, len(rr) - 1):
+        lb, s, e = rr[i]
+        if lb < 0 and rr[i - 1][0] >= 0 and rr[i - 1][0] == rr[i + 1][0]:
+            lab[s:e + 1] = rr[i - 1][0]
+            inferred[s:e + 1] = True
+            off_i[s:e + 1] = np.median(off_i[rr[i - 1][1]:rr[i - 1][2] + 1])
+    rr = [r for r in runs_of(list(lab)) if r[0] >= 0]
+    if not rr:
+        return [], {"ok": False, "unused_jp": [],
+                    "msg": "区間を判定できませんでした。BGMや効果音が少ない作品は「手動調整」タブをお使いください。"}
+
+    # ---- 3.5) 少しずつ変化するオフセット(速度差)で別々の区間に割れたものを1つに戻す
+    def merge_runs(rr):
+        again = True
+        while again:
+            again = False
+            for i in range(len(rr) - 1):
+                (l0, s0, e0), (l1, s1, e1) = rr[i], rr[i + 1]
+                if s1 - e0 > 5:
+                    continue
+                idx = [j for j in list(range(s0, e0 + 1)) + list(range(s1, e1 + 1)) if not inferred[j] and z_i[j] >= 7]
+                if len(idx) < 4:
+                    continue
+                tc, oo = wts[idx] + WL / 2, off_i[idx]
+                if abs(np.median(oo[:max(len(idx) // 2, 1)]) - np.median(oo[len(idx) // 2:])) > 1.0:
+                    continue
+                A = np.polyfit(tc, oo, 1)
+                if abs(A[0]) < 0.02 and np.median(np.abs(np.polyval(A, tc) - oo)) < 0.03:
+                    rr[i:i + 2] = [(l0, s0, e1)]
+                    again = True
+                    break
+        return rr
+    rr = merge_runs(rr)
+
+    # ---- 4) 各区間のオフセット(一定 or わずかな速度差)を推定
+    def fit_run(lb, s, e):
+        idx = [i for i in range(s, e + 1) if not inferred[i] and z_i[i] >= 7]
+        if not idx:
+            idx = list(range(s, e + 1))
+        tc = wts[idx] + WL / 2
+        oo = off_i[idx]
+        med = float(np.median(oo))
+        slope, conf = 0.0, float(np.median(z_i[idx]))
+        if len(idx) >= 6 and tc[-1] - tc[0] >= 15:
+            A = np.polyfit(tc, oo, 1)
+            res = np.abs(np.polyval(A, tc) - oo)
+            if abs(A[0]) > 2e-4 and np.median(res) < 0.05:
+                return A[1], A[0], conf
+        return med, slope, conf
+    fits = [fit_run(*r) for r in rr]
+
+    # ---- 5) 区間の境界を精密に決める
+    def score(a, jt, rad=0.1):
+        b = jsl(jt - rad, len(a) / fs + 2 * rad)
+        if np.abs(b).max() < 1e-6:
+            return 0.0
+        return float(_nc_local(a - a.mean(), b).max())
+
+    def boundary(offA, offB, t0, t1, wlen, hop):
+        ts = np.arange(t0, t1 - wlen + 1e-9, hop)
+        if len(ts) < 2:
+            return (t0 + t1) / 2, False
+        d = []
+        for t in ts:
+            a = esl(t, wlen)
+            d.append(score(a, t + offA) - score(a, t + offB) if loud(a) else 0.0)
+        d = np.array(d)
+        pre = np.concatenate([[0], np.cumsum(d)])
+        V = 2 * pre - d.sum()
+        k = int(V.argmax())
+        c = ts + wlen / 2
+        if k == 0:
+            b = c[0]
+        elif k == len(ts):
+            b = c[-1]
+        else:
+            b = (c[k - 1] + c[k]) / 2
+        return float(b), bool(abs(V[k]) >= 0.3 * np.abs(d).sum() and np.abs(d).sum() > 0.2)
+
+    def off_at(f, t):
+        return f[0] + f[1] * t
+
+    bounds = []  # 各ペアの境界 (時刻, 確か?)
+    for i in range(len(rr) - 1):
+        (_, s0, e0), (_, s1, e1) = rr[i], rr[i + 1]
+        t0 = wts[e0] + WL / 2 - 1.0
+        t1 = wts[s1] + WL / 2 + 1.0
+        t0, t1 = max(t0, t0e), min(t1, e_end)
+        fa, fb = fits[i], fits[i + 1]
+        mid = (t0 + t1) / 2
+        b1, sure1 = boundary(off_at(fa, mid), off_at(fb, mid), t0 - 1.0, t1 + 1.0, 1.0, 0.1)
+        b2, sure2 = boundary(off_at(fa, b1), off_at(fb, b1), b1 - 0.8, b1 + 0.8, 0.4, 0.02)
+        bounds.append((b2, sure1 or sure2))
+        progress(0.75 + 0.2 * (i + 1) / max(len(rr) - 1, 1), "境界を調整しています…")
+
+    # ---- 6) 区間リストを組み立てる
+    segs = []
+    for i, ((lb, s, e), f) in enumerate(zip(rr, fits)):
+        en_s = t0e if i == 0 else bounds[i - 1][0]
+        en_e = e_end if i == len(rr) - 1 else bounds[i][0]
+        jp_s = en_s + off_at(f, en_s)
+        jp_e = en_e + off_at(f, en_e)
+        # 日本語録画の範囲外にはみ出す分は詰める
+        jmin, jmax = jo, jo + j_dur
+        if jp_s < jmin:
+            d = jmin - jp_s
+            en_s += d
+            jp_s += d
+        if jp_e > jmax:
+            en_e -= (jp_e - jmax)
+            jp_e = jmax
+        if en_e - en_s < 0.2:
+            continue
+        const = abs(f[1]) <= 2e-4
+        reasons = []
+        if f[2] < 10:
+            reasons.append("一致度が低め")
+        if i > 0 and not bounds[i - 1][1]:
+            reasons.append("開始位置が不確か")
+        if i < len(rr) - 1 and not bounds[i][1]:
+            reasons.append("終了位置が不確か")
+        if inferred[s:e + 1].any():
+            reasons.append("声だけの場面を推定")
+        segs.append({"en_start": round(float(en_s), 4), "en_end": round(float(en_e), 4), "jp_start": round(float(jp_s), 4),
+                     "jp_end": None if const else round(float(jp_e), 4), "fit": "stretch", "note": "自動",
+                     "lag": "", "conf": float(f[2]), "flag": "・".join(reasons)})
+    unused = []
+    prev_end = jo
+    for s in segs:
+        js = s["jp_start"]
+        je = s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + (s["en_end"] - s["en_start"])
+        if js - prev_end > 5.0:
+            unused.append((prev_end, js))
+        prev_end = max(prev_end, je)
+    if jo + j_dur - prev_end > 5.0:
+        unused.append((prev_end, jo + j_dur))
+    progress(1.0, "完了")
+    return segs, {"ok": True, "unused_jp": unused, "msg": ""}
+
+
 # ------------------------------------------------------------------ 波形トラック
 
 
@@ -643,10 +925,16 @@ class App(_TkBase):
 
     # ---------- UI ----------
     def _build(self):
-        top = ttk.Frame(self, padding=6)
-        top.pack(fill="x")
         self.en_var, self.jp_var = tk.StringVar(), tk.StringVar()
         self.jp_ast = tk.IntVar(value=0)
+        self._build_header()
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=4, pady=2)
+        self.easy, self.manual = ttk.Frame(self.nb), ttk.Frame(self.nb)
+        self.nb.add(self.easy, text="   かんたん   ")
+        self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
+        top = ttk.Frame(self.manual, padding=6)
+        top.pack(fill="x")
         ttk.Label(top, text="英語版映像").grid(row=0, column=0, sticky="w")
         self.en_ent = ttk.Entry(top, textvariable=self.en_var)
         self.en_ent.grid(row=0, column=1, sticky="ew", padx=4)
@@ -662,21 +950,14 @@ class App(_TkBase):
         ttk.Button(top, text="読み込み", command=self.load_media).grid(row=0, column=3, rowspan=1, padx=6)
         ttk.Button(top, text="プロジェクトを開く", command=self.open_project).grid(row=0, column=4, padx=2)
         ttk.Button(top, text="保存", command=self.save_project).grid(row=1, column=4, padx=2)
-        uf = ttk.Frame(top)
-        uf.grid(row=0, column=5, rowspan=2, padx=4)
-        ttk.Button(uf, text="更新を確認", command=lambda: self.check_update(True)).pack(fill="x")
-        ttk.Button(uf, text="元に戻す", command=self.rollback).pack(fill="x", pady=1)
-        self.auto_upd = tk.BooleanVar(value=self._setting("auto_update", True))
-        ttk.Checkbutton(uf, text="起動時に確認", variable=self.auto_upd, command=self._save_auto).pack()
-        ttk.Label(uf, text=f"v{APP_VERSION}", foreground="#888").pack()
         top.columnconfigure(1, weight=1)
 
-        self.tr = {"en": Track(self, self, "en", "英語版 (基準)"),
-                   "jp": Track(self, self, "jp", "日本語録画")}
+        self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準)"),
+                   "jp": Track(self.manual, self, "jp", "日本語録画")}
         self.tr["en"].pack(fill="x", padx=6, pady=(2, 2))
         self.tr["jp"].pack(fill="x", padx=6, pady=(2, 2))
 
-        mid = ttk.Frame(self, padding=4)
+        mid = ttk.Frame(self.manual, padding=4)
         mid.pack(fill="x")
         self.pv = {}
         self.ent = {}
@@ -715,7 +996,7 @@ class App(_TkBase):
         ttk.Entry(sf, textvariable=self.srch_v, width=5).pack(side="left", padx=4)
 
         # 区間表
-        mid2 = ttk.Frame(self, padding=(6, 2))
+        mid2 = ttk.Frame(self.manual, padding=(6, 2))
         mid2.pack(fill="both", expand=True)
         cols = ("n", "es", "ee", "js", "je", "ratio", "fit", "lag", "note")
         heads = ("#", "EN開始", "EN終了", "JP開始", "JP終了", "速度比", "差の扱い", "検証ズレ(ms)", "メモ")
@@ -733,17 +1014,235 @@ class App(_TkBase):
         for text, cmd in (("編集", self.edit_seg), ("削除", self.del_seg)):
             ttk.Button(bt, text=text, width=8, command=cmd).pack(pady=2)
 
-        bot = ttk.Frame(self, padding=6)
+        bot = ttk.Frame(self.manual, padding=6)
         bot.pack(fill="x")
         ttk.Label(bot, text="出力").pack(side="left")
         ttk.Entry(bot, textvariable=self.out_path).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(bot, text="参照", command=self.pick_out).pack(side="left")
         self.render_btn = ttk.Button(bot, text="合成", command=self.render)
         self.render_btn.pack(side="left", padx=6)
-        self.log = tk.Text(self, height=5, bg="#111", fg="#cfc", font=("Consolas", 9))
+        self.log = tk.Text(self.manual, height=5, bg="#111", fg="#cfc", font=("Consolas", 9))
         self.log.pack(fill="x", padx=6, pady=(0, 2))
-        self.status = ttk.Label(self, text="準備完了", anchor="w")
-        self.status.pack(fill="x", padx=6, pady=(0, 4))
+        self._build_easy()
+
+    # ---------- ヘッダー(更新) / かんたんタブ ----------
+    def _build_header(self):
+        self.status = ttk.Label(self, text="", anchor="w", foreground="#555")
+        self.status.pack(side="bottom", fill="x", padx=6, pady=(0, 4))
+        h = ttk.Frame(self, padding=(8, 6, 8, 0))
+        h.pack(fill="x")
+        ttk.Label(h, text="syncdub  吹き替え音声シンクロツール", font=("", 13, "bold")).pack(side="left")
+        ttk.Label(h, text=f"v{APP_VERSION}", foreground="#888").pack(side="right", padx=(8, 0))
+        self.auto_upd = tk.BooleanVar(value=self._setting("auto_update", True))
+        ttk.Checkbutton(h, text="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto).pack(side="right", padx=4)
+        ttk.Button(h, text="元に戻す", command=self.rollback).pack(side="right", padx=2)
+        ttk.Button(h, text="更新を確認", command=lambda: self.check_update(True)).pack(side="right", padx=2)
+
+    def _build_easy(self):
+        f = self.easy
+        pad = {"padx": 12, "pady": 5}
+        tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
+                 text="日本語吹き替えの音声を、きれいな英語版の映像に合わせて1本の動画にします。\n"
+                      "手順:  ① ファイルを選ぶ  →  ② 自動で合わせる  →  ③ 結果を確認  →  ④ 合成する"
+                 ).pack(fill="x", **pad)
+
+        # ① ファイルを選ぶ
+        c1 = ttk.LabelFrame(f, text=" ① ファイルを選ぶ (ドラッグ&ドロップ、またはクリック) ")
+        c1.pack(fill="x", **pad)
+        row = ttk.Frame(c1)
+        row.pack(fill="x", padx=8, pady=8)
+        row.columnconfigure((0, 1), weight=1, uniform="z")
+        self.zone = {}
+        for col, (k, title, sub) in enumerate((("en", "英語版の映像", "きれいな映像のファイル"),
+                                                ("jp", "日本語の録画", "吹き替えの音声が入っているファイル (TV録画など)"))):
+            z = tk.Frame(row, bg="#f4f7fb", highlightthickness=2, highlightbackground="#9db4d3", height=92, cursor="hand2")
+            z.grid(row=0, column=col, sticky="ew", padx=6)
+            z.grid_propagate(False)
+            t = tk.Label(z, text=title, bg="#f4f7fb", font=("", 12, "bold"))
+            t.pack(pady=(10, 0))
+            n = tk.Label(z, text=sub + "\nここにドロップ / クリックして選択", bg="#f4f7fb", fg="#667", font=("", 9))
+            n.pack()
+            for w in (z, t, n):
+                w.bind("<Button-1>", lambda e, k=k: self._pick(k))
+            self.zone[k] = {"frame": z, "title": t, "name": n, "sub": sub}
+        o = ttk.Frame(c1)
+        o.pack(fill="x", padx=14, pady=(0, 8))
+        ttk.Label(o, text="日本語の録画に音声が複数ある場合だけ、音声番号を変えます (通常は 0 のままでOK):").pack(side="left")
+        ttk.Spinbox(o, from_=0, to=9, width=3, textvariable=self.jp_ast).pack(side="left", padx=6)
+        self.en_var.trace_add("write", lambda *a: self._zone_update())
+        self.jp_var.trace_add("write", lambda *a: self._zone_update())
+
+        # ② 自動で合わせる
+        c2 = ttk.LabelFrame(f, text=" ② 自動で合わせる ")
+        c2.pack(fill="x", **pad)
+        r2 = ttk.Frame(c2)
+        r2.pack(fill="x", padx=8, pady=(8, 2))
+        self.auto_btn = ttk.Button(r2, text="自動で合わせる", command=self.run_auto, state="disabled")
+        self.auto_btn.pack(side="left", ipadx=14, ipady=4)
+        self.pbar = ttk.Progressbar(r2, mode="determinate", maximum=100)
+        self.pbar.pack(side="left", fill="x", expand=True, padx=12)
+        self.auto_msg = tk.Label(c2, text="ファイルを2つ選ぶと、自動で解析が始まります。", justify="left", anchor="w",
+                                 wraplength=1050, fg="#333")
+        self.auto_msg.pack(fill="x", padx=12, pady=(2, 8))
+
+        # ③ 結果を確認
+        c3 = ttk.LabelFrame(f, text=" ③ 結果を確認 ")
+        c3.pack(fill="both", expand=True, **pad)
+        r3 = ttk.Frame(c3)
+        r3.pack(fill="both", expand=True, padx=8, pady=6)
+        cols = ("n", "en", "jp", "st")
+        self.etree = ttk.Treeview(r3, columns=cols, show="headings", height=5, selectmode="browse")
+        for c, h, w in zip(cols, ("#", "英語版の時間", "日本語録画の時間", "状態"), (36, 220, 220, 330)):
+            self.etree.heading(c, text=h)
+            self.etree.column(c, width=w, anchor="w")
+        self.etree.tag_configure("warn", background="#ffe9c7")
+        self.etree.pack(side="left", fill="both", expand=True)
+        self.etree.bind("<<TreeviewSelect>>", self.on_easy_select)
+        bt = ttk.Frame(r3)
+        bt.pack(side="left", padx=8, anchor="n")
+        ttk.Button(bt, text="▶ 英語版を聞く", width=16, command=lambda: self._listen("en")).pack(pady=2)
+        ttk.Button(bt, text="▶ 日本語を聞く", width=16, command=lambda: self._listen("jp")).pack(pady=2)
+        ttk.Button(bt, text="手動で直す →", width=16, command=lambda: self.nb.select(self.manual)).pack(pady=(10, 2))
+        tk.Label(c3, anchor="w", fg="#667", text="行を選ぶと、その区間の先頭を聞き比べられます。「要確認」の行は特に聞いて確かめてください。"
+                 ).pack(fill="x", padx=12, pady=(0, 6))
+
+        # ④ 合成
+        c4 = ttk.LabelFrame(f, text=" ④ 合成する ")
+        c4.pack(fill="x", **pad)
+        r4 = ttk.Frame(c4)
+        r4.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(r4, text="保存先:").pack(side="left")
+        ttk.Entry(r4, textvariable=self.out_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(r4, text="変更", command=self.pick_out).pack(side="left")
+        self.easy_render = ttk.Button(r4, text="合成スタート", command=self.render, state="disabled")
+        self.easy_render.pack(side="left", padx=10, ipadx=14, ipady=4)
+        r5 = ttk.Frame(c4)
+        r5.pack(fill="x", padx=8, pady=(0, 8))
+        self.rbar = ttk.Progressbar(r5, mode="indeterminate", length=160)
+        self.rbar.pack(side="left")
+        self.easy_done = tk.Label(r5, text="", anchor="w", fg="#2a7")
+        self.easy_done.pack(side="left", padx=10)
+        self.open_btn = ttk.Button(r5, text="フォルダを開く", command=self.open_folder)
+
+    @staticmethod
+    def short(t):
+        sign = "-" if t < 0 else ""
+        t = abs(t)
+        h, m, sec = int(t // 3600), int(t % 3600 // 60), t % 60
+        return f"{sign}{h}:{m:02d}:{sec:04.1f}" if h else f"{sign}{m}:{sec:04.1f}"
+
+    def _zone_update(self):
+        for k, var in (("en", self.en_var), ("jp", self.jp_var)):
+            z, p = self.zone[k], var.get().strip()
+            if p:
+                z["frame"].config(bg="#eaf7ee", highlightbackground="#3aa76d")
+                for w in (z["title"], z["name"]):
+                    w.config(bg="#eaf7ee")
+                z["name"].config(text="✔ " + Path(p).name + "\n(クリックで選び直し)", fg="#1f6f43")
+            else:
+                z["frame"].config(bg="#f4f7fb", highlightbackground="#9db4d3")
+                for w in (z["title"], z["name"]):
+                    w.config(bg="#f4f7fb")
+                z["name"].config(text=z["sub"] + "\nここにドロップ / クリックして選択", fg="#667")
+
+    def _pick(self, k):
+        p = filedialog.askopenfilename(title="英語版の映像を選択" if k == "en" else "日本語の録画を選択")
+        if p:
+            (self.en_var if k == "en" else self.jp_var).set(p)
+            self._maybe_load()
+
+    def _maybe_load(self):
+        if self.en_var.get().strip() and self.jp_var.get().strip():
+            self._auto_after_load = True
+            self.load_media()
+        else:
+            self.say("もう一方のファイルも選んでください")
+
+    def _busy(self, flag):
+        st = ["disabled"] if flag else ["!disabled"]
+        self.render_btn.state(st)
+        has = bool(all(self.media.values()))
+        self.auto_btn.state(["disabled"] if (flag or not has) else ["!disabled"])
+        self.easy_render.state(["disabled"] if (flag or not self.segs) else ["!disabled"])
+
+    # ---------- 自動で合わせる ----------
+    def run_auto(self):
+        if not all(self.media.values()):
+            return
+        en, jp = self.media["en"], self.media["jp"]
+        self._busy(True)
+        self.pbar.config(value=0)
+        self.auto_msg.config(text="音を照合して、対応する場所を探しています…(長い動画は数分かかります)", fg="#333")
+        self.easy_done.config(text="")
+
+        def prog(fr, msg):
+            self.q.put(lambda: (self.pbar.config(value=fr * 100), self.auto_msg.config(text=msg)))
+
+        def work():
+            try:
+                segs, info = auto_align(en, jp, prog)
+            except Exception as ex:  # noqa: BLE001
+                segs, info = [], {"ok": False, "unused_jp": [], "msg": f"解析中にエラーが起きました: {ex}"}
+            self.q.put(lambda: self._auto_done(segs, info))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _auto_done(self, segs, info):
+        if not info["ok"]:
+            self.segs = []
+            self.refresh()
+            self.pbar.config(value=0)
+            self.auto_msg.config(text="⚠ " + info["msg"], fg="#b33")
+            self._busy(False)
+            return
+        self.segs = segs
+        self.refresh()
+        self.pbar.config(value=100)
+        warn = sum(1 for s in segs if s.get("flag"))
+        lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
+        for a, b in info["unused_jp"][:5]:
+            lines.append(f"・日本語の録画の {self.short(a)} 〜 {self.short(b)} (約{int(b - a)}秒) は使いません (CMなど)。")
+        if len(info["unused_jp"]) > 5:
+            lines.append(f"・ほか {len(info['unused_jp']) - 5} か所も使いません。")
+        lines.append(f"・「要確認」が {warn} 件あります。下の表で聞き比べて確かめてください。" if warn
+                     else "・すべて高い一致度でした。念のため下の表で聞き比べてから、合成してください。")
+        self.auto_msg.config(text="\n".join(lines), fg="#1f6f43" if not warn else "#8a5a00")
+        self._busy(False)
+        self.say("自動で合わせました")
+
+    def refresh_easy(self):
+        self.etree.delete(*self.etree.get_children())
+        for i, s in enumerate(self.segs):
+            ed = s["en_end"] - s["en_start"]
+            je = s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + ed
+            flag = s.get("flag", "")
+            st = "手動で設定" if "conf" not in s else ("要確認: " + flag if flag else "OK")
+            self.etree.insert("", "end", iid=str(i), tags=("warn",) if flag else (), values=(
+                i + 1, f"{self.short(s['en_start'])} 〜 {self.short(s['en_end'])}",
+                f"{self.short(s['jp_start'])} 〜 {self.short(je)}", st))
+        self.easy_render.state(["disabled"] if (not self.segs) else ["!disabled"])
+
+    def on_easy_select(self, _):
+        s = self.etree.selection()
+        if s and self.media["en"]:
+            seg = self.segs[int(s[0])]
+            self.set_cursor("en", seg["en_start"], scroll=True)
+            self.set_cursor("jp", seg["jp_start"], scroll=True)
+
+    def _listen(self, k):
+        if not self.etree.selection():
+            self.say("先に、表の行を選んでください")
+            return
+        self.play(k)
+
+    def open_folder(self):
+        d = str(Path(self.out_path.get()).resolve().parent)
+        try:
+            if sys.platform == "win32":
+                os.startfile(d)  # noqa: S606
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", d])
+        except OSError:
+            pass
 
     # ---------- GitHubからの自己更新 ----------
     def _setting(self, key, default):
@@ -812,6 +1311,9 @@ class App(_TkBase):
             return
         targets = {self: None, self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
                    self.jp_ent: "jp", self.tr["jp"]: "jp", self.pv["jp"]: "jp"}
+        for k, z in self.zone.items():
+            for w in (z["frame"], z["title"], z["name"]):
+                targets[w] = k
         for w, k in targets.items():
             w.drop_target_register(DND_FILES)
             w.dnd_bind("<<Drop>>", lambda ev, k=k: self._on_drop(ev, k))
@@ -830,10 +1332,7 @@ class App(_TkBase):
             (self.en_var if k == "en" else self.jp_var).set(files[0])
         else:  # ウィンドウ全体に1つ → 空いている方へ
             (self.jp_var if self.en_var.get() and not self.jp_var.get() else self.en_var).set(files[0])
-        if self.en_var.get() and self.jp_var.get():
-            self.load_media()
-        else:
-            self.say("もう一方のファイルもドロップしてください")
+        self._maybe_load()
 
     # ---------- 共通 ----------
     def say(self, msg):
@@ -873,7 +1372,9 @@ class App(_TkBase):
             messagebox.showwarning("入力不足", "英語版映像と日本語録画を指定してください")
             return
         self.say("音声を読み込み中…(長い録画は少し時間がかかります)")
-        self.render_btn.state(["disabled"])
+        self.auto_msg.config(text="ファイルを読み込んでいます…(長い録画は少し時間がかかります)", fg="#333")
+        self.pbar.config(value=0)
+        self._busy(True)
         ast = self.jp_ast.get()  # Tk変数はメインスレッドで読む
 
         def work():
@@ -882,8 +1383,8 @@ class App(_TkBase):
             except Exception as ex:  # noqa: BLE001
                 err = getattr(ex, "stderr", b"") or b""
                 msg = f"{ex}\n{err.decode(errors='ignore')[-500:] if isinstance(err, bytes) else err}"
-                self.q.put(lambda: (self.say("読み込み失敗"), messagebox.showerror("読み込みエラー", msg),
-                                    self.render_btn.state(["!disabled"])))
+                self.q.put(lambda: (self.say("読み込み失敗"), self.auto_msg.config(text="⚠ 読み込めませんでした", fg="#b33"),
+                                    messagebox.showerror("読み込みエラー", msg), self._busy(False)))
                 return
             self.q.put(lambda: self._loaded(m))
         threading.Thread(target=work, daemon=True).start()
@@ -898,12 +1399,15 @@ class App(_TkBase):
         if not self.out_path.get():
             p = Path(self.en_var.get())
             self.out_path.set(str(p.with_name(p.stem + "_jpdub.mkv")))
-        self.render_btn.state(["!disabled"])
+        self._busy(False)
         self.say(f"読み込み完了  EN {m['en'].fps:.3f}fps / JP {m['jp'].fps:.3f}fps")
         self.set_active("en")
         self.refresh()
         for k in ("en", "jp"):
             self.update_preview(k)
+        if getattr(self, "_auto_after_load", False):
+            self._auto_after_load = False
+            self.run_auto()
 
     # ---------- カーソル ----------
     def fps(self, k):
@@ -1052,6 +1556,7 @@ class App(_TkBase):
                                for i, s in enumerate(self.segs)]
         for t in self.tr.values():
             t.redraw()
+        self.refresh_easy()
 
     def sel_idx(self):
         s = self.tree.selection()
@@ -1239,19 +1744,24 @@ class App(_TkBase):
     # ---------- 合成 ----------
     def render(self):
         if not self.segs:
-            messagebox.showinfo("区間なし", "区間がありません")
+            messagebox.showinfo("区間なし", "区間がありません。先に「自動で合わせる」を実行してください。")
             return
         if not self.out_path.get():
             self.pick_out()
             if not self.out_path.get():
                 return
+        out = Path(self.out_path.get())
+        if out.exists() and not messagebox.askyesno("上書き確認", f"{out.name} は既にあります。上書きしますか?"):
+            return
+        # 設定ファイルは保存先の隣に自動で作る(質問しない)
         if not self.proj_path:
-            if not self.save_project(ask=True):
-                return
-        else:
-            self.save_project(ask=False)
+            self.proj_path = str(out.with_name(out.stem + ".syncdub.json"))
+        self.save_project(ask=False)
         proj = self.proj_path
-        self.render_btn.state(["disabled"])
+        self._busy(True)
+        self.rbar.start(12)
+        self.open_btn.pack_forget()
+        self.easy_done.config(text="合成しています…(動画の長さによって数分かかります)", fg="#333")
         self.say("合成中…")
         self.logw(f"--- 合成開始: {proj}")
 
@@ -1272,8 +1782,15 @@ class App(_TkBase):
 
     def _render_done(self, text, ok):
         self.logw(text)
-        self.render_btn.state(["!disabled"])
-        self.say("合成完了" if ok else "合成に失敗しました (ログを確認)")
+        self.rbar.stop()
+        self._busy(False)
+        if ok:
+            self.easy_done.config(text=f"✔ 完成しました: {Path(self.out_path.get()).name}", fg="#1f6f43")
+            self.open_btn.pack(side="left", padx=8)
+        else:
+            self.easy_done.config(text="⚠ 合成に失敗しました (詳細は「手動調整」タブ下のログ)", fg="#b33")
+            messagebox.showerror("合成に失敗", text[-600:])
+        self.say("合成完了" if ok else "合成に失敗しました")
 
 
 if __name__ == "__main__":
