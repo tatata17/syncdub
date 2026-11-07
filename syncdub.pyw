@@ -374,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.23"
+APP_VERSION = "2026.11.07.24"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -670,56 +670,69 @@ def auto_align(en, jp, progress=lambda f, m: None):
     offs = [float(np.median([o for o, _ in c])) for c in clusters]
 
     # ---- 2) 英語側を窓で区切り、各窓がどのオフセットに合うか判定
-    WL, HOP, RAD = 5.0, 2.0, 0.5
-    nw = int(WL * fs)
-    wts = np.arange(t0e, max(e_end - WL, t0e) + 1e-9, HOP)
-    lab = np.full(len(wts), -1)
-    off_i = np.zeros(len(wts))
-    z_i = np.zeros(len(wts))
-    for wi, t in enumerate(wts):
-        a = esl(t, WL)
-        if not loud(a):
-            lab[wi] = -2
-            continue
-        a0 = a - a.mean()
-        best = (-1, 0.0, 0.0)
-        for ci, o in enumerate(offs):
-            b = jsl(t + o - RAD, WL + 2 * RAD)
-            if np.abs(b).max() < 1e-6:
+    #      (短い録画や効果音の少ない録画で判定できないときは、窓を短く・基準をゆるめて再挑戦する)
+    def attempt(WL, HOP, RAD, ZM, MINRUN):
+        # ---- 2) 英語側を窓で区切り、各窓がどのオフセットに合うか判定
+        nw = int(WL * fs)
+        wts = np.arange(t0e, max(e_end - WL, t0e) + 1e-9, HOP)
+        lab = np.full(len(wts), -1)
+        off_i = np.zeros(len(wts))
+        z_i = np.zeros(len(wts))
+        for wi, t in enumerate(wts):
+            a = esl(t, WL)
+            if not loud(a):
+                lab[wi] = -2
                 continue
-            nc = _nc_local(a0, b)
-            k = int(nc.argmax())
-            z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
-            if z > best[2]:
-                best = (ci, o - RAD + k / fs, z)
-        if best[2] >= 7:
-            lab[wi], off_i[wi], z_i[wi] = best[0], best[1], best[2]
-        if wi % 20 == 0:
-            progress(0.30 + 0.45 * wi / len(wts), "区間を判定しています…")
+            a0 = a - a.mean()
+            best = (-1, 0.0, 0.0)
+            for ci, o in enumerate(offs):
+                b = jsl(t + o - RAD, WL + 2 * RAD)
+                if np.abs(b).max() < 1e-6:
+                    continue
+                nc = _nc_local(a0, b)
+                k = int(nc.argmax())
+                z = (nc[k] - nc.mean()) / (nc.std() + 1e-9)
+                if z > best[2]:
+                    best = (ci, o - RAD + k / fs, z)
+            if best[2] >= ZM:
+                lab[wi], off_i[wi], z_i[wi] = best[0], best[1], best[2]
+            if wi % 20 == 0:
+                progress(0.30 + 0.45 * wi / len(wts), "区間を判定しています…")
 
-    # ---- 3) 平滑化: 短すぎる孤立区間を除き、同じ相手に挟まれた空白を埋める
-    def runs_of(l):
-        r, s = [], 0
-        for i in range(1, len(l) + 1):
-            if i == len(l) or l[i] != l[s]:
-                r.append((l[s], s, i - 1))
-                s = i
-        return r
-    for lb, s, e in runs_of(list(lab)):
-        if lb >= 0 and e - s + 1 < 2:
-            lab[s:e + 1] = -1
-    inferred = np.zeros(len(wts), bool)
-    rr = runs_of(list(lab))
-    for i in range(1, len(rr) - 1):
-        lb, s, e = rr[i]
-        if lb < 0 and rr[i - 1][0] >= 0 and rr[i - 1][0] == rr[i + 1][0]:
-            lab[s:e + 1] = rr[i - 1][0]
-            inferred[s:e + 1] = True
-            off_i[s:e + 1] = np.median(off_i[rr[i - 1][1]:rr[i - 1][2] + 1])
-    rr = [r for r in runs_of(list(lab)) if r[0] >= 0]
+        # ---- 3) 平滑化: 短すぎる孤立区間を除き、同じ相手に挟まれた空白を埋める
+        def runs_of(l):
+            r, s = [], 0
+            for i in range(1, len(l) + 1):
+                if i == len(l) or l[i] != l[s]:
+                    r.append((l[s], s, i - 1))
+                    s = i
+            return r
+        for lb, s, e in runs_of(list(lab)):
+            if lb >= 0 and e - s + 1 < MINRUN:
+                lab[s:e + 1] = -1
+        inferred = np.zeros(len(wts), bool)
+        rr = runs_of(list(lab))
+        for i in range(1, len(rr) - 1):
+            lb, s, e = rr[i]
+            if lb < 0 and rr[i - 1][0] >= 0 and rr[i - 1][0] == rr[i + 1][0]:
+                lab[s:e + 1] = rr[i - 1][0]
+                inferred[s:e + 1] = True
+                off_i[s:e + 1] = np.median(off_i[rr[i - 1][1]:rr[i - 1][2] + 1])
+        rr = [r for r in runs_of(list(lab)) if r[0] >= 0]
+
+        return WL, wts, lab, off_i, z_i, inferred, rr
+
+    tries = [(5.0, 2.0, 0.5, 7.0, 2)]
+    if e_dur < 60:
+        tries += [(3.0, 1.0, 0.5, 6.0, 2), (2.0, 0.5, 0.5, 5.5, 3)]
+    for WL, HOP, RAD, ZM, MINRUN in tries:
+        WL, wts, lab, off_i, z_i, inferred, rr = attempt(WL, HOP, RAD, ZM, MINRUN)
+        if rr:
+            break
     if not rr:
         return [], {"ok": False, "unused_jp": [],
                     "msg": "区間を判定できませんでした。BGMや効果音が少ない作品は「手動調整」タブをお使いください。"}
+    relaxed = (WL, ZM) != (5.0, 7.0)
 
     # ---- 3.5) 少しずつ変化するオフセット(速度差)で別々の区間に割れたものを1つに戻す
     def merge_runs(rr):
@@ -730,7 +743,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 (l0, s0, e0), (l1, s1, e1) = rr[i], rr[i + 1]
                 if s1 - e0 > 5:
                     continue
-                idx = [j for j in list(range(s0, e0 + 1)) + list(range(s1, e1 + 1)) if not inferred[j] and z_i[j] >= 7]
+                idx = [j for j in list(range(s0, e0 + 1)) + list(range(s1, e1 + 1)) if not inferred[j] and z_i[j] >= ZM]
                 if len(idx) < 4:
                     continue
                 tc, oo = wts[idx] + WL / 2, off_i[idx]
@@ -746,7 +759,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
 
     # ---- 4) 各区間のオフセット(一定 or わずかな速度差)を推定
     def fit_run(lb, s, e):
-        idx = [i for i in range(s, e + 1) if not inferred[i] and z_i[i] >= 7]
+        idx = [i for i in range(s, e + 1) if not inferred[i] and z_i[i] >= ZM]
         if not idx:
             idx = list(range(s, e + 1))
         tc = wts[idx] + WL / 2
@@ -877,6 +890,8 @@ def auto_align(en, jp, progress=lambda f, m: None):
             reasons.append("終了位置が不確か")
         if inferred[s:e + 1].any():
             reasons.append("声だけの場面を推定")
+        if relaxed:
+            reasons.append("短い録画のため、ゆるい基準で判定")
         segs.append({"en_start": round(float(en_s), 4), "en_end": round(float(en_e), 4), "jp_start": round(float(jp_s), 4),
                      "jp_end": None if const else round(float(jp_e), 4), "fit": "stretch", "note": "自動",
                      "lag": "", "conf": float(f[2]), "flag": "・".join(reasons)})
