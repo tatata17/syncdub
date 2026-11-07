@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.14"
+APP_VERSION = "2026.11.07.15"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1250,6 +1250,70 @@ def set_window_taskbar_identity(win):
         pass
 
 
+class RangeSelect:
+    """Treeview の複数選択をエクスプローラーと同じ動きにする (起点を1つだけ持つ)。
+    クリック/Ctrl+クリック=その行が起点 / Shift+クリック=起点からの範囲 / Ctrl+Shift+クリック=範囲を追加 /
+    Shift+↑↓・PageUp/Down・Home/End=起点から広げる / ↑↓のみ=移動先が新しい起点 / Ctrl+A=全選択"""
+
+    def __init__(self, tree):
+        self.t, self.anchor = tree, None
+        tree.configure(selectmode="extended")
+        tree.bind("<Button-1>", self.click, add="+")
+        tree.bind("<Control-a>", self.all)
+        tree.bind("<Control-A>", self.all)
+        for k in ("Up", "Down", "Prior", "Next", "Home", "End"):
+            tree.bind(f"<Shift-{k}>", lambda e, k=k: self.shift_key(k))
+            tree.bind(f"<KeyPress-{k}>", lambda e: self.after_move(), add="+")
+
+    def rows(self):
+        return list(self.t.get_children())
+
+    def _anchor(self):
+        rows = self.rows()
+        if self.anchor in rows:
+            return self.anchor
+        sel = self.t.selection()
+        self.anchor = self.t.focus() or (sel[0] if sel else (rows[0] if rows else None))
+        return self.anchor
+
+    def click(self, e):
+        row = self.t.identify_row(e.y)
+        if not row:
+            return
+        shift, ctrl = bool(e.state & 0x1), bool(e.state & 0x4)
+        if shift:
+            a, rows = self._anchor(), self.rows()
+            if a in rows:
+                i, j = sorted((rows.index(a), rows.index(row)))
+                rng = rows[i:j + 1]
+                self.t.selection_set(list(self.t.selection()) + rng if ctrl else rng)
+                self.t.focus(row)
+                return "break"
+        self.anchor = row
+
+    def shift_key(self, k):
+        rows = self.rows()
+        if not rows:
+            return "break"
+        a = self._anchor()
+        cur = self.t.focus() if self.t.focus() in rows else a
+        i = rows.index(cur)
+        ni = {"Up": i - 1, "Down": i + 1, "Prior": i - 10, "Next": i + 10, "Home": 0, "End": len(rows) - 1}[k]
+        ni = min(max(ni, 0), len(rows) - 1)
+        lo, hi = sorted((rows.index(a), ni))
+        self.t.selection_set(rows[lo:hi + 1])
+        self.t.focus(rows[ni])
+        self.t.see(rows[ni])
+        return "break"
+
+    def after_move(self):
+        self.t.after_idle(lambda: setattr(self, "anchor", self.t.focus() or self.anchor))
+
+    def all(self, _e=None):
+        self.t.selection_set(self.rows())
+        return "break"
+
+
 # ------------------------------------------------------------------ アプリ
 
 
@@ -1406,13 +1470,14 @@ class App(_TkBase):
         mid2 = ttk.Frame(lf)
         mid2.pack(fill="both", expand=True, padx=4, pady=4)
         cols = ("kind", "en", "jp", "note")
-        self.itree = ttk.Treeview(mid2, columns=cols, show="headings", height=3, selectmode="browse")
+        self.itree = ttk.Treeview(mid2, columns=cols, show="headings", height=3, selectmode="extended")
         for c, h, w in zip(cols, ("種類", "英語版", "日本語の録画", "内容"), (110, 190, 190, 560)):
             self.itree.heading(c, text=h)
             self.itree.column(c, width=w, anchor="w")
         for kind, bg in (("pt", "#e6f6ec"), ("cm", "#e6e8ec"), ("dim", "#efe8ff"), ("cut", "#ffecd2")):
             self.itree.tag_configure(kind, background=bg)
         self.itree.pack(side="left", fill="both", expand=True)
+        RangeSelect(self.itree)
         self.itree.bind("<<TreeviewSelect>>", self.on_item_select)
         self.itree.bind("<Double-1>", lambda e: self.edit_item())
         self.itree.bind("<Delete>", lambda e: self.del_item())
@@ -1420,6 +1485,7 @@ class App(_TkBase):
         bt.pack(side="left", padx=6, anchor="n")
         ttk.Button(bt, text="編集", width=8, command=self.edit_item).pack(pady=2)
         ttk.Button(bt, text="削除", width=8, command=self.del_item).pack(pady=2)
+        ttk.Button(bt, text="全部削除", width=8, command=self.clear_items).pack(pady=2)
         self.warn_lbl = tk.Label(lf, text="", anchor="w", justify="left", wraplength=1180, fg="#8a5a00")
         self.warn_lbl.pack(fill="x", padx=8, pady=(0, 4))
 
@@ -2185,6 +2251,8 @@ class App(_TkBase):
         return int(s[0]) if s else None
 
     def on_item_select(self, _):
+        if len(self.itree.selection()) != 1:
+            return
         i = self.item_idx()
         if i is None or not self.media["en"]:
             return
@@ -2201,11 +2269,23 @@ class App(_TkBase):
             self.set_cursor("jp", it["jp0"], scroll=True)
 
     def del_item(self):
-        i = self.item_idx()
-        if i is not None:
+        sel = sorted((int(x) for x in self.itree.selection()), reverse=True)
+        if not sel:
+            return
+        for i in sel:
             del self.items[i]
-            self.auto_flags = None
-            self.rebuild()
+        self.auto_flags = None
+        self.rebuild()
+        self.say(f"{len(sel)}件を削除しました (Ctrl+Z で元に戻せます)")
+
+    def clear_items(self):
+        if not self.items:
+            return
+        if not messagebox.askyesno("全部削除", f"指定 {len(self.items)} 件をすべて削除しますか?\n(Ctrl+Z で元に戻せます)"):
+            return
+        self.items = []
+        self.auto_flags = None
+        self.rebuild()
 
     def edit_item(self):
         i = self.item_idx()

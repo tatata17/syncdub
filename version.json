@@ -1,1 +1,1 @@
-{"version": "2026.11.07.14", "file": "syncdub.pyw", "notes": "上部の余白をなくし、更新ボタンをタブと同じ行に配置"}
+{"version": "2026.11.07.15", "file": "syncdub.pyw", "notes": "指定の一覧を複数選択(Shift/Ctrl/Ctrl+A)してまとめて削除、全部削除ボタン"}
