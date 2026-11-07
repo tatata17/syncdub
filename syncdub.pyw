@@ -368,7 +368,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.19"
+APP_VERSION = "2026.11.07.20"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -2424,7 +2424,12 @@ class App(_TkBase):
         self.items = d.get("items", [])
         self.auto_flags = None
         self.rebuild()
-        self.say("プロジェクトを読み込みました。「読み込み」で素材の波形を読み込んでください")
+        if Path(self.en_var.get()).exists() and Path(self.jp_var.get()).exists():
+            self.say("設定を読み込みました。素材の波形を読み込んでいます…")
+            self._auto_after_load = False
+            self.load_media()
+        else:
+            self.say("設定を読み込みました。素材のファイルが見つかりません。パスを確かめて「読み込む」を押してください")
 
     # ---------- 合成 ----------
     def render(self):
