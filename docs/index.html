@@ -50,6 +50,7 @@ kbd,code{background:var(--code);border:1px solid var(--line);border-radius:4px;p
 .cl h4{margin:2px 0;font-size:16px}.cl .tag{font-size:12px;background:var(--acc);color:#fff;border-radius:10px;padding:1px 8px;margin-left:6px}
 .cl ul{margin:4px 0 6px;padding-left:1.3em}
 details.cl>summary{cursor:pointer;font-weight:700}
+main section{overflow-x:auto}.start{background:rgba(255,255,255,.14);border-radius:10px;padding:10px 16px;margin:12px 0}.start b.t{display:block;font-size:17px}.start ol{margin:4px 0 0;padding-left:1.4em}.start li{color:#fff}
 footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
 @media(max-width:820px){.wrap{display:block}#tocbtn{display:inline-block}nav.toc{display:none;position:static;max-height:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:14px}nav.toc.open{display:block}main section{padding:6px 14px 14px}}
 </style>
@@ -84,6 +85,11 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <li>出来上がりは、日本語音声が最初(既定)・英語音声も残った mkv</li>
   <li>ファイルは1つだけ(<code>syncdub.pyw</code>)。更新はGitHub経由で自動</li>
  </ul>
+ <div class="start"><b class="t">まずはこの3ステップ</b>
+  <ol><li>下のボタンから <code>syncdub.pyw</code> を保存して、ダブルクリックで起動</li>
+  <li>「かんたん」タブに、英語版の映像と日本語の録画をドロップして「自動で合わせる」</li>
+  <li>結果を確認して「合成スタート」</li></ol>
+  <span style="font-size:14px">うまくいかないときだけ「手動調整」タブを使います(上級者向け)。ボタンにマウスを乗せると説明が出ます。</span></div>
  <a class="dl" id="dl" href="https://raw.githubusercontent.com/tatata17/syncdub/main/syncdub.pyw" download>syncdub.pyw をダウンロード</a>
  <span class="ver" id="latest">最新版を確認中…</span>
 </section>
@@ -91,11 +97,11 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
 <section id="install">
  <h2><small>01</small>必要なものと導入</h2>
  <table>
-  <tr><th>必要なもの</th><th>説明</th></tr>
-  <tr><td>Python 3</td><td>python.org から入れます(「Add python.exe to PATH」にチェック)</td></tr>
-  <tr><td>numpy</td><td><code>pip install numpy</code></td></tr>
-  <tr><td>ffmpeg / ffprobe</td><td>PATH の通った場所に置きます(<code>ffmpeg -version</code> が動けばOK)</td></tr>
-  <tr><td>tkinterdnd2(任意)</td><td><code>pip install tkinterdnd2</code>。入れるとファイルのドラッグ&ドロップが使えます</td></tr>
+  <tr><th>必要なもの</th><th>必須?</th><th>説明</th></tr>
+  <tr><td>Python 3</td><td>必須</td><td>このソフトを動かすための土台です。python.org から入れます。インストール画面の「Add python.exe to PATH」には<b>必ずチェック</b>を入れてください。<code>tcl/tk</code> のチェックは外さないでください(外すと画面が出ません)。</td></tr>
+  <tr><td>numpy</td><td>必須</td><td>音の計算に使う部品です。コマンドプロンプトで <code>pip install numpy</code></td></tr>
+  <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
+  <tr><td>tkinterdnd2</td><td>任意</td><td>入れると、ファイルのドラッグ&ドロップが使えます。<code>pip install tkinterdnd2</code>。入れなくても、クリックでファイルを選べます。</td></tr>
  </table>
  <ol>
   <li>上の「ダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
@@ -113,6 +119,8 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <li><b>結果を確認</b> … 区間(A, B, C…)の表が出ます。行を選ぶと、その区間の先頭を聞き比べられます。「要確認」の行は特に確かめてください。</li>
   <li><b>合成する</b> … 保存先を確かめて「合成スタート」。出来上がると「完成しました」と出ます。</li>
  </ol>
+ <h3>出来上がったファイルの確認</h3>
+ <p>保存先(既定は英語版と同じフォルダの <code>〜_jpdub.mkv</code>)に、1本の mkv ができます。映像は英語版のまま、音声は<b>日本語(最初・既定)と英語の2本</b>入っています。プレーヤー(VLC など)の「音声」メニューで切り替えられます。「フォルダを開く」ボタンで場所を開けます。</p>
  <div class="box warn"><b>注意</b> 声だけの場面(BGMや効果音が少ない所)は、音の照合が当たりにくく、「要確認」になることがあります。その場合は手動調整で『同じ場面』を足してください。</div>
 </section>
 
@@ -196,6 +204,10 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <tr><td>暗転の長さが違って音が速く/遅くなる</td><td>「暗転・長さ違い」で、上下の範囲を指定してください(速さを変える / 無音で埋める / 切る)。</td></tr>
   <tr><td>再生しても音が出ない</td><td>ffmpeg が必要です。また、Windows の音量・出力先を確認してください。</td></tr>
   <tr><td>ドラッグ&ドロップが効かない</td><td><code>pip install tkinterdnd2</code> を実行して、再起動してください。クリックしてファイルを選ぶこともできます。</td></tr>
+  <tr><td>「区間を判定できませんでした」と出る</td><td>音が少ない場面や、短い録画(数十秒など)で出ることがあります。最新版に更新して、もう一度「自動で合わせる」を押してください。それでもだめなら、手動調整で『同じ場面』を登録します。</td></tr>
+  <tr><td>つなぎ目で「プツッ」と音が聞こえる</td><td>最新版では、つなぎ目の処理を改善しています。更新してから作り直してください。</td></tr>
+  <tr><td>手動調整の「指定の一覧」が見えない・狭い</td><td>画面の高さが足りないときに起こります。ウィンドウを縦に広げてください(最新版では見えやすく改善済み)。</td></tr>
+  <tr><td>ダブルクリックしても起動しない</td><td>Python が入っていないか、<code>tcl/tk</code> を外してインストールした可能性があります。Python を入れ直してください(上の「必要なもの」参照)。</td></tr>
   <tr><td>更新に失敗した・調子が悪い</td><td>「元に戻す」で前の版に戻せます。</td></tr>
  </table>
 </section>

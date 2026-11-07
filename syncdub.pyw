@@ -374,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.26"
+APP_VERSION = "2026.11.07.27"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1112,6 +1112,106 @@ def items_from_segs(segs):
     return items
 
 
+# ------------------------------------------------------------------ ツールチップ (マウスを乗せると説明が出る)
+
+
+class Tooltip:
+    DELAY = 500
+
+    def __init__(self, widget, text):
+        self.w, self.text, self.tip, self.job = widget, text, None, None
+        widget.bind("<Enter>", self._enter, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _enter(self, e=None):
+        self._hide()
+        self.job = self.w.after(self.DELAY, self._show)
+
+    def _show(self):
+        self.job = None
+        try:
+            x = self.w.winfo_pointerx() + 14
+            y = self.w.winfo_pointery() + 18
+            t = tk.Toplevel(self.w)
+            t.wm_overrideredirect(True)
+            tk.Label(t, text=self.text() if callable(self.text) else self.text, justify="left", bg="#fffbe6",
+                     fg="#333", relief="solid", borderwidth=1, padx=8, pady=5, wraplength=360,
+                     font=("", 9)).pack()
+            t.update_idletasks()
+            sw, sh = t.winfo_screenwidth(), t.winfo_screenheight()
+            x = max(0, min(x, sw - t.winfo_reqwidth() - 8))
+            y = y if y + t.winfo_reqheight() < sh - 8 else self.w.winfo_pointery() - t.winfo_reqheight() - 8
+            t.wm_geometry(f"+{x}+{y}")
+            self.tip = t
+        except Exception:
+            self.tip = None
+
+    def _hide(self, e=None):
+        if self.job:
+            try:
+                self.w.after_cancel(self.job)
+            except Exception:
+                pass
+            self.job = None
+        if self.tip:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+            self.tip = None
+
+
+# ボタン等の表示文字 → 説明
+TIPS = {
+    "参照": "ファイルを選ぶ画面を開きます。",
+    "読み込む": "選んだ2つのファイルを読み込んで、波形と画面を表示します。",
+    "設定を開く": "前に保存した作業(同じ場面・CMなどの指定)を開きます。",
+    "設定を保存": "いまの作業を保存します。あとで「設定を開く」で続きから再開できます。",
+    "更新を確認": "新しい版があるか調べます。あれば、押すだけで更新できます。",
+    "元に戻す": "更新前の版に戻します。更新したあと調子が悪いときに使います。",
+    "起動時に更新を確認": "チェックを入れておくと、起動するたびに新しい版を確認します。",
+    "全体 (Home)": "波形を全体が見える大きさに戻します。(Home キー)",
+    "縮小 ↓": "波形を縮小して、広い範囲を見ます。(↓ キー / ホイール)",
+    "拡大 ↑": "波形を拡大して、細かく見ます。(↑ キー / ホイール)",
+    "▶ 再生": "カーソルの位置から、約20秒の音を再生します。もう一度押すと止まります。(Space)",
+    "A 音で探して合わせる": "上(英語)のカーソル付近の音を、下(日本語)から探して、自動でカーソルを合わせます。",
+    "S この2つは『同じ場面』": "上下のカーソルの位置は同じ場面(同じフレーム)、と登録します。音合わせの基準になります。(S キー)",
+    "登録するとき、音で微調整する": "登録した位置のわずかなずれを、音の照合で自動的に直します。通常はオンのままで構いません。",
+    "CM": "波形で選んだ下(日本語)の範囲を『CM』として、使わない部分にします。",
+    "暗転・長さ違い": "上下で選んだ範囲は同じ場面だが長さが違うとき(暗転など)に使います。速さを変える・無音で埋める・切る、から選べます。",
+    "カット": "波形で選んだ上(英語)の範囲は、日本語版でカットされている部分として登録します。",
+    "選択を解除": "波形で選んだ範囲を取り消します。(Esc キー)",
+    "編集": "選んだ行の内容を変更します。(行をダブルクリックでも可)",
+    "削除": "選んだ行を削除します。(Delete キー。Ctrl を押しながら複数選べます)",
+    "全部削除": "一覧の指定をすべて消します。(Ctrl+Z で戻せます)",
+    "変更": "保存先のファイル名と場所を変えます。",
+    "合成スタート": "日本語の音声を合わせて、1本の mkv に書き出します。映像は再エンコードしません。",
+    "自動で合わせる": "2つの音を照合して、対応する場所を自動で探します。長い動画は数分かかります。",
+    "▶ 英語版を聞く": "選んだ区間の先頭付近を、英語版の音で再生します。",
+    "▶ 日本語を聞く": "選んだ区間の先頭付近を、日本語の録画の音で再生します。聞き比べて確かめます。",
+    "手動で直す →": "手動調整のタブを開きます。自動でうまくいかない区間を直せます。",
+    "フォルダを開く": "出来上がったファイルのあるフォルダを開きます。",
+}
+
+
+def attach_tips(root, extra=()):
+    """root 以下のボタン等に TIPS の説明を付ける。extra は (部品, 説明) の追加分。"""
+    def walk(w):
+        for c in w.winfo_children():
+            try:
+                t = c.cget("text")
+            except Exception:
+                t = None
+            if isinstance(t, str) and t in TIPS and c.winfo_class() in ("TButton", "TCheckbutton", "Button"):
+                Tooltip(c, TIPS[t])
+            walk(c)
+    walk(root)
+    for w, text in extra:
+        Tooltip(w, text)
+
+
 # ------------------------------------------------------------------ 波形トラック
 
 
@@ -1645,6 +1745,14 @@ class App(_TkBase):
         lf.pack_forget()  # 一覧を最後に詰め直す = 窓が低いときは一覧のほうが縮み、保存先・合成ボタンは隠れない
         lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
         self._build_easy()
+        attach_tips(self, extra=[
+            (self.en_ent, "英語版(きれいな映像)のファイルの場所です。"),
+            (self.jp_ent, "日本語吹き替えの音声が入った録画ファイルの場所です。"),
+            (self.itree, "登録した指定の一覧です。行をクリックすると、その場所に移動します。"),
+            (self.etree, "自動で見つけた区間の一覧です。「要確認」の行は特に確かめてください。"),
+        ] + [(w, t) for k, t in (("en", "きれいな英語版の映像ファイルをここにドロップ、またはクリックして選びます。"),
+                                  ("jp", "日本語吹き替えが入った録画ファイルをここにドロップ、またはクリックして選びます。"))
+             for w in (self.zone[k]["frame"], self.zone[k]["title"], self.zone[k]["name"])])
 
     # ---------- ヘッダー(更新) / かんたんタブ ----------
     def _build_header(self):
