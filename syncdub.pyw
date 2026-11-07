@@ -234,13 +234,19 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                 # 指定時刻は映像の先頭=0 なので、その差(jp_off)を足す。
                 js = s.jp_start + jp_off
                 je = (s.jp_end + jp_off) if s.jp_end is not None else js + D
-                chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
                 jdur = je - js
                 if s.fit == "stretch" and abs(jdur - D) > 1e-6:
                     r = jdur / D
                     if abs(r - 1) > 0.05:
                         warns.append(f"区間{i} ({s.en_start:.3f}-{s.en_end:.3f}): 速度比 {r:.3f} は大きい")
-                    chain.append(atempo_chain(r))
+                    # atempo は出力の頭と末尾に数msの欠け(無音)ができるため、前後に余白をつけて通し、
+                    # 余白ぶんを切り捨てる (これをしないと、区間の境目で「ぶつぶつ」と音が途切れる)
+                    a0 = min(0.1, max(js, 0.0))
+                    a1 = 0.1
+                    chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS", atempo_chain(r),
+                             f"atrim={a0 / r:.6f}:{a0 / r + D:.6f}", "asetpts=PTS-STARTPTS"]
+                else:
+                    chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
                 src = f"[sj{kj}]"
                 kj += 1
             chain.append(f"apad=whole_dur={D:.6f}")
@@ -302,7 +308,7 @@ def _main(argv, tmp):
 
     sr = int(proj.get("sample_rate", 48000))
     layout = proj.get("channel_layout", "stereo")
-    fade = float(proj.get("fade_ms", 8)) / 1000
+    fade = float(proj.get("fade_ms", 3)) / 1000
     jp_a = int(proj.get("jp_audio_stream", 0))
     jp_off, en_off = video_start_offset(jp), video_start_offset(en)
     single = bool(a.audio_only)
@@ -368,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.21"
+APP_VERSION = "2026.11.07.22"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
