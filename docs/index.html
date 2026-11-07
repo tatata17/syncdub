@@ -100,9 +100,24 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <tr><th>必要なもの</th><th>必須?</th><th>説明</th></tr>
   <tr><td>Python 3</td><td>必須</td><td>このソフトを動かすための土台です。python.org から入れます。インストール画面の「Add python.exe to PATH」には<b>必ずチェック</b>を入れてください。<code>tcl/tk</code> のチェックは外さないでください(外すと画面が出ません)。</td></tr>
   <tr><td>numpy</td><td>必須</td><td>音の計算に使う部品です。コマンドプロンプトで <code>pip install numpy</code></td></tr>
-  <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
+  <tr><td>ffmpeg / ffprobe</td><td>必須</td><td>音声・動画を読み書きする道具です。「PATH が通っている」(どのフォルダからでも呼び出せる)状態にします。入れかたは下の「ffmpeg の入れかた」を見てください。コマンドプロンプトで <code>ffmpeg -version</code> と打って、版の情報が出ればOKです。</td></tr>
   <tr><td>tkinterdnd2</td><td>任意</td><td>入れると、ファイルのドラッグ&ドロップが使えます。<code>pip install tkinterdnd2</code>。入れなくても、クリックでファイルを選べます。</td></tr>
  </table>
+ <h3>ffmpeg の入れかた(PATH とは?)</h3>
+ <p><b>PATH</b> は、「どのフォルダにいても、名前を打つだけでそのソフトを呼び出せる」ようにする Windows の設定です。syncdub は ffmpeg を名前で呼び出すので、ここが通っていないと「読み込めない」エラーになります。次のどちらかで入れてください。</p>
+ <div class="box tip"><b>かんたんな方法(おすすめ)</b> Windows 10/11 なら、<b>コマンドプロンプト</b>(スタートメニューで「cmd」と検索)に次を貼り付けて Enter。PATH も自動で設定されます。
+  <p style="margin:6px 0"><code>winget install Gyan.FFmpeg</code></p>
+  終わったら、<b>コマンドプロンプトを閉じて開き直し</b>、<code>ffmpeg -version</code> と打って版の情報が出れば完了です。syncdub は一度終了して、起動し直してください。</div>
+ <details class="cl"><summary>手動で入れる方法(上でうまくいかないとき)</summary>
+  <ol>
+   <li><a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev の ffmpeg ビルド</a>から「release builds」の <code>ffmpeg-release-essentials.zip</code> をダウンロードします。</li>
+   <li>zip を展開し、中身のフォルダを <code>C:\ffmpeg</code> のような分かりやすい場所に置きます(<code>C:\ffmpeg\bin</code> の中に <code>ffmpeg.exe</code> と <code>ffprobe.exe</code> があれば正解)。</li>
+   <li>スタートメニューで「環境変数」と検索 →「システム環境変数の編集」→「環境変数」ボタン。</li>
+   <li>上の欄(ユーザー環境変数)の <code>Path</code> を選んで「編集」→「新規」で <code>C:\ffmpeg\bin</code> を追加し、OK を押して閉じます。</li>
+   <li>コマンドプロンプトを開き直して、<code>ffmpeg -version</code> と <code>ffprobe -version</code> で確認します。</li>
+  </ol>
+  <p style="font-size:14px;color:var(--sub)">困ったときは「Windows PATH 通す」で検索すると、画像つきの解説がたくさん見つかります。</p>
+ </details>
  <ol>
   <li>上の「ダウンロード」ボタンから <code>syncdub.pyw</code> を保存します。</li>
   <li>好きなフォルダに置いて、ダブルクリックで起動します。</li>
@@ -198,7 +213,7 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
  <h2><small>06</small>困ったとき</h2>
  <table>
   <tr><th>症状</th><th>原因と対処</th></tr>
-  <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります。<code>ffmpeg -version</code> を確認してください。</td></tr>
+  <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります(「01 必要なもの」の入れかたを参照)。<code>ffmpeg -version</code> を確認してください。</td></tr>
   <tr><td>「要確認」が出る</td><td>声だけの場面などは照合が弱いです。その区間の先頭を聞き比べて、ずれていたら手動調整で『同じ場面』を登録します。</td></tr>
   <tr><td>後半に向かって少しずつずれる</td><td>録画と英語版で速さが微妙に違うことがあります。区間の終わり近くにも『同じ場面』を1つ登録してください。</td></tr>
   <tr><td>暗転の長さが違って音が速く/遅くなる</td><td>「暗転・長さ違い」で、上下の範囲を指定してください(速さを変える / 無音で埋める / 切る)。</td></tr>
