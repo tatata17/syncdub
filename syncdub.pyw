@@ -368,7 +368,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.20"
+APP_VERSION = "2026.11.07.21"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1436,7 +1436,7 @@ class App(_TkBase):
         for k, name in (("en", "英語版 (カーソル位置の画面)"), ("jp", "日本語の録画 (カーソル位置の画面)")):
             fr = ttk.LabelFrame(mid, text=name)
             fr.grid(row=0, column=0 if k == "en" else 2, padx=4, sticky="n")
-            lab = tk.Label(fr, width=26, height=5, bg="black", fg="#888", text="(プレビュー)")
+            lab = tk.Label(fr, width=24, height=4, bg="black", fg="#888", text="(プレビュー)")
             lab.pack(padx=4, pady=4)
             self.pv[k] = lab
             row = ttk.Frame(fr)
@@ -1490,6 +1490,9 @@ class App(_TkBase):
         # 指定の一覧
         lf = ttk.LabelFrame(self.manual, text=" 指定の一覧 (行をクリックすると、その場所に移動します) ")
         lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
+        self.warn_lbl = tk.Label(lf, text="", anchor="w", justify="left", wraplength=1100, fg="#8a5a00")
+        self.warn_lbl.pack(side="bottom", fill="x", padx=8, pady=(0, 4))  # 先に確保して、窓が低くても隠れないようにする
+        lf.bind("<Configure>", lambda e: self.warn_lbl.config(wraplength=max(300, e.width - 40)))
         mid2 = ttk.Frame(lf)
         mid2.pack(fill="both", expand=True, padx=4, pady=4)
         cols = ("kind", "en", "jp", "note")
@@ -1509,8 +1512,6 @@ class App(_TkBase):
         ttk.Button(bt, text="編集", width=8, command=self.edit_item).pack(pady=2)
         ttk.Button(bt, text="削除", width=8, command=self.del_item).pack(pady=2)
         ttk.Button(bt, text="全部削除", width=8, command=self.clear_items).pack(pady=2)
-        self.warn_lbl = tk.Label(lf, text="", anchor="w", justify="left", wraplength=1180, fg="#8a5a00")
-        self.warn_lbl.pack(fill="x", padx=8, pady=(0, 4))
 
         self.log = tk.Text(self.manual, height=2, bg="#111", fg="#cfc", font=("Consolas", 9))
         self.log.pack(side="bottom", fill="x", padx=6, pady=(0, 2))
@@ -1521,6 +1522,8 @@ class App(_TkBase):
         ttk.Button(bot, text="変更", command=self.pick_out).pack(side="left")
         self.render_btn = ttk.Button(bot, text="合成スタート", command=self.render)
         self.render_btn.pack(side="left", padx=6)
+        lf.pack_forget()  # 一覧を最後に詰め直す = 窓が低いときは一覧のほうが縮み、保存先・合成ボタンは隠れない
+        lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
         self._build_easy()
 
     # ---------- ヘッダー(更新) / かんたんタブ ----------
@@ -2228,7 +2231,8 @@ class App(_TkBase):
                 note = (f"長さ違い: 英語 {it['en1'] - it['en0']:.2f}秒 ↔ 日本語 {it['jp1'] - it['jp0']:.2f}秒 "
                         f"({FIT_JA.get(it.get('fit'), '')})")
             self.itree.insert("", "end", iid=str(i), tags=(k,), values=(self.KIND_JA[k], en, jp, note))
-        self.warn_lbl.config(text="\n".join("⚠ " + w for w in self.warns[:2]))
+        more = f"  (ほか {len(self.warns) - 1} 件)" if len(self.warns) > 1 else ""
+        self.warn_lbl.config(text=("⚠ " + self.warns[0] + more) if self.warns else "")
         # 波形上の表示
         en_pts, jp_pts, n = [], [], 0
         for it in self.items:
