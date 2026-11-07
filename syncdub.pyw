@@ -69,13 +69,19 @@ def parse_time(v, fps=None):
 def run(cmd, **kw):
     if sys.platform == "win32":  # .pyw から呼んでもコンソールが出ないように
         kw.setdefault("creationflags", 0x08000000)
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    # 日本語Windowsの既定(cp932)で読むと文字化けするのでUTF-8固定
+    return subprocess.run(cmd, check=True, capture_output=True, encoding="utf-8", errors="replace", **kw)
 
 
 def probe(path):
-    out = run(["ffprobe", "-v", "error", "-show_format", "-show_streams",
-               "-of", "json", str(path)]).stdout
-    return json.loads(out)
+    # ファイル名やタグ(日本語・記号を含みやすい)は取得せず、必要な数値項目だけ読む
+    out = run(["ffprobe", "-v", "error", "-show_entries",
+               "format=start_time,duration:stream=index,codec_type,codec_name,channels,sample_rate,"
+               "start_time,avg_frame_rate", "-of", "json", str(path)]).stdout
+    try:
+        return json.loads(out)
+    except ValueError:  # 念のため: 不正なバックスラッシュを無害化して再試行
+        return json.loads(re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", out))
 
 
 def fmt_start(info):
@@ -317,7 +323,7 @@ def main(argv=None):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.3"
+APP_VERSION = "2026.11.07.4"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
