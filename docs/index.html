@@ -89,9 +89,10 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <ol><li>下のボタンから <code>syncdub.pyw</code> を保存して、ダブルクリックで起動</li>
   <li>「かんたん」タブに、英語版の映像と日本語の録画をドロップして「自動で合わせる」</li>
   <li>結果を確認して「合成スタート」</li></ol>
-  <span style="font-size:14px">うまくいかないときだけ「手動調整」タブを使います(上級者向け)。ボタンにマウスを乗せると説明が出ます。</span></div>
+  <span style="font-size:14px">うまくいかないときだけ「手動調整」タブを使います(上級者向け)。</span></div>
  <a class="dl" id="dl" href="https://raw.githubusercontent.com/tatata17/syncdub/main/syncdub.pyw" download>syncdub.pyw をダウンロード</a>
  <span class="ver" id="latest">最新版を確認中…</span>
+ <div class="box tip" style="color:var(--fg)"><b>ヒント</b> ソフトの中で、ボタンや入力欄にマウスを乗せると、そのはたらきの説明(ツールチップ)が出ます。分からなくなったら乗せてみてください。</div>
 </section>
 
 <section id="install">
@@ -225,6 +226,7 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <tr><td>ダブルクリックしても起動しない</td><td>Python が入っていないか、<code>tcl/tk</code> を外してインストールした可能性があります。Python を入れ直してください(上の「必要なもの」参照)。</td></tr>
   <tr><td>更新に失敗した・調子が悪い</td><td>「元に戻す」で前の版に戻せます。</td></tr>
  </table>
+ <p style="font-size:14px;color:var(--sub)">ここにない症状は、<a href="https://github.com/tatata17/syncdub/issues">GitHub の Issues</a> に、画面の様子とどのファイルで起きたかを書いてください。</p>
 </section>
 
 <section id="files">
@@ -234,7 +236,7 @@ footer{text-align:center;color:var(--sub);font-size:14px;padding:10px}
   <tr><td><code>syncdub.pyw</code></td><td>本体(これ1つで動きます)</td></tr>
   <tr><td><code>syncdub_settings.json</code></td><td>設定(更新確認のオン/オフ)。本体と同じフォルダ</td></tr>
   <tr><td><code>syncdub_backups/</code></td><td>更新前の旧版(最大5つ)</td></tr>
-  <tr><td>出来上がりの mkv</td><td>保存先に指定した場所。出力の隣に、作業用のファイルは残りません</td></tr>
+  <tr><td>出来上がりの mkv</td><td>保存先に指定した場所(既定は英語版と同じフォルダの <code>〜_jpdub.mkv</code>)。作業中の一時ファイルは Windows の一時フォルダに作られ、終わると消えます</td></tr>
   <tr><td>プロジェクト(.json)</td><td>「設定を保存」で作る、作業内容の保存ファイル(任意)</td></tr>
  </table>
 </section>
