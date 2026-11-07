@@ -1,1 +1,1 @@
-{"version": "2026.11.07.15", "file": "syncdub.pyw", "notes": "指定の一覧を複数選択(Shift/Ctrl/Ctrl+A)してまとめて削除、全部削除ボタン"}
+{"version": "2026.11.07.16", "file": "syncdub.pyw", "notes": "ショートカット追加: Ctrl+S/O(保存・開く), Ctrl+Shift+Z, Ctrl++/-/0(拡大縮小)"}

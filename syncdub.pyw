@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.15"
+APP_VERSION = "2026.11.07.16"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1354,6 +1354,14 @@ class App(_TkBase):
         for seq, fn in (("<Control-z>", self.undo), ("<Control-Z>", self.undo), ("<Control-y>", self.redo),
                         ("<Control-Y>", self.redo)):
             self.bind_all(seq, lambda e, fn=fn: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else fn())
+        def ok_(fn):
+            return lambda e: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else (fn(), "break")[1]
+        for seq, fn in (("<Control-Shift-z>", self.redo), ("<Control-Shift-Z>", self.redo),
+                        ("<Control-s>", lambda: self.save_project(ask=False)), ("<Control-S>", lambda: self.save_project(ask=True)),
+                        ("<Control-o>", self.open_project), ("<Control-0>", self.fit_all),
+                        ("<Control-plus>", lambda: self.zoom_key(0.7)), ("<Control-equal>", lambda: self.zoom_key(0.7)),
+                        ("<Control-minus>", lambda: self.zoom_key(1 / 0.7))):
+            self.bind_all(seq, ok_(fn))
         self.bind_all("<Shift-Left>", self._key)
         self.bind_all("<Shift-Right>", self._key)
         self.bind_all("<Control-Left>", self._key)
@@ -1397,7 +1405,7 @@ class App(_TkBase):
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
         tk.Label(hr, fg="#777", font=("", 8), text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
-                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除").pack(side="left")
+                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示").pack(side="left")
         ttk.Button(hr, text="全体 (Home)", width=11, command=self.fit_all).pack(side="right")
         ttk.Button(hr, text="縮小 ↓", width=7, command=lambda: self.zoom_key(1 / 0.7)).pack(side="right", padx=2)
         ttk.Button(hr, text="拡大 ↑", width=7, command=lambda: self.zoom_key(0.7)).pack(side="right")
