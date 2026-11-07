@@ -374,7 +374,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.25"
+APP_VERSION = "2026.11.07.26"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -537,7 +537,7 @@ class Media:
         return ("env", cols, mn, mx)
 
     # --- フレーム ---
-    def frame_png(self, t, width=320):
+    def frame_png(self, t, width=240):
         ts = max(0.0, t + self.voff)
         r = subprocess.run(
             ["ffmpeg", "-v", "error", "-ss", f"{ts:.4f}", "-i", self.path, "-frames:v", "1",
@@ -1616,7 +1616,7 @@ class App(_TkBase):
         mid2 = ttk.Frame(lf)
         mid2.pack(fill="both", expand=True, padx=4, pady=4)
         cols = ("kind", "en", "jp", "note")
-        self.itree = ttk.Treeview(mid2, columns=cols, show="headings", height=3, selectmode="extended")
+        self.itree = ttk.Treeview(mid2, columns=cols, show="headings", height=5, selectmode="extended")
         for c, h, w in zip(cols, ("種類", "英語版", "日本語の録画", "内容"), (110, 190, 190, 560)):
             self.itree.heading(c, text=h)
             self.itree.column(c, width=w, anchor="w")
