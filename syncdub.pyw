@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.13"
+APP_VERSION = "2026.11.07.14"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1305,6 +1305,7 @@ class App(_TkBase):
         self.easy, self.manual = ttk.Frame(self.nb), ttk.Frame(self.nb)
         self.nb.add(self.easy, text="   かんたん   ")
         self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
+        self._hdr.lift()
         top = ttk.Frame(self.manual, padding=6)
         top.pack(fill="x")
         ttk.Label(top, text="英語版の映像").grid(row=0, column=0, sticky="w")
@@ -1437,8 +1438,9 @@ class App(_TkBase):
     def _build_header(self):
         self.status = ttk.Label(self, text="", anchor="w", foreground="#555")
         self.status.pack(side="bottom", fill="x", padx=6, pady=(0, 4))
-        h = ttk.Frame(self, padding=(8, 6, 8, 0))
-        h.pack(fill="x")
+        h = ttk.Frame(self)
+        h.place(relx=1.0, x=-6, y=2, anchor="ne")  # タブと同じ行の右端に重ねる (縦の余白を作らない)
+        self._hdr = h
         ttk.Label(h, text=f"v{APP_VERSION}", foreground="#888").pack(side="right", padx=(8, 0))
         self.auto_upd = tk.BooleanVar(value=self._setting("auto_update", True))
         ttk.Checkbutton(h, text="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto).pack(side="right", padx=4)
