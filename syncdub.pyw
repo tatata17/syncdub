@@ -353,7 +353,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.9"
+APP_VERSION = "2026.11.07.10"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1178,6 +1178,78 @@ class Track(tk.Canvas):
         self.create_text(W - 6, 11, text=self.title, anchor="e", fill="#333", font=("", 9, "bold"))
 
 
+# ------------------------------------------------------------------ タスクバーの独立表示とアイコン
+
+TASKBAR_APP_ID = "tatata17.syncdub"
+APP_ICON_PNG_B64 = (
+    "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"
+)
+
+
+def set_taskbar_identity():
+    """pythonw.exe で動く他の .pyw とタスクバーで1つにまとめられないよう、専用IDを付ける(Windowsのみ)。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(TASKBAR_APP_ID)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def set_window_taskbar_identity(win):
+    """ウインドウ側にも同じIDを付ける(プロセスIDだけで分かれない環境への保険)。失敗しても無視。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", ctypes.c_ulong), ("b", ctypes.c_ushort), ("c", ctypes.c_ushort), ("d", ctypes.c_ubyte * 8)]
+
+        class PKEY(ctypes.Structure):
+            _fields_ = [("fmtid", GUID), ("pid", wintypes.DWORD)]
+
+        class PROPVARIANT(ctypes.Structure):
+            _fields_ = [("vt", ctypes.c_ushort), ("r1", ctypes.c_ushort), ("r2", ctypes.c_ushort),
+                        ("r3", ctypes.c_ushort), ("p", ctypes.c_void_p), ("p2", ctypes.c_void_p)]
+
+        def guid(txt):
+            import uuid
+            u = uuid.UUID(txt)
+            g = GUID()
+            g.a, g.b, g.c = u.time_low, u.time_mid, u.time_hi_version
+            for i, v in enumerate(u.bytes[8:]):
+                g.d[i] = v
+            return g
+
+        shell32, ole32 = ctypes.windll.shell32, ctypes.windll.ole32
+        iid = guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")  # IID_IPropertyStore
+        store = ctypes.c_void_p()
+        hr = shell32.SHGetPropertyStoreForWindow(wintypes.HWND(hwnd), ctypes.byref(iid), ctypes.byref(store))
+        if hr != 0 or not store.value:
+            return
+        vtbl = ctypes.cast(ctypes.cast(store, ctypes.POINTER(ctypes.c_void_p))[0], ctypes.POINTER(ctypes.c_void_p))
+        key = PKEY(guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5)  # PKEY_AppUserModel_ID
+        text = TASKBAR_APP_ID
+        nbytes = (len(text) + 1) * 2
+        ole32.CoTaskMemAlloc.restype = ctypes.c_void_p
+        mem = ole32.CoTaskMemAlloc(nbytes)
+        ctypes.memmove(mem, ctypes.create_unicode_buffer(text), nbytes)
+        pv = PROPVARIANT()
+        pv.vt, pv.p = 31, mem  # VT_LPWSTR
+        proto = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(PKEY), ctypes.POINTER(PROPVARIANT))
+        proto(vtbl[6])(store, ctypes.byref(key), ctypes.byref(pv))               # SetValue
+        ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[7])(store)       # Commit
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])(store)      # Release
+        ole32.CoTaskMemFree(ctypes.c_void_p(mem))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ------------------------------------------------------------------ アプリ
 
 
@@ -1185,6 +1257,11 @@ class App(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("syncdub - 吹き替え音声シンクロツール")
+        try:  # 専用アイコン (True: 後から開くウインドウにも同じアイコン)
+            self._icon = tk.PhotoImage(data=APP_ICON_PNG_B64)
+            self.iconphoto(True, self._icon)
+        except Exception:  # noqa: BLE001
+            pass
         self.geometry("1280x980")
         self.media = {"en": None, "jp": None}
         self.items = []        # ユーザーの指定 (同じ場面 / CM / 暗転・長さ違い / カット)
@@ -2289,7 +2366,9 @@ class App(_TkBase):
 
 
 if __name__ == "__main__":
+    set_taskbar_identity()
     app = App()
+    app.after(500, lambda: set_window_taskbar_identity(app))
     if len(sys.argv) > 1:
         app.load_project(sys.argv[1])
     app.mainloop()

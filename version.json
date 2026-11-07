@@ -1,1 +1,1 @@
-{"version": "2026.11.07.9", "file": "syncdub.pyw", "notes": "Ctrl+Zで元に戻す/Ctrl+Yでやり直し / 再生ボタンを修正 (ffplay不要でWindowsでも再生)"}
+{"version": "2026.11.07.10", "file": "syncdub.pyw", "notes": "タスクバーで他の.pywと分けて表示 (専用ID) / 専用アイコンを追加"}
