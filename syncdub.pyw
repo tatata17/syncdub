@@ -119,14 +119,15 @@ def video_fps(info):
 
 
 class Seg:
-    def __init__(self, en_start, en_end, jp_start=None, jp_end=None, fit="stretch", note=""):
+    def __init__(self, en_start, en_end, jp_start=None, jp_end=None, fit="stretch", note="", english=False):
         self.en_start, self.en_end = en_start, en_end
         self.jp_start, self.jp_end = jp_start, jp_end
         self.fit, self.note = fit, note
+        self.english = english  # True: この区間は英語版の音声をそのまま使う
 
     @property
     def silent(self):
-        return self.jp_start is None
+        return self.jp_start is None and not self.english
 
     @property
     def dur(self):
@@ -139,10 +140,10 @@ def load_segments(proj, en_dur, en_fps, jp_fps):
         t = d.get("type", "match")
         es = parse_time(d["en_start"], en_fps)
         ee = parse_time(d["en_end"], en_fps) if "en_end" in d else None
-        if t == "silence":
+        if t in ("silence", "english"):
             if ee is None:
-                raise ValueError(f"segments[{i}]: silence には en_end が必要")
-            segs.append(Seg(es, ee, note=d.get("note", "")))
+                raise ValueError(f"segments[{i}]: {t} には en_end が必要")
+            segs.append(Seg(es, ee, note=d.get("note", ""), english=(t == "english")))
             continue
         js = parse_time(d["jp_start"], jp_fps)
         je = parse_time(d["jp_end"], jp_fps) if "jp_end" in d else None
@@ -189,40 +190,51 @@ def atempo_chain(r):
     return ",".join(parts)
 
 
-def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0):
+def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0):
+    """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。"""
     fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
-    nsrc = sum(1 for s in segs if not s.silent)
-    lines, labels, k = [], [], 0
-    if nsrc:
-        outs = "".join(f"[s{i}]" for i in range(nsrc))
-        lines.append(f"[{in_idx}:a:{a_index}]{fmt},asplit={nsrc}{outs}" if nsrc > 1
-                     else f"[{in_idx}:a:{a_index}]{fmt}[s0]")
+    nj = sum(1 for s in segs if not s.silent and not s.english)
+    ne = sum(1 for s in segs if s.english)
+    if ne and en_idx is None:
+        ne = 0  # 英語版が入力にない時は無音にする
+    lines, labels, kj, ke = [], [], 0, 0
+    for tag, n, idx, ai in (("j", nj, in_idx, a_index), ("e", ne, en_idx, 0)):
+        if n:
+            outs = "".join(f"[s{tag}{i}]" for i in range(n))
+            lines.append(f"[{idx}:a:{ai}]{fmt},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{fmt}[s{tag}0]")
     warns = []
     for i, s in enumerate(segs):
         D = s.dur
         f = min(fade, D / 2)
-        if s.silent:
+        if s.silent or (s.english and not ne):
             lines.append(f"anullsrc=r={sr}:cl={layout},atrim=0:{D:.6f},asetpts=PTS-STARTPTS[o{i}]")
         else:
-            # ffmpegは入力のタイムスタンプをコンテナ開始=0に正規化する。
-            # 指定時刻は映像の先頭=0 なので、その差(jp_off)を足す。
-            js = s.jp_start + jp_off
-            je = (s.jp_end + jp_off) if s.jp_end is not None else js + D
-            chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
-            jdur = je - js
-            if s.fit == "stretch" and abs(jdur - D) > 1e-6:
-                r = jdur / D
-                if abs(r - 1) > 0.05:
-                    warns.append(f"区間{i} ({s.en_start:.3f}-{s.en_end:.3f}): 速度比 {r:.3f} は大きい")
-                chain.append(atempo_chain(r))
+            if s.english:
+                es = s.en_start + en_off  # 英語版: 映像の先頭=0 → コンテナ時刻へ
+                chain = [f"atrim={es:.6f}:{es + D:.6f}", "asetpts=PTS-STARTPTS"]
+                src = f"[se{ke}]"
+                ke += 1
+            else:
+                # ffmpegは入力のタイムスタンプをコンテナ開始=0に正規化する。
+                # 指定時刻は映像の先頭=0 なので、その差(jp_off)を足す。
+                js = s.jp_start + jp_off
+                je = (s.jp_end + jp_off) if s.jp_end is not None else js + D
+                chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
+                jdur = je - js
+                if s.fit == "stretch" and abs(jdur - D) > 1e-6:
+                    r = jdur / D
+                    if abs(r - 1) > 0.05:
+                        warns.append(f"区間{i} ({s.en_start:.3f}-{s.en_end:.3f}): 速度比 {r:.3f} は大きい")
+                    chain.append(atempo_chain(r))
+                src = f"[sj{kj}]"
+                kj += 1
             chain.append(f"apad=whole_dur={D:.6f}")
             chain.append(f"atrim=0:{D:.6f}")
             chain.append("asetpts=PTS-STARTPTS")
             if f > 0:
                 chain.append(f"afade=t=in:d={f:.4f}")
                 chain.append(f"afade=t=out:st={D - f:.6f}:d={f:.4f}")
-            lines.append(f"[s{k}]" + ",".join(chain) + f"[o{i}]")
-            k += 1
+            lines.append(src + ",".join(chain) + f"[o{i}]")
         labels.append(f"[o{i}]")
     if lead > 1e-6:  # 英語版の映像先頭がコンテナ開始より遅い分だけ、先頭に無音を置く
         lines.append(f"anullsrc=r={sr}:cl={layout},atrim=0:{lead:.6f},asetpts=PTS-STARTPTS[olead]")
@@ -279,11 +291,14 @@ def _main(argv, tmp):
     jp_off, en_off = video_start_offset(jp), video_start_offset(en)
     single = bool(a.audio_only)
     filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
-                               in_idx=0 if single else 1, lead=0.0 if single else en_off)
+                               in_idx=0 if single else 1, lead=0.0 if single else en_off,
+                               en_idx=1 if single else 0, en_off=en_off)
 
     print(f"EN映像先頭 +{en_off:.3f}s / JP映像先頭 +{jp_off:.3f}s (コンテナ開始比) / EN長さ {en_dur:.3f}s / 区間 {len(segs)}")
     for i, s in enumerate(segs):
-        if s.silent:
+        if s.english:
+            desc = "英語版の音声のまま"
+        elif s.silent:
             desc = "無音"
         else:
             je = f"{s.jp_end:.3f}" if s.jp_end is not None else "-"
@@ -299,7 +314,7 @@ def _main(argv, tmp):
     script.write_text(filt, encoding="utf-8")
 
     if a.audio_only:
-        cmd = ["ffmpeg", "-y", "-i", jp_path, "-filter_complex_script", str(script),
+        cmd = ["ffmpeg", "-y", "-i", jp_path, "-i", en_path, "-filter_complex_script", str(script),
                "-map", "[aout]", a.audio_only]
     else:
         out = res(proj["output"])
@@ -337,7 +352,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.6"
+APP_VERSION = "2026.11.07.7"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -813,23 +828,180 @@ def auto_align(en, jp, progress=lambda f, m: None):
     return segs, {"ok": True, "unused_jp": unused, "msg": ""}
 
 
+# ------------------------------------------------------------------ 指定 → 区間の計算
+
+def build_from_items(items, en_rng, jp_rng):
+    """指定(同じ場面/CM/暗転・長さ違い/カット)から、エンジン用の区間リストを組み立てる。
+
+    考え方: 英語側から「カット(英語にしかない所)」を、日本語側から「CM(日本語にしかない所)」を
+    取り除いた軸の上で、「同じ場面」の点を直線でつなぐ。そのあと取り除いた所を元に戻して区間にする。
+    戻り値: (segs, extra, warns)  extra = 英語の音声をそのまま使う区間
+    """
+    pts = [(i["en"], i["jp"]) for i in items if i["k"] == "pt"]
+    dims = [i for i in items if i["k"] == "dim"]
+    for d in dims:
+        pts += [(d["en0"], d["jp0"]), (d["en1"], d["jp1"])]
+    cms = sorted((min(i["jp0"], i["jp1"]), max(i["jp0"], i["jp1"])) for i in items if i["k"] == "cm")
+    cuts = sorted((min(i["en0"], i["en1"]), max(i["en0"], i["en1"]), i.get("audio", "silence"))
+                  for i in items if i["k"] == "cut")
+    warns = []
+    if not pts:
+        return [], [], ["「同じ場面」を1つ以上登録してください"]
+    cut_r = [(a, b) for a, b, _ in cuts]
+
+    def rm_before(x, ranges):
+        tot = 0.0
+        for a, b in ranges:
+            if x >= b:
+                tot += b - a
+            elif x > a:
+                tot += x - a
+        return tot
+
+    to_enp = lambda t: t - rm_before(t, cut_r)   # noqa: E731
+    to_jpp = lambda x: x - rm_before(x, cms)     # noqa: E731
+
+    # --- 「同じ場面」の点を、取り除いたあとの軸に変換して並べる
+    knots = []
+    for en, jp in sorted(pts):
+        u, q = to_enp(en), to_jpp(jp)
+        if knots and abs(u - knots[-1][0]) < 1e-6:
+            if abs(q - knots[-1][1]) > 0.02:
+                warns.append(f"英語 {en:.2f}秒 の「同じ場面」が重複しています")
+            continue
+        if knots and q < knots[-1][1] - 1e-3:
+            warns.append(f"英語 {en:.2f}秒 の「同じ場面」は、日本語側の順番が前後しているため使いません")
+            continue
+        knots.append((u, q))
+    L = 1e7
+    ext = [(knots[0][0] - L, knots[0][1] - L)] + knots + [(knots[-1][0] + L, knots[-1][1] + L)]
+
+    def qmap(u):
+        for (ua, qa), (ub, qb) in zip(ext, ext[1:]):
+            if u <= ub:
+                return qa + (qb - qa) * (u - ua) / (ub - ua)
+        return ext[-1][1]
+
+    def qinv(q):
+        for (ua, qa), (ub, qb) in zip(ext, ext[1:]):
+            if qb > qa and qa <= q <= qb:
+                return ua + (q - qa) * (ub - ua) / (qb - qa)
+        return None
+
+    t0e, t1e = en_rng
+    U0, U1 = to_enp(t0e), to_enp(t1e)
+    bps = {U0, U1}
+    for u, _ in knots:
+        if U0 < u < U1:
+            bps.add(u)
+    for a, _b in cut_r:
+        ap = to_enp(a)
+        if U0 < ap < U1:
+            bps.add(ap)
+    for c, _d in cms:
+        u = qinv(to_jpp(c))
+        if u is not None and U0 < u < U1:
+            bps.add(u)
+    bl = sorted(bps)
+    cut_pts = [(to_enp(a), b - a) for a, b in cut_r]
+    cm_pts = [(to_jpp(c), d - c) for c, d in cms]
+
+    segs = []
+    for u0, u1 in zip(bl, bl[1:]):
+        if u1 - u0 < 1e-4:
+            continue
+        q0, q1 = qmap(u0), qmap(u1)
+        t0 = u0 + sum(ln for ap, ln in cut_pts if ap <= u0 + 1e-9)
+        t1 = u1 + sum(ln for ap, ln in cut_pts if ap < u1 - 1e-9)
+        x0 = q0 + sum(ln for cp, ln in cm_pts if cp <= q0 + 1e-9)
+        x1 = q1 + sum(ln for cp, ln in cm_pts if cp < q1 - 1e-9)
+        fit, in_dim = "stretch", False
+        for d in dims:
+            if d["en0"] - 1e-3 <= t0 and t1 <= d["en1"] + 1e-3:
+                fit, in_dim = d.get("fit", "stretch"), True
+        ratio = (x1 - x0) / (t1 - t0)
+        if not in_dim and abs(ratio - 1) > 0.05:
+            warns.append(f"英語 {t0:.1f}〜{t1:.1f}秒: 音の速さが {ratio:.2f} 倍になります。"
+                         "暗転などの長さ違いなら「暗転・長さ違い」で指定してください")
+        # 日本語録画の範囲外にはみ出す分は詰める
+        if x0 < jp_rng[0]:
+            d0 = jp_rng[0] - x0
+            t0 += d0 / ratio
+            x0 += d0
+        if x1 > jp_rng[1]:
+            t1 -= (x1 - jp_rng[1]) / ratio
+            x1 = jp_rng[1]
+        if t1 - t0 < 0.05:
+            continue
+        segs.append({"en_start": t0, "en_end": t1, "jp_start": x0,
+                     "jp_end": None if abs((x1 - x0) - (t1 - t0)) <= 0.002 else x1,
+                     "fit": fit, "note": ""})
+    # 連続していて同じ速さの区間は1つにまとめる(点を増やしても区間が細切れにならないように)
+    merged = []
+    for s in segs:
+        if merged:
+            p = merged[-1]
+            pe = p["jp_end"] if p["jp_end"] is not None else p["jp_start"] + (p["en_end"] - p["en_start"])
+            pr = (pe - p["jp_start"]) / (p["en_end"] - p["en_start"])
+            se = s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + (s["en_end"] - s["en_start"])
+            sr = (se - s["jp_start"]) / (s["en_end"] - s["en_start"])
+            if (abs(p["en_end"] - s["en_start"]) < 1e-3 and abs(pe - s["jp_start"]) < 1e-3
+                    and abs(pr - sr) < 1e-4 and p["fit"] == s["fit"]):
+                p["en_end"] = s["en_end"]
+                ne = se
+                p["jp_end"] = None if abs((ne - p["jp_start"]) - (p["en_end"] - p["en_start"])) <= 0.002 else ne
+                continue
+        merged.append(dict(s))
+    extra = [{"type": "english", "en_start": max(a, t0e), "en_end": min(b, t1e)}
+             for a, b, au in cuts if au == "english" and min(b, t1e) > max(a, t0e)]
+    return merged, extra, warns
+
+
+def items_from_segs(segs):
+    """区間リスト(自動検出の結果など) → 指定(同じ場面/CM/カット) に変換。"""
+    items, prev = [], None
+    for s in sorted(segs, key=lambda s: s["en_start"]):
+        ed = s["en_end"] - s["en_start"]
+        je = s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + ed
+        items.append({"k": "pt", "en": s["en_start"], "jp": s["jp_start"], "note": ""})
+        if s["jp_end"] is not None and abs((je - s["jp_start"]) - ed) > 0.002:
+            items.append({"k": "pt", "en": s["en_end"], "jp": je, "note": ""})
+        if prev:
+            pen, pje = prev
+            if s["en_start"] - pen > 0.05:
+                items.append({"k": "cut", "en0": pen, "en1": s["en_start"], "audio": "silence"})
+            if s["jp_start"] - pje > 0.05:
+                items.append({"k": "cm", "jp0": pje, "jp1": s["jp_start"]})
+        prev = (s["en_end"], je)
+    return items
+
+
 # ------------------------------------------------------------------ 波形トラック
 
 
 class Track(tk.Canvas):
+    KIND_STYLE = {"cm": ("#bfc3ca", "CM (使わない)", "#444"),
+                  "cut": ("#ffd8a8", "カット (日本語版にない)", "#8a5300"),
+                  "dim": ("#e6d9ff", "暗転・長さ違い", "#5b3aa8")}
+
     def __init__(self, master, app, key, title, **kw):
-        super().__init__(master, height=104, bg="#fbfbfd", highlightthickness=1,
+        super().__init__(master, height=92, bg="#fbfbfd", highlightthickness=1,
                          highlightbackground="#bbb", takefocus=True, **kw)
         self.app, self.key, self.title = app, key, title
         self.media = None
         self.vs, self.vspan = 0.0, 60.0
-        self.cursor, self.mark = 0.0, None
-        self.bands = []      # [(開始, 終了, 区間番号)]
-        self.sel = None      # 選択中の区間番号
-        self.gap_text = ""   # どの区間にも入らない部分に出す説明
+        self.cursor = 0.0
+        self.bands = []    # [(開始, 終了, 区間番号)]  色つきの帯
+        self.marks = []    # [(開始, 終了, 種類)]      CM / カット / 暗転
+        self.pts = []      # [(時刻, ラベル)]          「同じ場面」の点
+        self.sel = None    # 強調する区間番号
+        self.selr = None   # ドラッグで選んだ範囲 (開始, 終了)
+        self._press = None
         self._pan = None
         self.bind("<Configure>", lambda e: self.redraw())
-        self.bind("<Button-1>", self.on_click)
+        self.bind("<ButtonPress-1>", self.on_press)
+        self.bind("<B1-Motion>", self.on_motion)
+        self.bind("<ButtonRelease-1>", self.on_release)
         self.bind("<MouseWheel>", self.on_wheel)
         self.bind("<Button-4>", lambda e: self.on_wheel(e, 1))
         self.bind("<Button-5>", lambda e: self.on_wheel(e, -1))
@@ -842,22 +1014,45 @@ class Track(tk.Canvas):
     def t_of(self, x):
         return self.vs + x / max(self.winfo_width(), 1) * self.vspan
 
-    def on_click(self, e):
+    # --- マウス: クリック=カーソル / ドラッグ=範囲選択 / ホイール=拡大縮小 / 右ドラッグ=横移動
+    def on_press(self, e):
         self.focus_set()
         self.app.set_active(self.key)
-        self.app.set_cursor(self.key, self.t_of(e.x))
+        self._press = (e.x, False)
+
+    def on_motion(self, e):
+        if not self._press:
+            return
+        x0, dragging = self._press
+        if not dragging and abs(e.x - x0) < 4:
+            return
+        self._press = (x0, True)
+        a, b = sorted((self.t_of(x0), self.t_of(e.x)))
+        self.selr = (a, b)
+        self.redraw()
+
+    def on_release(self, e):
+        if not self._press:
+            return
+        _x0, dragging = self._press
+        self._press = None
+        if dragging:
+            self.app.on_range(self.key)
+        else:
+            self.app.set_cursor(self.key, self.t_of(e.x))
 
     def on_wheel(self, e, direction=None):
         d = direction if direction is not None else (1 if e.delta > 0 else -1)
         if e.state & 0x1:  # Shift: 横移動
             self.vs += -d * self.vspan * 0.2
+            self.redraw()
         else:
-            t = self.t_of(e.x)
-            f = 0.75 if d > 0 else 1.0 / 0.75
-            new = min(max(self.vspan * f, 0.05), 6 * 3600)
-            self.vs = t - (t - self.vs) * new / self.vspan
-            self.vspan = new
-        self.redraw()
+            self.app.zoom(self.key, 0.75 if d > 0 else 1.0 / 0.75, self.t_of(e.x))
+
+    def zoom_by(self, f, anchor):
+        new = min(max(self.vspan * f, 0.05), 6 * 3600)
+        self.vs = anchor - (anchor - self.vs) * new / self.vspan
+        self.vspan = new
 
     def pan_start(self, e):
         self._pan = (e.x, self.vs)
@@ -870,6 +1065,17 @@ class Track(tk.Canvas):
     def ensure_visible(self, t):
         if t < self.vs + self.vspan * 0.05 or t > self.vs + self.vspan * 0.95:
             self.vs = t - self.vspan / 2
+
+    @staticmethod
+    def tick_label(t, step):
+        sign = "-" if t < -1e-9 else ""
+        t = abs(t)
+        h, m, sec = int(t // 3600), int(t % 3600 // 60), t % 60
+        if step < 1:
+            body = f"{m}:{sec:05.2f}" if not h else f"{h}:{m:02d}:{sec:05.2f}"
+        else:
+            body = f"{m}:{int(round(sec)):02d}" if not h else f"{h}:{m:02d}:{int(round(sec)):02d}"
+        return sign + body
 
     def redraw(self):
         self.delete("all")
@@ -885,7 +1091,7 @@ class Track(tk.Canvas):
             if xb < 0 or xa > W:
                 continue
             self.create_rectangle(max(xa, 0), 0, min(xb, W), body, fill=PASTEL[i % len(PASTEL)], outline="")
-        # --- どの区間にも入らない部分(英語側=無音になる / 日本語側=使われない)
+        # --- どの区間にも入らない部分 (灰色の斜線)
         if self.bands:
             cur, gaps = self.vs, []
             for a, b in sorted((a, b) for a, b, _ in self.bands):
@@ -897,18 +1103,23 @@ class Track(tk.Canvas):
             if cur < v1:
                 gaps.append((cur, v1))
             for a, b in gaps:
-                if b <= a:
-                    continue
-                xa, xb = max(self.x_of(a), 0), min(self.x_of(b), W)
-                self.create_rectangle(xa, 0, xb, body, fill="#cfd2d8", stipple="gray50", outline="")
-                if xb - xa > 110 and self.gap_text:
-                    self.create_text((xa + xb) / 2, 12, text=self.gap_text, fill="#555", font=("", 8))
-        # --- 作成中の区間 (S で始まりを決めたあと、カーソルまで)
-        if self.mark is not None and self.cursor > self.mark:
-            xa, xb = self.x_of(self.mark), self.x_of(self.cursor)
-            self.create_rectangle(xa, 0, xb, body, fill="#d7f5e2", outline="#1a9e57", dash=(4, 2), width=2)
-            if xb - xa > 60:
-                self.create_text((xa + xb) / 2, body - 10, text="作成中の区間", fill="#1a7a47", font=("", 8, "bold"))
+                if b > a:
+                    self.create_rectangle(max(self.x_of(a), 0), 0, min(self.x_of(b), W), body,
+                                          fill="#cfd2d8", stipple="gray50", outline="")
+        # --- CM / カット / 暗転 の指定
+        for a, b, kind in self.marks:
+            xa, xb = self.x_of(a), self.x_of(b)
+            if xb < 0 or xa > W:
+                continue
+            col, label, tcol = self.KIND_STYLE[kind]
+            x0, x1 = max(xa, 0), min(xb, W)
+            self.create_rectangle(x0, 0, x1, body, fill=col, stipple="gray50", outline=tcol, dash=(3, 2))
+            if x1 - x0 > 40:
+                self.create_text((x0 + x1) / 2, body - 11, text=label, fill=tcol, font=("", 9, "bold"))
+        # --- ドラッグで選んだ範囲
+        if self.selr:
+            xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
+            self.create_rectangle(xa, 0, xb, body, fill="#cfe3ff", outline="#2f6fd0", width=2)
         self.create_line(0, mid, W, mid, fill="#c9cfd8")
         # --- 波形
         m = self.media
@@ -921,13 +1132,11 @@ class Track(tk.Canvas):
                 _, cols, mn, mx = env
                 top = np.column_stack([cols, mid - np.clip(mx * amp, -1e4, 1e4)])
                 bot = np.column_stack([cols, mid - np.clip(mn * amp, -1e4, 1e4)])[::-1]
-                pts = np.vstack([top, bot]).ravel().tolist()
-                self.create_polygon(pts, fill="#3b6ea5", outline="#3b6ea5")
+                self.create_polygon(np.vstack([top, bot]).ravel().tolist(), fill="#3b6ea5", outline="#3b6ea5")
             elif env:
                 _, xs, ys = env
-                pts = np.column_stack([xs, mid - ys * amp]).ravel().tolist()
-                self.create_line(pts, fill="#3b6ea5")
-        # --- 区間の境界線・名前(A, B, C…)
+                self.create_line(np.column_stack([xs, mid - ys * amp]).ravel().tolist(), fill="#3b6ea5")
+        # --- 区間の境界線・名前 (A, B, C…)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
             if xb < 0 or xa > W:
@@ -950,14 +1159,21 @@ class Track(tk.Canvas):
         while t < v1:
             x = self.x_of(t)
             self.create_line(x, body, x, body + 5, fill="#777")
-            self.create_text(x + 2, body + 12, text=tc(t)[:12] if step < 1 else tc(t)[:8],
-                             anchor="w", fill="#666", font=("", 7))
+            self.create_text(x + 2, body + 12, text=self.tick_label(t, step), anchor="w", fill="#666", font=("", 7))
             t += step
-        if self.mark is not None:
-            x = self.x_of(self.mark)
-            self.create_line(x, 0, x, body, fill="#1a9e57", width=2, dash=(4, 2))
+        # --- 「同じ場面」の点
+        for t, label in self.pts:
+            x = self.x_of(t)
+            if -20 < x < W + 20:
+                self.create_line(x, 0, x, body, fill="#1a9e57", width=2)
+                self.create_rectangle(x, 0, x + 8 + 7 * len(label), 15, fill="#1a9e57", outline="")
+                self.create_text(x + 4, 8, text=label, anchor="w", fill="white", font=("", 8, "bold"))
         x = self.x_of(self.cursor)
         self.create_line(x, 0, x, body, fill="#e0262d", width=1)
+        if self.selr:
+            xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
+            self.create_text((xa + xb) / 2, 24, text=f"選択 {self.selr[1] - self.selr[0]:.2f}秒",
+                             fill="#2f6fd0", font=("", 9, "bold"))
         self.create_text(W - 6, 11, text=self.title, anchor="e", fill="#333", font=("", 9, "bold"))
 
 
@@ -968,9 +1184,13 @@ class App(_TkBase):
     def __init__(self):
         super().__init__()
         self.title("syncdub - 吹き替え音声シンクロツール")
-        self.geometry("1280x900")
+        self.geometry("1280x980")
         self.media = {"en": None, "jp": None}
-        self.segs = []
+        self.items = []        # ユーザーの指定 (同じ場面 / CM / 暗転・長さ違い / カット)
+        self.segs = []         # items から自動計算した区間 (エンジンに渡す)
+        self.extra_segs = []   # 英語版の音声をそのまま使う区間
+        self.warns = []
+        self.auto_flags = None  # 自動検出直後の「要確認」情報 (手で直すと消える)
         self.active = "en"
         self.proj_path = None
         self.out_path = tk.StringVar()
@@ -984,7 +1204,7 @@ class App(_TkBase):
         self._setup_dnd()
         if self.auto_upd.get():
             self.after(1500, lambda: self.check_update(False))
-        for k in ("s", "e", "a", "space", "Left", "Right", "Tab"):
+        for k in ("s", "a", "space", "Left", "Right", "Tab", "Up", "Down", "Escape", "Home"):
             self.bind_all(f"<KeyPress-{k}>" if len(k) > 1 else f"<Key-{k}>", self._key)
         self.bind_all("<Shift-Left>", self._key)
         self.bind_all("<Shift-Right>", self._key)
@@ -1020,30 +1240,31 @@ class App(_TkBase):
         ttk.Button(top, text="設定を保存", command=self.save_project).grid(row=1, column=4, padx=2)
         top.columnconfigure(1, weight=1)
 
-        tk.Label(self.manual, justify="left", anchor="w", bg="#fff8e1", fg="#444", font=("", 9), wraplength=1120,
-                 text="【使い方】 区間 =「英語版のここ」と「日本語録画のここ」は同じ場面、という1組の範囲です。\n"
-                      "① 上(英語版)の波形をクリックして場面を選ぶ → ② 下(日本語録画)で同じ場面をクリック (A キーで自動で合わせることもできます) → "
-                      "③「区間の始まり」を決める → 終わりの場面でも①②を行い →「区間の終わり」で追加。\n"
-                      "同じ色(A・B・C…)の帯が、英語と日本語で対応する区間です。灰色の斜線は、区間に入っていない部分"
-                      "(英語側=無音になる / 日本語側=使われない。CMなど)です。"
+        tk.Label(self.manual, justify="left", anchor="w", bg="#fff8e1", fg="#444", font=("", 9), wraplength=1220,
+                 text="【手順】 ① 上(英語)と下(日本語)で『同じ場面』を探して登録  →  ② CM・暗転・カットがあれば、波形をドラッグして範囲を選び、"
+                      "該当するボタンで指定。 すると色つきの帯 (A・B・C…) が自動でできます。\n"
+                      "同じ色の帯 = 英語と日本語で対応する区間 / 灰色の斜線 = 使われない部分 (日本語側ならCMなど、英語側なら無音になる所)"
                  ).pack(fill="x", padx=6, pady=(2, 0))
+        hr = ttk.Frame(self.manual)
+        hr.pack(fill="x", padx=6, pady=(2, 0))
+        tk.Label(hr, fg="#777", font=("", 8), text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除").pack(side="left")
+        ttk.Button(hr, text="全体 (Home)", width=11, command=self.fit_all).pack(side="right")
+        ttk.Button(hr, text="縮小 ↓", width=7, command=lambda: self.zoom_key(1 / 0.7)).pack(side="right", padx=2)
+        ttk.Button(hr, text="拡大 ↑", width=7, command=lambda: self.zoom_key(0.7)).pack(side="right")
 
         self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準の映像)"),
                    "jp": Track(self.manual, self, "jp", "日本語の録画")}
-        self.tr["en"].gap_text = "ここは日本語の音がなく、無音になります"
-        self.tr["jp"].gap_text = "使われない部分 (CMなど)"
         self.tr["en"].pack(fill="x", padx=6, pady=(2, 2))
         self.tr["jp"].pack(fill="x", padx=6, pady=(2, 2))
 
         mid = ttk.Frame(self.manual, padding=4)
         mid.pack(fill="x")
-        self.pv = {}
-        self.ent = {}
-        self.fr_lbl = {}
-        for col, (k, name) in enumerate((("en", "英語版 (カーソル位置の画面)"), ("jp", "日本語の録画 (カーソル位置の画面)"))):
+        self.pv, self.ent, self.fr_lbl = {}, {}, {}
+        for k, name in (("en", "英語版 (カーソル位置の画面)"), ("jp", "日本語の録画 (カーソル位置の画面)")):
             fr = ttk.LabelFrame(mid, text=name)
             fr.grid(row=0, column=0 if k == "en" else 2, padx=4, sticky="n")
-            lab = tk.Label(fr, width=40, height=8, bg="black", fg="#888", text="(プレビュー)")
+            lab = tk.Label(fr, width=26, height=5, bg="black", fg="#888", text="(プレビュー)")
             lab.pack(padx=4, pady=4)
             self.pv[k] = lab
             row = ttk.Frame(fr)
@@ -1058,60 +1279,74 @@ class App(_TkBase):
             fl.pack(side="left", padx=6)
             self.fr_lbl[k] = fl
             ttk.Button(row, text="▶ 再生", width=7, command=lambda k=k: self.play(k)).pack(side="right")
+
         ctr = ttk.Frame(mid)
         ctr.grid(row=0, column=1, padx=8, sticky="n")
-        for n, (text, cmd, tip) in enumerate((
-                ("A  日本語側を自動で合わせる", self.auto_snap,
-                 "英語側のカーソル位置の音を手がかりに、日本語側のカーソルを同じ音の場所へ動かします"),
-                ("S  区間の『始まり』を決める", self.mark_start,
-                 "今の英語側・日本語側のカーソル位置を、同じ場面の始まりとして記録します"),
-                ("E  区間の『終わり』を決めて追加", self.mark_end,
-                 "始まりから今のカーソル位置までを、1つの区間(色つきの帯)として追加します"),
-                ("始まりを取り消す", self.mark_clear, "S で決めた始まりを取り消します"),
-                ("ズレをチェック", self.verify,
-                 "各区間の先頭・中央・末尾で、英語と日本語の音のズレ(ミリ秒)を測って表に出します"))):
-            cell = ttk.Frame(ctr)
-            cell.grid(row=n // 2, column=n % 2, padx=5, pady=3, sticky="n")
-            ttk.Button(cell, text=text, width=28, command=cmd).pack()
-            tk.Label(cell, text=tip, fg="#777", font=("", 8), wraplength=250, justify="left").pack()
-        self.mark_lbl = ttk.Label(ctr, text="始まり: まだ決めていません", foreground="#2a7")
-        self.mark_lbl.grid(row=3, column=0, columnspan=2, pady=(4, 0))
-        ttk.Label(ctr, text="自動で合わせる設定: 音を比べる長さ(秒) / 探す範囲(±秒)").grid(row=4, column=0, columnspan=2)
-        sf = ttk.Frame(ctr)
-        sf.grid(row=5, column=0, columnspan=2)
+        g1 = ttk.LabelFrame(ctr, text=" ① 同じ場面を登録する ")
+        g1.pack(fill="x", pady=(0, 6))
+        tk.Label(g1, justify="left", anchor="w", wraplength=480, fg="#555", font=("", 9),
+                 text="上下のカーソルを同じ場面(同じフレーム)に合わせて押すと、音合わせの基準になります。").pack(fill="x", padx=8, pady=(4, 2))
+        r1 = ttk.Frame(g1)
+        r1.pack(fill="x", padx=8, pady=2)
+        ttk.Button(r1, text="A 音で探して合わせる", width=20, command=self.auto_snap).pack(side="left")
+        ttk.Button(r1, text="S この2つは『同じ場面』", width=22, command=self.add_point).pack(side="left", padx=6, ipady=3)
+        self.refine_v = tk.BooleanVar(value=True)
+        ttk.Checkbutton(g1, text="登録するとき、音で微調整する",
+                        variable=self.refine_v).pack(anchor="w", padx=8, pady=(0, 4))
+        g2 = ttk.LabelFrame(ctr, text=" ② 特別な部分 (先に波形をドラッグして範囲を選ぶ) ")
+        g2.pack(fill="x")
+        for text, cmd, tip in (
+                ("CM", self.add_cm, "下(日本語)の選択範囲は『CM』。使いません"),
+                ("暗転・長さ違い", self.add_dim, "上下の選択範囲は同じ場面だが長さが違う"),
+                ("カット", self.add_cut, "上(英語)の選択範囲は日本語版でカット済み")):
+            rw = ttk.Frame(g2)
+            rw.pack(fill="x", padx=8, pady=2)
+            ttk.Button(rw, text=text, width=14, command=cmd).pack(side="left")
+            tk.Label(rw, text=tip, fg="#555", font=("", 9), anchor="w", justify="left", wraplength=330).pack(side="left", padx=8)
+        r3 = ttk.Frame(g2)
+        r3.pack(fill="x", padx=8, pady=(2, 4))
+        self.sel_lbl = tk.Label(r3, text="選択中の範囲: なし", fg="#2f6fd0", anchor="w", font=("", 9))
+        self.sel_lbl.pack(side="left")
+        ttk.Button(r3, text="選択を解除", command=self.clear_ranges).pack(side="right")
+        wf = ttk.Frame(r1)
+        wf.pack(side="left", padx=8)
+        ttk.Label(wf, text="照合 秒/±秒").pack(side="left")
         self.win_v, self.srch_v = tk.StringVar(value="8"), tk.StringVar(value="60")
-        ttk.Entry(sf, textvariable=self.win_v, width=5).pack(side="left")
-        ttk.Entry(sf, textvariable=self.srch_v, width=5).pack(side="left", padx=4)
+        ttk.Entry(wf, textvariable=self.win_v, width=4).pack(side="left", padx=(6, 2))
+        ttk.Entry(wf, textvariable=self.srch_v, width=4).pack(side="left")
 
-        # 区間表
-        mid2 = ttk.Frame(self.manual, padding=(6, 2))
-        mid2.pack(fill="both", expand=True)
-        cols = ("n", "es", "ee", "js", "je", "ratio", "fit", "lag", "note")
-        heads = ("区間", "英語版 開始", "英語版 終了", "日本語 開始", "日本語 終了", "速さの違い", "長さが違うとき",
-                 "ズレ ms (先頭/中央/末尾)", "メモ")
-        widths = (44, 100, 100, 100, 100, 70, 150, 150, 150)
-        self.tree = ttk.Treeview(mid2, columns=cols, show="headings", height=4, selectmode="browse")
-        for c, h, w in zip(cols, heads, widths):
-            self.tree.heading(c, text=h)
-            self.tree.column(c, width=w, anchor="w")
-        self.tree.tag_configure("warn", background="#ffe9c7")
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self.on_select)
-        self.tree.bind("<Double-1>", lambda e: self.edit_seg())
+        # 指定の一覧
+        lf = ttk.LabelFrame(self.manual, text=" 指定の一覧 (行をクリックすると、その場所に移動します) ")
+        lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
+        mid2 = ttk.Frame(lf)
+        mid2.pack(fill="both", expand=True, padx=4, pady=4)
+        cols = ("kind", "en", "jp", "note")
+        self.itree = ttk.Treeview(mid2, columns=cols, show="headings", height=3, selectmode="browse")
+        for c, h, w in zip(cols, ("種類", "英語版", "日本語の録画", "内容"), (110, 190, 190, 560)):
+            self.itree.heading(c, text=h)
+            self.itree.column(c, width=w, anchor="w")
+        for kind, bg in (("pt", "#e6f6ec"), ("cm", "#e6e8ec"), ("dim", "#efe8ff"), ("cut", "#ffecd2")):
+            self.itree.tag_configure(kind, background=bg)
+        self.itree.pack(side="left", fill="both", expand=True)
+        self.itree.bind("<<TreeviewSelect>>", self.on_item_select)
+        self.itree.bind("<Double-1>", lambda e: self.edit_item())
+        self.itree.bind("<Delete>", lambda e: self.del_item())
         bt = ttk.Frame(mid2)
         bt.pack(side="left", padx=6, anchor="n")
-        for text, cmd in (("編集", self.edit_seg), ("削除", self.del_seg)):
-            ttk.Button(bt, text=text, width=8, command=cmd).pack(pady=2)
+        ttk.Button(bt, text="編集", width=8, command=self.edit_item).pack(pady=2)
+        ttk.Button(bt, text="削除", width=8, command=self.del_item).pack(pady=2)
+        self.warn_lbl = tk.Label(lf, text="", anchor="w", justify="left", wraplength=1180, fg="#8a5a00")
+        self.warn_lbl.pack(fill="x", padx=8, pady=(0, 4))
 
-        bot = ttk.Frame(self.manual, padding=6)
-        bot.pack(fill="x")
-        ttk.Label(bot, text="出力").pack(side="left")
+        self.log = tk.Text(self.manual, height=2, bg="#111", fg="#cfc", font=("Consolas", 9))
+        self.log.pack(side="bottom", fill="x", padx=6, pady=(0, 2))
+        bot = ttk.Frame(self.manual, padding=4)
+        bot.pack(side="bottom", fill="x")
+        ttk.Label(bot, text="保存先").pack(side="left")
         ttk.Entry(bot, textvariable=self.out_path).pack(side="left", fill="x", expand=True, padx=4)
-        ttk.Button(bot, text="参照", command=self.pick_out).pack(side="left")
-        self.render_btn = ttk.Button(bot, text="合成", command=self.render)
+        ttk.Button(bot, text="変更", command=self.pick_out).pack(side="left")
+        self.render_btn = ttk.Button(bot, text="合成スタート", command=self.render)
         self.render_btn.pack(side="left", padx=6)
-        self.log = tk.Text(self.manual, height=3, bg="#111", fg="#cfc", font=("Consolas", 9))
-        self.log.pack(fill="x", padx=6, pady=(0, 2))
         self._build_easy()
 
     # ---------- ヘッダー(更新) / かんたんタブ ----------
@@ -1277,16 +1512,17 @@ class App(_TkBase):
 
     def _auto_done(self, segs, info):
         if not info["ok"]:
-            self.segs = []
-            self.refresh()
+            self.items, self.auto_flags = [], None
+            self.rebuild()
             self.pbar.config(value=0)
             self.auto_msg.config(text="⚠ " + info["msg"], fg="#b33")
             self._busy(False)
             return
-        self.segs = segs
-        self.refresh()
+        self.items = items_from_segs(segs)
+        self.auto_flags = [(s["en_start"], s["en_end"], s["flag"]) for s in segs if s.get("flag")]
+        self.rebuild()
         self.pbar.config(value=100)
-        warn = sum(1 for s in segs if s.get("flag"))
+        warn = len(self.auto_flags)
         lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
         for a, b in info["unused_jp"][:5]:
             lines.append(f"・日本語の録画の {self.short(a)} 〜 {self.short(b)} (約{int(b - a)}秒) は使いません (CMなど)。")
@@ -1303,8 +1539,11 @@ class App(_TkBase):
         for i, s in enumerate(self.segs):
             ed = s["en_end"] - s["en_start"]
             je = s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + ed
-            flag = s.get("flag", "")
-            st = "手動で設定" if "conf" not in s else ("要確認: " + flag if flag else "OK")
+            if self.auto_flags is None:
+                flag, st = "", "手動で設定"
+            else:
+                flag = "・".join(f for a, b, f in self.auto_flags if a < s["en_end"] - 1e-6 and b > s["en_start"] + 1e-6)
+                st = "要確認: " + flag if flag else "OK"
             self.etree.insert("", "end", iid=str(i), tags=("warn",) if flag else (), values=(
                 seg_letter(i), f"{self.short(s['en_start'])} 〜 {self.short(s['en_end'])}",
                 f"{self.short(s['jp_start'])} 〜 {self.short(je)}", st))
@@ -1314,7 +1553,9 @@ class App(_TkBase):
         s = self.etree.selection()
         if s and self.media["en"]:
             seg = self.segs[int(s[0])]
-            self._select_seg(int(s[0]))
+            for t in self.tr.values():
+                t.sel = int(s[0])
+                t.redraw()
             self.set_cursor("en", seg["en_start"], scroll=True)
             self.set_cursor("jp", seg["jp_start"], scroll=True)
 
@@ -1490,6 +1731,7 @@ class App(_TkBase):
             p = Path(self.en_var.get())
             self.out_path.set(str(p.with_name(p.stem + "_jpdub.mkv")))
         self._busy(False)
+        self.rebuild()
         self.say(f"読み込み完了  EN {m['en'].fps:.3f}fps / JP {m['jp'].fps:.3f}fps")
         self.set_active("en")
         self.refresh()
@@ -1528,10 +1770,12 @@ class App(_TkBase):
 
     def _key(self, ev):
         w = self.focus_get()
-        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox)):
+        if isinstance(w, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox)):
             return
         ks = ev.keysym
         k = self.active
+        if isinstance(w, ttk.Treeview) and ks in ("Up", "Down", "Left", "Right"):
+            return  # 一覧の操作中は矢印キーを一覧に任せる
         if ks in ("Left", "Right"):
             d = -1 if ks == "Left" else 1
             if ev.state & 0x1:
@@ -1540,17 +1784,48 @@ class App(_TkBase):
                 self.step(k, frames=d * 10)
             else:
                 self.step(k, frames=d)
+        elif ks == "Up":
+            self.zoom_key(0.7)
+        elif ks == "Down":
+            self.zoom_key(1 / 0.7)
+        elif ks == "Home":
+            self.fit_all()
         elif ks == "s":
-            self.mark_start()
-        elif ks == "e":
-            self.mark_end()
+            self.add_point()
         elif ks == "a":
             self.auto_snap()
+        elif ks == "Escape":
+            self.clear_ranges()
         elif ks == "space":
             self.play(k)
         elif ks == "Tab":
             self.set_active("jp" if k == "en" else "en")
         return "break"
+
+    # ---------- 拡大縮小 (Reaper風) ----------
+    def zoom(self, k, f, anchor):
+        """k のトラックを anchor の時刻を中心に拡大縮小。もう片方も同じ縮尺にして、カーソルの位置をそろえる。"""
+        tr = self.tr[k]
+        tr.zoom_by(f, anchor)
+        o = self.tr["jp" if k == "en" else "en"]
+        if o.media:
+            frac = min(max((o.cursor - o.vs) / o.vspan, 0.1), 0.9) if o.vspan else 0.5
+            o.vspan = tr.vspan
+            o.vs = o.cursor - frac * o.vspan
+            o.redraw()
+        tr.redraw()
+
+    def zoom_key(self, f):
+        k = self.active
+        self.zoom(k, f, self.tr[k].cursor)
+
+    def fit_all(self):
+        for k, t in self.tr.items():
+            m = self.media[k]
+            if m:
+                t.vs = min(0.0, m.a_origin)
+                t.vspan = max(m.end - t.vs, 1.0)
+                t.redraw()
 
     # ---------- プレビュー / 再生 ----------
     def schedule_preview(self, k):
@@ -1595,130 +1870,218 @@ class App(_TkBase):
         except FileNotFoundError:
             self.say("ffplay が見つかりません (ffmpeg と同じ場所に入れてください)")
 
-    # ---------- 区間 ----------
-    def mark_start(self):
+    # ---------- 指定 (同じ場面 / CM / 暗転・長さ違い / カット) ----------
+    KIND_JA = {"pt": "同じ場面", "cm": "CM", "dim": "暗転・長さ違い", "cut": "カット"}
+
+    def on_range(self, k):
+        """波形をドラッグして範囲を選んだとき。"""
+        self.set_active(k)
+        self.update_sel_label()
+
+    def update_sel_label(self):
+        parts = []
+        for k, name in (("en", "英語"), ("jp", "日本語")):
+            r = self.tr[k].selr
+            if r:
+                parts.append(f"{name} {tc(r[0])[3:]} 〜 {tc(r[1])[3:]} ({r[1] - r[0]:.2f}秒)")
+            self.tr[k].redraw()
+        self.sel_lbl.config(text="選択中の範囲: " + (" / ".join(parts) if parts else "なし"))
+
+    def clear_ranges(self):
+        for t in self.tr.values():
+            t.selr = None
+            t.redraw()
+        self.update_sel_label()
+
+    def add_point(self):
         if not all(self.media.values()):
+            self.say("先に映像と録画を読み込んでください")
             return
-        self.start = (self.tr["en"].cursor, self.tr["jp"].cursor)
-        self.tr["en"].mark, self.tr["jp"].mark = self.start
-        self.mark_lbl.config(text=f"始まり: 英語 {tc(self.start[0])[3:]} / 日本語 {tc(self.start[1])[3:]}")
-        for t in self.tr.values():
-            t.redraw()
+        te, tj = self.tr["en"].cursor, self.tr["jp"].cursor
+        if self.refine_v.get():
+            r = xcorr_find(self.media["en"], te, self.media["jp"], tj, 2.0, 0.3)
+            if r and r[2] > 8:
+                tj = r[0]
+                self.set_cursor("jp", tj)
+        self.items.append({"k": "pt", "en": te, "jp": tj, "note": ""})
+        self.auto_flags = None
+        self.rebuild()
+        self.say(f"『同じ場面』を登録: 英語 {tc(te)[3:]} = 日本語 {tc(tj)[3:]}")
 
-    def mark_clear(self):
-        self.start = None
-        for t in self.tr.values():
-            t.mark = None
-            t.redraw()
-        self.mark_lbl.config(text="始まり: まだ決めていません")
+    def _need(self, k, what):
+        r = self.tr[k].selr
+        if not r:
+            self.say(f"先に{what}の波形をドラッグして範囲を選んでください")
+        return r
 
-    def mark_end(self):
-        st = getattr(self, "start", None)
-        if not st:
-            self.say("先に「区間の始まり」を決めてください (S キー)")
+    def add_cm(self):
+        r = self._need("jp", "日本語(下)")
+        if not r:
             return
-        es, js = st
-        ee, je = self.tr["en"].cursor, self.tr["jp"].cursor
-        if ee <= es or je <= js:
-            self.say("終わりは、始まりより後の場面にしてください")
+        self.items.append({"k": "cm", "jp0": r[0], "jp1": r[1]})
+        self.after_add("日本語の選択範囲を CM にしました")
+
+    def add_cut(self):
+        r = self._need("en", "英語(上)")
+        if not r:
             return
-        seg = {"en_start": es, "en_end": ee, "jp_start": js,
-               "jp_end": None if abs((je - js) - (ee - es)) <= 0.002 else je,
-               "fit": "stretch", "note": "", "lag": ""}
-        self.segs.append(seg)
-        self.segs.sort(key=lambda s: s["en_start"])
-        self.mark_clear()
+        ans = self.ask_choice("カットされた場面の音声",
+                              "この範囲は日本語版でカットされています。\nこの間の音声はどうしますか?",
+                              [("silence", "無音にする"), ("english", "英語版の音声をそのまま使う")])
+        if not ans:
+            return
+        self.items.append({"k": "cut", "en0": r[0], "en1": r[1], "audio": ans})
+        self.after_add("英語の選択範囲を カット にしました")
+
+    def add_dim(self):
+        re_, rj = self.tr["en"].selr, self.tr["jp"].selr
+        if not (re_ and rj):
+            self.say("英語(上)と日本語(下)の両方で、同じ場面の範囲をドラッグして選んでください")
+            return
+        ans = self.ask_choice("長さの違いの扱い",
+                              f"英語 {re_[1] - re_[0]:.2f}秒 ↔ 日本語 {rj[1] - rj[0]:.2f}秒\n長さが違う分はどうしますか?",
+                              [("stretch", "音の速さを少し変えて合わせる"), ("pad", "足りない所は無音で埋める"),
+                               ("trim", "余った所は切る")])
+        if not ans:
+            return
+        self.items.append({"k": "dim", "en0": re_[0], "en1": re_[1], "jp0": rj[0], "jp1": rj[1], "fit": ans})
+        self.after_add("長さが違う場面を登録しました")
+
+    def after_add(self, msg):
+        self.auto_flags = None
+        self.clear_ranges()
+        self.rebuild()
+        self.say(msg)
+
+    def ask_choice(self, title, text, choices):
+        d = tk.Toplevel(self)
+        d.title(title)
+        d.transient(self)
+        d.grab_set()
+        tk.Label(d, text=text, justify="left").pack(padx=12, pady=8)
+        res = {"v": None}
+        for val, lab in choices:
+            ttk.Button(d, text=lab, width=34, command=lambda v=val: (res.__setitem__("v", v), d.destroy())).pack(padx=12, pady=2)
+        ttk.Button(d, text="キャンセル", command=d.destroy).pack(pady=8)
+        self.wait_window(d)
+        return res["v"]
+
+    # ---------- 指定 → 区間 ----------
+    def rebuild(self):
+        m = self.media
+        if all(m.values()):
+            en_rng = (min(0.0, m["en"].a_origin), m["en"].end)
+            jp_rng = (min(0.0, m["jp"].a_origin), m["jp"].end)
+        else:
+            en_rng = jp_rng = (0.0, 1e6)
+        if self.items and all(m.values()):
+            self.segs, self.extra_segs, self.warns = build_from_items(self.items, en_rng, jp_rng)
+        else:
+            self.segs, self.extra_segs, self.warns = [], [], []
         self.refresh()
-        self.say(f"区間を追加 (計{len(self.segs)})")
 
     def refresh(self):
-        self.tree.delete(*self.tree.get_children())
-        for i, s in enumerate(self.segs):
-            en_d = s["en_end"] - s["en_start"]
-            jd = (s["jp_end"] - s["jp_start"]) if s["jp_end"] is not None else en_d
-            r = jd / en_d
-            self.tree.insert("", "end", iid=str(i), tags=("warn",) if abs(r - 1) > 0.02 else (), values=(
-                seg_letter(i), tc(s["en_start"]), tc(s["en_end"]), tc(s["jp_start"]),
-                tc(s["jp_end"]) if s["jp_end"] is not None else "(同じ長さ)",
-                f"{r:.4f}", FIT_JA.get(s["fit"], s["fit"]), s.get("lag", ""), s["note"]))
-        self.tr["en"].bands = [(s["en_start"], s["en_end"], i) for i, s in enumerate(self.segs)]
-        self.tr["jp"].bands = [(s["jp_start"], s["jp_start"] + ((s["jp_end"] - s["jp_start"]) if s["jp_end"] is not None else s["en_end"] - s["en_start"]), i)
-                               for i, s in enumerate(self.segs)]
-        for t in self.tr.values():
-            t.redraw()
+        # 一覧
+        self.itree.delete(*self.itree.get_children())
+        for i, it in enumerate(self.items):
+            k = it["k"]
+            if k == "pt":
+                en, jp, note = tc(it["en"]), tc(it["jp"]), "この2つは同じ場面"
+            elif k == "cm":
+                en, jp, note = "—", f"{tc(it['jp0'])[3:]} 〜 {tc(it['jp1'])[3:]}", f"CM ({it['jp1'] - it['jp0']:.1f}秒) は使わない"
+            elif k == "cut":
+                au = "英語版の音声を使う" if it.get("audio") == "english" else "無音"
+                en, jp, note = f"{tc(it['en0'])[3:]} 〜 {tc(it['en1'])[3:]}", "—", f"日本語版でカット ({it['en1'] - it['en0']:.1f}秒) / 音声: {au}"
+            else:
+                en = f"{tc(it['en0'])[3:]} 〜 {tc(it['en1'])[3:]}"
+                jp = f"{tc(it['jp0'])[3:]} 〜 {tc(it['jp1'])[3:]}"
+                note = (f"長さ違い: 英語 {it['en1'] - it['en0']:.2f}秒 ↔ 日本語 {it['jp1'] - it['jp0']:.2f}秒 "
+                        f"({FIT_JA.get(it.get('fit'), '')})")
+            self.itree.insert("", "end", iid=str(i), tags=(k,), values=(self.KIND_JA[k], en, jp, note))
+        self.warn_lbl.config(text="\n".join("⚠ " + w for w in self.warns[:2]))
+        # 波形上の表示
+        en_pts, jp_pts, n = [], [], 0
+        for it in self.items:
+            if it["k"] == "pt":
+                n += 1
+                en_pts.append((it["en"], str(n)))
+                jp_pts.append((it["jp"], str(n)))
+            elif it["k"] == "dim":
+                n += 1
+                en_pts += [(it["en0"], f"{n}a"), (it["en1"], f"{n}b")]
+                jp_pts += [(it["jp0"], f"{n}a"), (it["jp1"], f"{n}b")]
+        te, tj = self.tr["en"], self.tr["jp"]
+        te.pts, tj.pts = en_pts, jp_pts
+        te.marks = [(min(i["en0"], i["en1"]), max(i["en0"], i["en1"]), i["k"]) for i in self.items if i["k"] in ("cut", "dim")]
+        tj.marks = [(min(i["jp0"], i["jp1"]), max(i["jp0"], i["jp1"]), i["k"]) for i in self.items if i["k"] in ("cm", "dim")]
+        te.bands = [(s["en_start"], s["en_end"], i) for i, s in enumerate(self.segs)]
+        tj.bands = [(s["jp_start"], s["jp_end"] if s["jp_end"] is not None else s["jp_start"] + s["en_end"] - s["en_start"], i)
+                    for i, s in enumerate(self.segs)]
         for t in self.tr.values():
             t.sel = None
+            t.redraw()
         self.refresh_easy()
 
-    def sel_idx(self):
-        s = self.tree.selection()
+    def item_idx(self):
+        s = self.itree.selection()
         return int(s[0]) if s else None
 
-    def on_select(self, _):
-        i = self.sel_idx()
+    def on_item_select(self, _):
+        i = self.item_idx()
         if i is None or not self.media["en"]:
             return
-        s = self.segs[i]
-        self._select_seg(i)
-        self.set_cursor("en", s["en_start"], scroll=True)
-        self.set_cursor("jp", s["jp_start"], scroll=True)
+        it = self.items[i]
+        if it["k"] == "pt":
+            self.set_cursor("en", it["en"], scroll=True)
+            self.set_cursor("jp", it["jp"], scroll=True)
+        elif it["k"] == "cm":
+            self.set_cursor("jp", it["jp0"], scroll=True)
+        elif it["k"] == "cut":
+            self.set_cursor("en", it["en0"], scroll=True)
+        else:
+            self.set_cursor("en", it["en0"], scroll=True)
+            self.set_cursor("jp", it["jp0"], scroll=True)
 
-    def _select_seg(self, i):
-        for t in self.tr.values():
-            t.sel = i
-            t.redraw()
-
-    def del_seg(self):
-        i = self.sel_idx()
+    def del_item(self):
+        i = self.item_idx()
         if i is not None:
-            del self.segs[i]
-            self.refresh()
+            del self.items[i]
+            self.auto_flags = None
+            self.rebuild()
 
-    def edit_seg(self):
-        i = self.sel_idx()
+    def edit_item(self):
+        i = self.item_idx()
         if i is None:
             return
-        s = self.segs[i]
+        it = self.items[i]
+        keys = {"pt": [("英語の時刻", "en", "en"), ("日本語の時刻", "jp", "jp")],
+                "cm": [("CM 開始 (日本語)", "jp0", "jp"), ("CM 終了 (日本語)", "jp1", "jp")],
+                "cut": [("カット 開始 (英語)", "en0", "en"), ("カット 終了 (英語)", "en1", "en")],
+                "dim": [("英語 開始", "en0", "en"), ("英語 終了", "en1", "en"),
+                        ("日本語 開始", "jp0", "jp"), ("日本語 終了", "jp1", "jp")]}[it["k"]]
         d = tk.Toplevel(self)
-        d.title(f"区間 {i + 1} を編集")
+        d.title(f"{self.KIND_JA[it['k']]} を編集")
         d.transient(self)
-        vars_ = {}
-        fe, fj = self.fps("en"), self.fps("jp")
-        rows = [("英語版 開始", "en_start", fe), ("英語版 終了", "en_end", fe), ("日本語 開始", "jp_start", fj),
-                ("日本語 終了 (空欄=英語と同じ長さ)", "jp_end", fj)]
-        for r, (lab, key, fp) in enumerate(rows):
+        vs = {}
+        for r, (lab, key, tk_) in enumerate(keys):
             ttk.Label(d, text=lab).grid(row=r, column=0, sticky="w", padx=6, pady=3)
-            v = tk.StringVar(value="" if s[key] is None else tc(s[key]))
+            v = tk.StringVar(value=tc(it[key]))
             ttk.Entry(d, textvariable=v, width=18).grid(row=r, column=1, padx=6)
-            vars_[key] = (v, fp)
-        ttk.Label(d, text="長さが違うとき").grid(row=4, column=0, sticky="w", padx=6)
-        fit = tk.StringVar(value=FIT_JA.get(s["fit"], s["fit"]))
-        ttk.Combobox(d, textvariable=fit, values=list(FIT_JA.values()), width=24, state="readonly").grid(row=4, column=1)
-        ttk.Label(d, text="メモ").grid(row=5, column=0, sticky="w", padx=6, pady=3)
-        note = tk.StringVar(value=s["note"])
-        ttk.Entry(d, textvariable=note, width=28).grid(row=5, column=1, padx=6)
+            vs[key] = (v, tk_)
 
         def ok():
             try:
-                new = dict(s)
-                for key, (v, fp) in vars_.items():
-                    txt = v.get().strip()
-                    new[key] = None if (key == "jp_end" and not txt) else parse_tc(txt, fp)
-                if new["en_end"] <= new["en_start"]:
-                    raise ValueError("EN終了はEN開始より後にしてください")
+                new = dict(it)
+                for key, (v, tk_) in vs.items():
+                    new[key] = parse_tc(v.get().strip(), self.fps(tk_))
             except ValueError as ex:
                 messagebox.showerror("入力エラー", str(ex), parent=d)
                 return
-            new["fit"], new["note"] = JA_FIT.get(fit.get(), "stretch"), note.get()
-            self.segs[i] = new
-            self.segs.sort(key=lambda x: x["en_start"])
+            self.items[i] = new
             d.destroy()
-            self.refresh()
-        tk.Label(d, fg="#777", font=("", 8), justify="left", wraplength=360,
-                 text="「長さが違うとき」: 英語側と日本語側で区間の長さが違う場合の扱いです。\n"
-                      "伸縮=速さを少し変えて合わせる / 無音で埋める=足りない所を無音に / 切り捨てる=余った所を切る"
-                 ).grid(row=6, column=0, columnspan=2, padx=6)
-        ttk.Button(d, text="OK", command=ok).grid(row=7, column=0, columnspan=2, pady=8)
+            self.auto_flags = None
+            self.rebuild()
+        ttk.Button(d, text="OK", command=ok).grid(row=len(keys), column=0, columnspan=2, pady=8)
 
     # ---------- 自動吸着 / 検証 ----------
     def _params(self):
@@ -1733,10 +2096,7 @@ class App(_TkBase):
             return
         win, srch = self._params()
         t_en, t_jp = self.tr["en"].cursor, self.tr["jp"].cursor
-        # 開始点を打った後(=区間の終わりを探す時)は、カーソルより前の音で合わせる
-        # (区間をまたぐ音で合わせると、CMなど別の部分に吸着しやすいため)
-        before = getattr(self, "start", None) is not None
-        off = win if before else 0.0
+        off = 0.0
         self.say("解析中…")
 
         def work():
@@ -1755,51 +2115,22 @@ class App(_TkBase):
         quality = "良好" if z > 10 and c > 0.3 else "要確認" if z > 6 else "不確か (声だけの場面は合いにくい。BGM/効果音のある所で)"
         self.say(f"日本語側を {tc(t)} に吸着  相関 {c:.2f} / 突出度 {z:.1f}  → {quality}")
 
-    def verify(self):
-        en, jp = self.media["en"], self.media["jp"]
-        if not (en and jp and self.segs):
-            return
-        self.say("区間を検証中…")
-        segs = [dict(s) for s in self.segs]
-
-        def work():
-            res = []
-            for s in segs:
-                ed = s["en_end"] - s["en_start"]
-                jd = (s["jp_end"] - s["jp_start"]) if s["jp_end"] is not None else ed
-                ratio = jd / ed
-                outs = []
-                w = min(4.0, ed)
-                for frac in (0.0, 0.5, 1.0):
-                    t = s["en_start"] + (ed - w) * frac
-                    exp = s["jp_start"] + (t - s["en_start"]) * ratio
-                    r = xcorr_find(en, t, jp, exp, win=w, search=1.5)
-                    outs.append("—" if r is None or r[2] < 6 else f"{(r[0] - exp) * 1000:+.0f}")
-                res.append(" / ".join(outs))
-            self.q.put(lambda: self._verify_done(res))
-        threading.Thread(target=work, daemon=True).start()
-
-    def _verify_done(self, res):
-        for s, r in zip(self.segs, res):
-            s["lag"] = r
-        self.refresh()
-        self.say("検証完了: 各区間の 先頭/中央/末尾 でのズレ(ms)。— は判定不能(無音など)。±40ms超は要調整")
-
     # ---------- プロジェクト入出力 ----------
     def project_dict(self):
         segs = []
-        for s in self.segs:
-            d = {"en_start": round(s["en_start"], 4), "en_end": round(s["en_end"], 4),
-                 "jp_start": round(s["jp_start"], 4), "fit": s["fit"]}
-            if s["jp_end"] is not None:
-                d["jp_end"] = round(s["jp_end"], 4)
-            if s["note"]:
-                d["note"] = s["note"]
+        for sg in self.segs:
+            d = {"en_start": round(sg["en_start"], 4), "en_end": round(sg["en_end"], 4),
+                 "jp_start": round(sg["jp_start"], 4), "fit": sg["fit"]}
+            if sg["jp_end"] is not None:
+                d["jp_end"] = round(sg["jp_end"], 4)
             segs.append(d)
+        for e in self.extra_segs:
+            segs.append({"type": "english", "en_start": round(e["en_start"], 4), "en_end": round(e["en_end"], 4)})
+        segs.sort(key=lambda x: x["en_start"])
         return {"en_video": self.en_var.get(), "jp_media": self.jp_var.get(),
                 "jp_audio_stream": self.jp_ast.get(), "output": self.out_path.get(),
                 "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
-                "segments": segs}
+                "segments": segs, "items": self.items}
 
     def save_project(self, ask=True):
         if ask or not self.proj_path:
@@ -1826,21 +2157,9 @@ class App(_TkBase):
         self.jp_ast.set(d.get("jp_audio_stream", 0))
         self.out_path.set(str(base / d["output"]) if d.get("output") else "")
         fps = {"en": d.get("en_fps") or 24000 / 1001, "jp": d.get("jp_fps") or 30000 / 1001}
-        self.segs = []
-        for s in d.get("segments", []):
-            if s.get("type", "match") != "match":
-                continue
-            je = s.get("jp_end")
-            es = parse_time(s["en_start"], fps["en"])
-            js = parse_time(s["jp_start"], fps["jp"])
-            ee = parse_time(s["en_end"], fps["en"]) if "en_end" in s else None
-            je = parse_time(je, fps["jp"]) if je is not None else None
-            if ee is None:
-                ee = es + (je - js)
-            self.segs.append({"en_start": es, "en_end": ee, "jp_start": js, "jp_end": je,
-                              "fit": s.get("fit", "stretch"), "note": s.get("note", ""), "lag": ""})
-        self.segs.sort(key=lambda x: x["en_start"])
-        self.refresh()
+        self.items = d.get("items", [])
+        self.auto_flags = None
+        self.rebuild()
         self.say("プロジェクトを読み込みました。「読み込み」で素材の波形を読み込んでください")
 
     # ---------- 合成 ----------
