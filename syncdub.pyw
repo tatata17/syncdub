@@ -368,7 +368,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.18"
+APP_VERSION = "2026.11.07.19"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -936,9 +936,9 @@ def build_from_items(items, en_rng, jp_rng):
             if d["en0"] - 1e-3 <= t0 and t1 <= d["en1"] + 1e-3:
                 fit, in_dim = d.get("fit", "stretch"), True
         ratio = (x1 - x0) / (t1 - t0)
-        if not in_dim and abs(ratio - 1) > 0.05:
-            warns.append(f"英語 {t0:.1f}〜{t1:.1f}秒: 音の速さが {ratio:.2f} 倍になります。"
-                         "暗転などの長さ違いなら「暗転・長さ違い」で指定してください")
+        if not in_dim and abs(ratio - 1) > 0.02:
+            warns.append(f"英語 {t0:.1f}〜{t1:.1f}秒: 音の速さが {ratio:.3f} 倍になります。"
+                         "「同じ場面」の位置がずれている可能性があります。暗転などの長さ違いなら「暗転・長さ違い」で指定してください")
         # 日本語録画の範囲外にはみ出す分は詰める
         if x0 < jp_rng[0]:
             d0 = jp_rng[0] - x0
