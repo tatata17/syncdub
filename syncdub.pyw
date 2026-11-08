@@ -498,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.6"
+APP_VERSION = "2026.11.09.7"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -716,6 +716,63 @@ def _phat_local(a, b, fs):
     return np.fft.irfft(G, N)[: m - n + 1]
 
 
+def _thumb(m, t, W=48, H=36):
+    """時刻 t(映像の先頭=0)の画面を、小さな白黒画像にして返す。取れない・真っ暗なときは None。"""
+    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, t + m.voff):.3f}", "-i", m.path, "-frames:v", "1",
+                        "-vf", f"scale={W}:{H},format=gray", "-f", "rawvideo", "-"], capture_output=True, **NOWIN)
+    if len(r.stdout) != W * H:
+        return None
+    a = np.frombuffer(r.stdout, np.uint8).astype(np.float32).reshape(H, W)
+    sd = float(a.std())
+    return None if sd < 4.0 else (a - a.mean()) / sd
+
+
+def _has_video(m):
+    return any(s["codec_type"] == "video" for s in m.info["streams"])
+
+
+def _fmt_t(t):
+    return f"{int(t // 60)}:{t % 60:04.1f}"
+
+
+def _pair_sim(a, b):
+    return float((a * b).mean())
+
+
+def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
+    """日本語の js〜js+dur に合う英語版の位置(オフセット)を、音の候補どうしで画面の似かたから比べる。
+    戻り値: (最も似ているオフセット, 一致度, 自分の一致度, [(オフセット, 一致度), …])。判定できなければ None。"""
+    ts = [js + dur * f for f in (0.08, 0.22, 0.36, 0.5, 0.64, 0.78, 0.92)]
+    jt = [(t, _thumb(jp, t)) for t in ts]
+    jt = [(t, a) for t, a in jt if a is not None]
+    if len(jt) < 3:
+        return None
+    cands = {round(own, 3): own}
+    order = sorted(range(len(offs)), key=lambda i: -offs_z[i])
+    for i in order[:8]:
+        if offs_z[i] >= 6:
+            cands.setdefault(round(offs[i], 3), offs[i])
+    res = []
+    for o in cands.values():
+        sc = []
+        for t, a in jt:
+            et = t - o
+            if et < 0 or et > e_dur - 0.05:
+                continue
+            b = _thumb(en, et)
+            if b is not None:
+                sc.append(_pair_sim(a, b))
+        if len(sc) >= 3:
+            res.append((o, float(np.mean(sc))))
+    if not res:
+        return None
+    own_v = next((v for o, v in res if abs(o - own) < 1e-3), None)
+    if own_v is None:
+        return None
+    best = max(res, key=lambda x: x[1])
+    return best[0], best[1], own_v, res
+
+
 def _best_peak(a0, b, fs):
     """通常の正規化相関と位相相関の両方で一番はっきりした山を探し、(位置, 突出度z) を返す。"""
     best = (0, -1.0)
@@ -870,6 +927,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
             cur = [(o, z)]
     clusters.append(cur)
     offs = [float(np.median([o for o, _ in c])) for c in clusters]
+    offs_z = [max(z_ for _, z_ in c) for c in clusters]  # 各候補の、音の一致の強さ
 
     # ---- 2) 英語側を窓で区切り、各窓がどのオフセットに合うか判定
     #      (短い録画や効果音の少ない録画で判定できないときは、窓を短く・基準をゆるめて再挑戦する)
@@ -1171,6 +1229,32 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 z_["flag"] = ("・".join(x for x in (z_["flag"], "カットの位置が不確か") if x))
         progress(0.97, "カットの位置を調整しています…")
     segs = [s_ for s_ in segs if s_["en_end"] - s_["en_start"] >= 0.2]
+
+    # ---- 6.8) 日本語のほうが短いとき: 同じBGMを使う別の場所と取り違えていないか、画面の似かたで確かめる
+    if j_dur < 0.7 * e_dur and segs and _has_video(en) and _has_video(jp) and len(offs) > 1:
+        progress(0.98, "画面の似かたで、取り違えがないか確かめています…")
+        for sg_ in segs:
+            if sg_["jp_end"] is not None:
+                continue
+            dur_ = sg_["en_end"] - sg_["en_start"]
+            own = sg_["jp_start"] - sg_["en_start"]
+            try:
+                r_ = _pick_offset_by_video(en, jp, sg_["jp_start"], dur_, offs, offs_z, own, e_dur)
+            except Exception:  # noqa: BLE001
+                r_ = None
+            if not r_:
+                continue
+            bo, bv, ov, allr = r_
+            if abs(bo - own) > 0.3 and bv >= ov + 0.12 and bv >= 0.35:
+                ns = sg_["jp_start"] - bo
+                if ns >= 0 and ns + dur_ <= e_dur + 0.05:
+                    sg_["en_start"], sg_["en_end"] = round(float(ns), 4), round(float(ns + dur_), 4)
+                    sg_["flag"] = "・".join(x for x in (sg_["flag"], f"画面の似かたで、音が似た別の場所から選び直しました") if x)
+                    continue
+            others = [o_ for o_, v_ in allr if abs(o_ - own) > 0.3 and v_ >= ov - 0.08 and v_ >= 0.3]
+            if others:
+                where = "、".join(_fmt_t(sg_["jp_start"] - o_) for o_ in others[:2])
+                sg_["flag"] = "・".join(x for x in (sg_["flag"], f"似た場所が他にもあります(英語版 {where})") if x)
 
     unused = []
     prev_end = jo

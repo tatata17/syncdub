@@ -1,1 +1,1 @@
-{"version": "2026.11.09.6", "file": "syncdub.pyw", "notes": "切り出しの映像を HEVC 優先で書き出す(NVIDIA → x265 → x264 の順に、使えるものを自動選択)"}
+{"version": "2026.11.09.7", "file": "syncdub.pyw", "notes": "同じBGMを使うCMの取り違えを、画面の似かたでも判定(似た場所が複数あるときは警告)"}
