@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.18"
+APP_VERSION = "2026.11.09.19"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1458,7 +1458,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 3     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 4     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -2872,16 +2872,30 @@ class App(_TkBase):
                                 d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache)
                             except Exception:  # noqa: BLE001
                                 d["v"] = None
-                        # 映像まで合うものを先に、そのあと音がはっきりしているものの順で残す
-                        jo.sort(key=lambda d: (not (d["v"] is not None and d["v"] >= VID_OK), -d["z"]))
+                        # 映像が合わないもの(声やBGMだけ同じ別CM)は先に外す。音が強い偽物が、本物を押しのけないように
+                        bad = [d for d in jo if d["v"] is not None and d["v"] < VID_MIN]
+                        good = [d for d in jo if not (d["v"] is not None and d["v"] < VID_MIN)]
+
+                        def over(d, e):
+                            return min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])
+                        # 映像まで合うものを先に、次に映像が似ているもの、最後に音がはっきりしているものの順で残す
+                        good.sort(key=lambda d: (not (d["v"] is not None and d["v"] >= VID_OK), -(d["v"] or 0), -d["z"]))
                         keep = []
-                        for d in jo:
-                            clash = [e for e in keep if min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])]
+                        for d in good:
+                            clash = [e for e in keep if over(d, e)]
                             if clash:
                                 for e in clash:
                                     e["clash"] = True
+                                    e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"]})
                                 continue
                             keep.append(d)
+                        for d in bad:  # 映像が合わず外したもの(重なる本物がなければ、記録として残す)
+                            clash = [e for e in keep if over(d, e)]
+                            if clash:
+                                for e in clash:
+                                    e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"], "rej": True})
+                            else:
+                                keep.append(d)
                         keep.sort(key=lambda d: d["t"])
                         del jp
                         rec["files"][jp_p] = {"key": fkey, "keep": keep, "done": False}
