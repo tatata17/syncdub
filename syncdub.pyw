@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.25"
+APP_VERSION = "2026.11.09.26"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 9     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 10     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1645,7 +1645,7 @@ def _edge_fit(en, jp, e, off, dirn, inner, outer, cache):
     return None
 
 
-def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40):
+def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None):
     """長いCMの短縮版・途中で切れた版を探す。pieces(CMを約10秒ずつに分けたもの)の各部分を録画から探した結果 phits のうち、
     画面も合うものを、録画と英語版の時間差(オフセット)が同じ部分ごとにまとめて区間にし、画面の合う範囲に両端をぴったり合わせる。
     区間が順番どおりに並び、合計2か所以上で合っていれば1つの短縮版とみなす。
@@ -1663,6 +1663,8 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             v = video_similarity(en, a, b - a, jp, h["t"], vcache)
         except Exception:  # noqa: BLE001
             v = None
+        if plog is not None:
+            plog.append({"k": k, "e": round(a, 1), "t": round(h["t"], 2), "z": round(h["z"], 1), "v": v})
         if v is None or not vid_good({"v": v, "z": h["z"]}):
             continue
         hits.setdefault(k, []).append({"t": h["t"], "e": a, "l": b - a, "z": h["z"]})
@@ -3097,18 +3099,21 @@ class App(_TkBase):
                         if pcs:
                             try:
                                 phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog)
-                                for e_ in find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped):
+                                plog = []
+                                sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog)
+                                dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
+                                for e_ in sv_:
                                     # 短縮版と重なる「映像が合わず除外」の記録は、短縮版だったという説明がつくので消す
                                     keep[:] = [x for x in keep if not (x["k"] == e_["k"] and x.get("v") is not None and x["v"] < VID_MIN
                                                                        and min(x["t"] + x["L"], e_["t"] + e_["L"]) - max(x["t"], e_["t"]) > 0)]
                                     keep.append(e_)
                             except _Stop:
                                 raise
-                            except Exception:  # noqa: BLE001
-                                pass
+                            except Exception as ex_:  # noqa: BLE001
+                                dropped.append({"short_error": repr(ex_)})
                         keep.sort(key=lambda d: d["t"])
                         del jp
-                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted(dropped, key=lambda x: -x["z"])[:40], "done": False}
+                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted([x for x in dropped if "z" in x], key=lambda x: -x["z"])[:40] + [x for x in dropped if "z" not in x], "done": False}
                         save_rec()
                     if not keep:
                         rec["files"][jp_p]["done"] = True
