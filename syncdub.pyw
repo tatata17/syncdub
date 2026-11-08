@@ -456,15 +456,15 @@ def _main(argv, tmp):
             enc = pick_video_encoder(str(clip.get("codec", "auto")), interlaced)
             crf = int(clip.get("crf", 18))
             if enc == "hevc_nvenc":
-                cmd += ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", str(crf), "-b:v", "0", "-forced-idr", "1"]
+                cmd += ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", str(crf), "-b:v", "0", "-forced-idr", "1", "-bf", "0"]
             elif enc == "libx265":
                 cmd += ["-c:v", enc, "-preset", str(clip.get("preset", "medium")), "-crf", str(crf),
-                        "-x265-params", "log-level=error"]
+                        "-x265-params", "log-level=error:bframes=0:open-gop=0"]
             else:
-                cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(crf)]
+                cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(crf), "-bf", "0"]
                 if interlaced:  # インターレース映像は、そのまま(縞を保って)エンコードする
                     cmd += ["-flags", "+ilme+ildct", "-top", "1" if fo in ("tt", "tb") else "0"]
-            # 約2秒ごとに必ずキーフレームを入れる (プレーヤーでシークしたとき、映像が乱れる範囲を小さくする)
+            # 約2秒ごとに必ずキーフレームを入れ、Bフレームなし・閉じたGOPにする (プレーヤーでシークしたとき、映像が乱れにくい単純な構造)
             cmd += ["-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)", "-avoid_negative_ts", "make_zero"]
             print(f"映像エンコーダ: {enc}")
         else:
@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.23"
+APP_VERSION = "2026.11.09.24"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 7     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 8     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1560,7 +1560,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
         for d in keep:
             i0 = int(round((d["t"] - jp.a_origin) * fs))
             v = _verify_hit(c, jx, i0, fs)
-            if not v["pass"] and v.get("weak") and d["z"] >= 20:
+            if not v["pass"] and v.get("weak") and d["z"] >= 10:
                 d["ok"] = False
                 d["zz"], d["np"], d["n"] = v["zz"], v["np"], v["n"]
                 d["weak"] = True
