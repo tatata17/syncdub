@@ -283,6 +283,36 @@ def clip_segments(segs, c0, c1):
     return out
 
 
+_ENC_OK = {}
+
+
+def encoder_works(name):
+    """ffmpeg にそのエンコーダがあり、実際に動くか(短い試験で確かめる。GPUがない等で動かないものを除く)。"""
+    if name not in _ENC_OK:
+        try:
+            r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=320x240:r=30:d=0.3",
+                                "-c:v", name, "-pix_fmt", "yuv420p", "-f", "null", "-"],
+                               capture_output=True, timeout=60, **NOWIN)
+            _ENC_OK[name] = r.returncode == 0
+        except Exception:  # noqa: BLE001
+            _ENC_OK[name] = False
+    return _ENC_OK[name]
+
+
+ENC_LABEL = {"hevc_nvenc": "HEVC (NVIDIA)", "libx265": "HEVC (x265)", "libx264": "H.264 (x264)"}
+
+
+def pick_video_encoder(prefer="auto", interlaced=False):
+    """切り出しで使う映像エンコーダ。HEVC(NVIDIA → x265)を優先し、使えなければ H.264(x264)。
+    prefer="h264" なら H.264 固定。インターレース映像は、縞を保てる x264 を使う。"""
+    if prefer == "h264" or interlaced:
+        return "libx264"
+    for name in ("hevc_nvenc", "libx265"):
+        if encoder_works(name):
+            return name
+    return "libx264"
+
+
 def drop_cut_gaps(segs, fps, thr=0.5):
     """切り出しで、英語版にだけある長い隙間(日本語版でカットされた所)を取り除く。
     戻り値: (区間リスト, つなぐ範囲 [(開始, 終了), …])。範囲の端はフレームの境目に合わせる(映像と音のずれを防ぐ)。"""
@@ -420,13 +450,22 @@ def _main(argv, tmp):
         if keep_en:
             cmd += ["-map", "[xaout]" if (clip and vchain) else "0:a:0"]
         if clip:  # 映像を再エンコード (キーフレームに関係なく、フレーム単位で切り出せる)
-            cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(clip.get("crf", 18)),
-                    "-pix_fmt", "yuv420p",
-                    # 約2秒ごとに必ずキーフレームを入れる (プレーヤーでシークしたとき、映像が乱れる範囲を小さくする)
-                    "-force_key_frames", "expr:gte(t,n_forced*2)", "-avoid_negative_ts", "make_zero"]
             fo = next((st.get("field_order") for st in en["streams"] if st["codec_type"] == "video"), None)
-            if fo in ("tt", "bb", "tb", "bt"):  # インターレース映像は、そのまま(縞を保って)エンコードする
-                cmd += ["-flags", "+ilme+ildct", "-top", "1" if fo in ("tt", "tb") else "0"]
+            interlaced = fo in ("tt", "bb", "tb", "bt")
+            enc = pick_video_encoder(str(clip.get("codec", "auto")), interlaced)
+            crf = int(clip.get("crf", 18))
+            if enc == "hevc_nvenc":
+                cmd += ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", str(crf), "-b:v", "0", "-forced-idr", "1"]
+            elif enc == "libx265":
+                cmd += ["-c:v", enc, "-preset", str(clip.get("preset", "medium")), "-crf", str(crf),
+                        "-x265-params", "log-level=error"]
+            else:
+                cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(crf)]
+                if interlaced:  # インターレース映像は、そのまま(縞を保って)エンコードする
+                    cmd += ["-flags", "+ilme+ildct", "-top", "1" if fo in ("tt", "tb") else "0"]
+            # 約2秒ごとに必ずキーフレームを入れる (プレーヤーでシークしたとき、映像が乱れる範囲を小さくする)
+            cmd += ["-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)", "-avoid_negative_ts", "make_zero"]
+            print(f"映像エンコーダ: {enc}")
         else:
             cmd += ["-c:v", "copy"]
         cmd += ["-c:a:0", codec]
@@ -459,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.5"
+APP_VERSION = "2026.11.09.6"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1937,6 +1976,8 @@ class App(_TkBase):
         attach_tips(self, extra=[
             (self.clip_tree, "切り出したい日本語のファイルの一覧です。ここにファイルをドロップして追加できます。"),
             (self.clip_en_ent, "元になる、長い(まとまった)英語版の映像ファイルです。"),
+            (self.clip_codec_cb, "「自動」は、使えれば HEVC(NVIDIA → x265)、使えなければ H.264 で書き出します。"
+                                 "古い機器やプレーヤーで再生したいときは H.264 を選びます。"),
             (self.en_ent, "英語版(きれいな映像)のファイルの場所です。"),
             (self.jp_ent, "日本語吹き替えの音声が入った録画ファイルの場所です。"),
             (self.itree, "登録した指定の一覧です。行をクリックすると、その場所に移動します。"),
@@ -2050,6 +2091,7 @@ class App(_TkBase):
         self.clip_en = tk.StringVar()
         self.clip_out = tk.StringVar()
         self.clip_crf = tk.IntVar(value=18)
+        self.clip_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.clip_files = []
         pad = {"padx": 12, "pady": 5}
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
@@ -2090,6 +2132,10 @@ class App(_TkBase):
         r4.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Label(r4, text="画質 (数字が小さいほど高画質・大きいファイル。通常は 18):").pack(side="left")
         ttk.Spinbox(r4, from_=12, to=28, width=4, textvariable=self.clip_crf).pack(side="left", padx=6)
+        ttk.Label(r4, text="映像の形式:").pack(side="left", padx=(18, 4))
+        self.clip_codec_cb = ttk.Combobox(r4, textvariable=self.clip_codec, state="readonly", width=20,
+                                          values=("自動 (HEVC優先)", "H.264 (どの機器でも再生しやすい)"))
+        self.clip_codec_cb.pack(side="left")
         ttk.Label(r4, text="ファイル名は「日本語ファイル名_jpdub.mkv」になります。", foreground="#667").pack(side="left", padx=12)
         r5 = ttk.Frame(f)
         self.clip_btn = ttk.Button(r5, text="切り出しスタート", command=self.run_clip)
@@ -2177,6 +2223,7 @@ class App(_TkBase):
         except (tk.TclError, ValueError):
             crf = 18
         crf = max(0, min(51, crf))
+        codec = "h264" if self.clip_codec.get().startswith("H.264") else "auto"
         ast = self.jp_ast.get()
         self.clip_btn.state(["disabled"])
         self.clip_open.pack_forget()
@@ -2225,7 +2272,7 @@ class App(_TkBase):
                         sg.append(d)
                     proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
                             "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k", "segments": sg,
-                            "clip": {"start": round(c0, 4), "end": round(c1, 4), "crf": crf, "preset": "medium"}}
+                            "clip": {"start": round(c0, 4), "end": round(c1, 4), "crf": crf, "preset": "medium", "codec": codec}}
                     tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
                     try:
                         pj = tmpd / "project.json"
@@ -2236,6 +2283,9 @@ class App(_TkBase):
                     finally:
                         shutil.rmtree(tmpd, ignore_errors=True)
                     span = f"英語版 {self.short(c0)}〜{self.short(c1)} を切り出し"
+                    m_enc = re.search(r"映像エンコーダ: (\S+)", buf.getvalue())
+                    if m_enc:
+                        span += f" [{ENC_LABEL.get(m_enc.group(1), m_enc.group(1))}]"
                     if "カット部分を飛ばして" in buf.getvalue():
                         span += " (日本語版でカットされた部分は飛ばしました)"
                     if flag:
