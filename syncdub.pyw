@@ -421,7 +421,9 @@ def _main(argv, tmp):
             cmd += ["-map", "[xaout]" if (clip and vchain) else "0:a:0"]
         if clip:  # 映像を再エンコード (キーフレームに関係なく、フレーム単位で切り出せる)
             cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(clip.get("crf", 18)),
-                    "-pix_fmt", "yuv420p"]
+                    "-pix_fmt", "yuv420p",
+                    # 約2秒ごとに必ずキーフレームを入れる (プレーヤーでシークしたとき、映像が乱れる範囲を小さくする)
+                    "-force_key_frames", "expr:gte(t,n_forced*2)", "-avoid_negative_ts", "make_zero"]
             fo = next((st.get("field_order") for st in en["streams"] if st["codec_type"] == "video"), None)
             if fo in ("tt", "bb", "tb", "bt"):  # インターレース映像は、そのまま(縞を保って)エンコードする
                 cmd += ["-flags", "+ilme+ildct", "-top", "1" if fo in ("tt", "tb") else "0"]
@@ -457,7 +459,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.4"
+APP_VERSION = "2026.11.09.5"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
