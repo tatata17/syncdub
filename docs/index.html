@@ -205,7 +205,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
     <li><a href="#about"><span class="tn"></span>はじめに</a></li>
     <li><a href="#install"><span class="tn">01</span>必要なものと導入</a></li>
     <li><a href="#basic"><span class="tn">02</span>かんたんな使い方</a></li>
-    <li><a href="#clip"><span class="tn">03</span>切り出し(CMごと)の使い方</a></li>
+    <li><a href="#clip"><span class="tn">03</span>切り出し(一致部分だけ)の使い方</a></li>
     <li><a href="#manual"><span class="tn">04</span>手動調整の使い方</a></li>
     <li><a href="#keys"><span class="tn">05</span>ショートカット</a></li>
     <li><a href="#update"><span class="tn">06</span>更新のしかた</a></li>
@@ -277,8 +277,8 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="clip">
- <h2><span class="n">03</span>切り出し(CMごと)の使い方</h2>
- <p>英語版の映像が<b>1本にまとまっていて</b>(CMがいくつも続いているなど)、日本語の音声が<b>CMごとのバラバラのファイル</b>のときに使う、「切り出し (CMごと)」タブです。英語版を手で分割しなくても、日本語ファイルに一致した部分だけが、1本ずつの mkv になります。</p>
+ <h2><span class="n">03</span>切り出し(一致部分だけ)の使い方</h2>
+ <p>英語版の映像が<b>長い1本</b>で、日本語の音声が<b>短いファイル</b>(CM、番組の一部、コーナーなど)のときに使う、「切り出し (一致部分だけ)」タブです。英語版を手で分割しなくても、日本語ファイルに一致した部分だけが、1本ずつの mkv になります。CMに限らず、日本語ファイルが英語版の一部に当たるものなら使えます。</p>
  <ol class="steps">
   <li><strong>英語版の映像を選ぶ</strong>1本にまとまったファイルを選びます。</li>
   <li><strong>日本語のファイルを入れる</strong>一覧にドロップ(または「追加...」)します。複数まとめて入れられます。</li>
@@ -286,7 +286,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
  </ol>
  <p>日本語ファイルを1本ずつ、英語版全体から音で探して合わせ、見つかった部分だけを切り出します。ファイル名は「日本語ファイル名_jpdub.mkv」で、日本語の音声が最初、英語の音声も入ります。結果は一覧の「状態」に出ます(要確認のものは、聞いて確かめてください)。</p>
  <div class="warn"><b class="lb">注意</b>この切り出しだけは、映像を<b>再エンコード</b>します(キーフレームに関係なくフレーム単位で切るため)。時間がかかり、画質は少し変わります(画質の数字は小さいほど高画質で、通常は18)。「かんたん」タブの、映像をそのままコピーする合成は今までどおりで、なくなっていません。</div>
- <div class="note"><b class="lb">ヒント</b>音が少ない(声だけ)CMは、見つからないことがあります。そのときは、そのファイルを「かんたん」タブか「手動調整」タブで扱ってください。</div>
+ <div class="note"><b class="lb">ヒント</b>音が少ない(声だけ)の場面は、見つからないことがあります。そのときは、そのファイルを「かんたん」タブか「手動調整」タブで扱ってください。</div>
 </section>
 
 <section id="manual">

@@ -414,7 +414,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.2"
+APP_VERSION = "2026.11.09.3"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1704,7 +1704,7 @@ class App(_TkBase):
         self.nb.pack(fill="both", expand=True, padx=4, pady=2)
         self.easy, self.manual, self.clipt = ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb)
         self.nb.add(self.easy, text="   かんたん   ")
-        self.nb.add(self.clipt, text="   切り出し (CMごと)   ")
+        self.nb.add(self.clipt, text="   切り出し (一致部分だけ)   ")
         self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
         self._hdr.lift()
         top = ttk.Frame(self.manual, padding=6)
@@ -1842,7 +1842,7 @@ class App(_TkBase):
         self._build_clip()
         attach_tips(self, extra=[
             (self.clip_tree, "切り出したい日本語のファイルの一覧です。ここにファイルをドロップして追加できます。"),
-            (self.clip_en_ent, "CMなどが1本にまとまっている、英語版の映像ファイルです。"),
+            (self.clip_en_ent, "元になる、長い(まとまった)英語版の映像ファイルです。"),
             (self.en_ent, "英語版(きれいな映像)のファイルの場所です。"),
             (self.jp_ent, "日本語吹き替えの音声が入った録画ファイルの場所です。"),
             (self.itree, "登録した指定の一覧です。行をクリックすると、その場所に移動します。"),
@@ -1950,7 +1950,7 @@ class App(_TkBase):
         self.easy_done.pack(side="left", padx=10)
         self.open_btn = ttk.Button(r5, text="フォルダを開く", command=self.open_folder)
 
-    # ---------- 切り出し (CMごと) ----------
+    # ---------- 切り出し (一致部分だけ) ----------
     def _build_clip(self):
         f = self.clipt
         self.clip_en = tk.StringVar()
@@ -1959,18 +1959,18 @@ class App(_TkBase):
         self.clip_files = []
         pad = {"padx": 12, "pady": 5}
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
-                 text="英語版が1本にまとまっていて、日本語の音声が CM ごとのバラバラのファイルのときに使います。\n"
+                 text="英語版が長い1本で、日本語の音声が短いファイル(CMや番組の一部など)のときに使います。\n"
                       "日本語のファイルを1本ずつ自動で合わせ、一致した部分だけを英語版から切り出して、日本語の音声をつけて書き出します。\n"
                       "この切り出しだけは映像を再エンコードします(フレーム単位で切れます)。"
                       "「かんたん」タブの、映像をそのままコピーする合成は今までどおりです。").pack(fill="x", **pad)
-        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 (1本にまとまったもの) ")
+        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 (元になる、長いもの) ")
         c1.pack(fill="x", **pad)
         r1 = ttk.Frame(c1)
         r1.pack(fill="x", padx=8, pady=8)
         self.clip_en_ent = ttk.Entry(r1, textvariable=self.clip_en)
         self.clip_en_ent.pack(side="left", fill="x", expand=True)
         ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
-        c2 = ttk.LabelFrame(f, text=" ② 日本語のファイル (CMごと。ここにドロップ、または追加) ")
+        c2 = ttk.LabelFrame(f, text=" ② 日本語のファイル (短いもの。複数OK。ここにドロップ、または追加) ")
         r2 = ttk.Frame(c2)
         r2.pack(fill="both", expand=True, padx=8, pady=6)
         self.clip_tree = ttk.Treeview(r2, columns=("f", "st"), show="headings", height=6, selectmode="extended")
