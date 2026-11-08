@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.13"
+APP_VERSION = "2026.11.09.14"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -2478,7 +2478,7 @@ class App(_TkBase):
         b1 = ttk.Frame(r1b)
         b1.pack(side="left", padx=8, anchor="n")
         ttk.Button(b1, text="外す", width=10, command=self._cm_remove).pack(pady=2)
-        self.cm_note = ttk.Label(c1, text="「CMを切り分ける」を押すと、ここに一覧が出ます。間違って分けた所は選んで「外す」で消せます。", foreground="#667")
+        self.cm_note = ttk.Label(c1, text="「CMを切り分ける」を押すと、ここに一覧が出ます(押さずにスタートしても、自動で切り分けます)。間違って分けた所は選んで「外す」で消せます。", foreground="#667")
         self.cm_note.pack(anchor="w", padx=10, pady=(0, 6))
 
         c2 = ttk.LabelFrame(f, text=" ② 日本語の録画 (複数OK。ファイルやフォルダをここにドロップ、または追加) ")
@@ -2640,10 +2640,21 @@ class App(_TkBase):
         def work():
             try:
                 en = Media(en_p, 0)
-                if not cms_ts:
-                    cl = [(0.0, en.end)]
-                else:
-                    cl = cms_ts
+                cl = cms_ts
+                if not cl:  # 「CMを切り分ける」を押していなければ、ここで自動で切り分ける
+                    self.q.put(lambda: self.find_msg.config(text="英語版のCMを切り分けています…", fg="#333"))
+                    try:
+                        cl = split_commercials(en_p)
+                    except Exception:  # noqa: BLE001
+                        cl = []
+                    if cl:
+                        def show(c=list(cl)):
+                            self.find_cms = c
+                            self._cm_fill()
+                            self.cm_note.config(text=f"{len(c)} 本に分けました(スタート時に自動で)。", foreground="#1f6f43")
+                        self.q.put(show)
+                    else:
+                        cl = [(0.0, en.end)]
                 cms = [en.slice(a, b) for a, b in cl]
             except Exception as ex:  # noqa: BLE001
                 self.q.put(lambda: (self.find_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
