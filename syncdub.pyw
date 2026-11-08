@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.20"
+APP_VERSION = "2026.11.09.21"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -899,6 +899,12 @@ def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
 
 VID_MIN = 0.45   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす(間違いは0.18以下、本物は0.75以上だった)
 VID_OK = 0.70    # これ以上なら映像が合っているとみなし、音の「一部だけ一致」「別のCMとも似ている」の要確認は付けない
+
+
+def vid_good(d):
+    """映像まで合っているとみなせるか。0.70以上、または音がとても強ければ0.60以上(本物は0.67〜0.98、偽物は0.61が最高だった)。"""
+    v = d.get("v")
+    return v is not None and (v >= VID_OK or (v >= 0.60 and d.get("z", 0) >= 40))
 
 
 def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9), detail=None):
@@ -2882,7 +2888,7 @@ class App(_TkBase):
                         def over(d, e):
                             return min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])
                         # 映像まで合うものを先に、次に映像が似ているもの、最後に音がはっきりしているものの順で残す
-                        good.sort(key=lambda d: (not (d["v"] is not None and d["v"] >= VID_OK), -(d["v"] or 0), -d["z"]))
+                        good.sort(key=lambda d: (not vid_good(d), -(d["v"] or 0), -d["z"]))
                         keep = []
                         for d in good:
                             clash = [e for e in keep if over(d, e)]
@@ -2923,12 +2929,12 @@ class App(_TkBase):
                         tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
                         v = d.get("v")
                         why = []
-                        if not (v is not None and v >= VID_OK):  # 映像まで合っていれば、音の曖昧さは気にしない
+                        if not vid_good(d):  # 映像まで合っていれば、音の曖昧さは気にしない
                             if not d["ok"]:
                                 why.append("一部だけ一致")
                             if d.get("clash"):
                                 why.append("別のCMとも似ている")
-                        if v is not None and VID_MIN <= v < VID_OK:
+                        if v is not None and VID_MIN <= v and not vid_good(d):
                             why.append("映像が少し違う")
                         if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
                             tt = int(d["t"])
