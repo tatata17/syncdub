@@ -15,6 +15,7 @@
 要件: Python 3 + numpy / ffmpeg・ffprobe・ffplay (PATH)
 """
 import base64
+import concurrent.futures
 import contextlib
 import os
 import urllib.request
@@ -498,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.11"
+APP_VERSION = "2026.11.09.12"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -668,6 +669,27 @@ class Media:
              "-vf", f"scale={width}:-2", "-f", "image2pipe", "-vcodec", "png", "-"],
             capture_output=True, **NOWIN)
         return r.stdout
+
+
+class LightMedia:
+    """探索専用の軽い読み込み。音声だけを4kHzで読み込む(波形表示用の処理をしない)。"""
+    sr = 4000
+
+    def __init__(self, path, astream=0):
+        info = probe(path)
+        cstart, voff = fmt_start(info), video_start_offset(info)
+        auds = audio_streams(info)
+        if not auds:
+            raise RuntimeError("音声ストリームがありません")
+        astream = min(astream, len(auds) - 1)
+        st = auds[astream].get("start_time")
+        ast = float(st) if st not in (None, "N/A") else cstart
+        self.a_origin = (ast - cstart) - voff
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", path, "-map", f"0:a:{astream}", "-vn",
+             "-ac", "1", "-ar", str(self.sr), "-f", "s16le", "-"],
+            capture_output=True, check=True, **NOWIN).stdout
+        self.x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768
 
 
 def xcorr_find(ref, ref_t, tgt, tgt_t, win=8.0, search=60.0):
@@ -1322,7 +1344,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=9.0):
     def dec(x):
         n = len(x) // 2 * 2
         return x[:n].reshape(-1, 2).mean(1).astype(np.float64)
-    jx = dec(jp.x)
+    jx = jp.x.astype(np.float64) if getattr(jp, "sr", SR) == fs else dec(jp.x)
     cx = [dec(c) for c in cms]
     Lmax = max(len(c) for c in cx)
     jx = np.concatenate([jx, np.zeros(Lmax)])  # 録画の最後で切れているCMも探せるように
@@ -2608,10 +2630,25 @@ class App(_TkBase):
             res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
             en_stem = safe(Path(en_p).stem)
             stopped = False
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            pre = {}
+
+            def needs(p):
+                try:
+                    e = rec["files"].get(p)
+                    sx = Path(p).stat()
+                    return not (e and e.get("key") == [sx.st_size, int(sx.st_mtime)])
+                except OSError:
+                    return False
             for i, jp_p in enumerate(files):
                 if stop.is_set():
                     stopped = True
                     break
+                t_rec = time.time()
+
+                def el(t_rec=t_rec):
+                    d = int(time.time() - t_rec)
+                    return f" [{d // 60}分{d % 60:02d}秒]" if d >= 60 else f" [{d}秒]"
 
                 def st(text, tag="", i=i):
                     self.q.put(lambda: self._find_set(i, text, tag))
@@ -2637,7 +2674,10 @@ class App(_TkBase):
                         keep = ent["keep"]
                     else:
                         st("音を探しています…")
-                        jp = Media(jp_p, ast)
+                        fut = pre.pop(jp_p, None)
+                        jp = fut.result() if fut else LightMedia(jp_p, ast)
+                        if i + 1 < n and files[i + 1] not in pre and needs(files[i + 1]):
+                            pre[files[i + 1]] = pool.submit(LightMedia, files[i + 1], ast)  # 次の録画を、探している間に先に読み込んでおく
                         hits = find_in_recording(cms, jp, prog)
                         jo = []
                         for k, hl in enumerate(hits):
@@ -2661,7 +2701,7 @@ class App(_TkBase):
                     if not keep:
                         rec["files"][jp_p]["done"] = True
                         save_rec()
-                        st("見つかりませんでした", "")
+                        st("見つかりませんでした" + el(), "")
                         continue
                     nth = {}
                     nw = nwarn = nsk = 0
@@ -2709,7 +2749,7 @@ class App(_TkBase):
                     msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
                     if nwarn:
                         msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている)"
-                    st(msg, "warn" if nwarn else "ok")
+                    st(msg + el(), "warn" if nwarn else "ok")
                 except _Stop:
                     st("中止しました (次回は続きから)", "warn")
                     stopped = True
@@ -2721,6 +2761,8 @@ class App(_TkBase):
                     st(f"× エラー: {ex}", "ng")
                     res["ng"] += 1
                 self.q.put(lambda i=i: self.find_bar.config(value=(i + 1) / n * 100))
+
+            pool.shutdown(wait=False, cancel_futures=True)
 
             def fin():
                 self.find_btn.state(["!disabled"])
