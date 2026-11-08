@@ -283,6 +283,32 @@ def clip_segments(segs, c0, c1):
     return out
 
 
+def drop_cut_gaps(segs, fps, thr=0.5):
+    """切り出しで、英語版にだけある長い隙間(日本語版でカットされた所)を取り除く。
+    戻り値: (区間リスト, つなぐ範囲 [(開始, 終了), …])。範囲の端はフレームの境目に合わせる(映像と音のずれを防ぐ)。"""
+    keep = [s for s in segs if not (s.silent and s.note.startswith("(自動)") and s.dur >= thr)]
+    groups = []
+    for s in keep:
+        if groups and abs(groups[-1][-1].en_end - s.en_start) < 1e-3:
+            groups[-1].append(s)
+        else:
+            groups.append([s])
+    if len(groups) <= 1:
+        return keep, [(keep[0].en_start, keep[-1].en_end)] if keep else []
+    snap = lambda t: round(t * fps) / fps  # noqa: E731
+    pieces = []
+    for g in groups:
+        a, b = snap(g[0].en_start), snap(g[-1].en_end)
+        f0, f1 = g[0], g[-1]
+        if f0.jp_start is not None and f0.dur > 0:  # 先頭を動かした分、日本語側の位置も進める
+            je = f0.jp_end if f0.jp_end is not None else f0.jp_start + f0.dur
+            f0.jp_start += (a - f0.en_start) * ((je - f0.jp_start) / f0.dur)
+        f0.en_start = a
+        f1.en_end = b
+        pieces.append((a, b))
+    return [s for g in groups for s in g if s.dur > 1e-3], pieces
+
+
 # ---------------------------------------------------------------- メイン
 
 
@@ -335,10 +361,27 @@ def _main(argv, tmp):
         # 切り出し: 英語版の c0〜c1 だけを書き出す。英語版の入力は c0 から読むので、音声の時刻も c0=0 に詰める
         c0 = max(0.0, float(clip["start"]))
         c1 = min(en_dur, float(clip["end"])) if en_dur else float(clip["end"])
+        fps_c = en_fps or 30000 / 1001
+        c0 = round(c0 * fps_c) / fps_c  # 先頭はフレームの境目に合わせる
         segs = clip_segments(segs, c0, c1)
         if not segs or c1 - c0 <= 0.05:
             raise ValueError("切り出す範囲が空です")
+        segs, pieces = drop_cut_gaps(segs, fps_c)
         filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0)
+        vchain = None
+        if len(pieces) > 1:
+            # 日本語版でカットされた(英語版にだけある)部分は、映像も音も飛ばしてつなぐ
+            n_ = len(pieces)
+            vl = ["[0:v]split=%d%s" % (n_, "".join(f"[vs{i}]" for i in range(n_)))]
+            for i, (a_, b_) in enumerate(pieces):
+                vl.append(f"[vs{i}]trim=start={a_:.6f}:end={b_:.6f},setpts=PTS-STARTPTS[vt{i}]")
+            vl.append("".join(f"[vt{i}]" for i in range(n_)) + f"concat=n={n_}:v=1:a=0[vout]")
+            ef, _w = build_filter([Seg(a_, b_, english=True) for a_, b_ in pieces], jp_off, jp_a, sr, layout, fade,
+                                  in_idx=1, lead=0.0, en_idx=0, en_off=0.0)
+            ef = re.sub(r"\[(se\d+|sj\d+|o\d+|olead|aout)\]", lambda m_: "[x" + m_.group(1) + "]", ef)
+            vchain = ";\n".join(vl) + ";\n" + ef
+            filt = filt + ";\n" + vchain
+            print(f"カット部分を飛ばして {n_} か所をつなぎます: " + ", ".join(f"{a_:.2f}-{b_:.2f}" for a_, b_ in pieces))
     else:
         filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
                                    in_idx=0 if single else 1, lead=0.0 if single else en_off,
@@ -373,9 +416,9 @@ def _main(argv, tmp):
         keep_en = proj.get("keep_en_audio", True)
         pre = ["-ss", f"{c0 + en_off:.6f}", "-t", f"{c1 - c0:.6f}"] if clip else []
         cmd = ["ffmpeg", "-y"] + pre + ["-i", en_path, "-i", jp_path, "-filter_complex_script", str(script),
-                                         "-map", "0:v:0", "-map", "[aout]"]
+                                         "-map", "[vout]" if (clip and vchain) else "0:v:0", "-map", "[aout]"]
         if keep_en:
-            cmd += ["-map", "0:a:0"]
+            cmd += ["-map", "[xaout]" if (clip and vchain) else "0:a:0"]
         if clip:  # 映像を再エンコード (キーフレームに関係なく、フレーム単位で切り出せる)
             cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(clip.get("crf", 18)),
                     "-pix_fmt", "yuv420p"]
@@ -414,7 +457,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.3"
+APP_VERSION = "2026.11.09.4"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1039,6 +1082,55 @@ def auto_align(en, jp, progress=lambda f, m: None):
         segs.append({"en_start": round(float(en_s), 4), "en_end": round(float(en_e), 4), "jp_start": round(float(jp_s), 4),
                      "jp_end": None if const else round(float(jp_e), 4), "fit": "stretch", "note": "自動",
                      "lag": "", "conf": float(f[2]), "flag": "・".join(reasons)})
+    # ---- 6.5) 日本語が「英語版の一部をカットしたもの」のとき、境目を日本語側の時間で引き直す
+    #      (英語側の区間は隙間なくつながる前提で作るので、カットがあると日本語側が重なってしまう。
+    #       重なった範囲の中で「どこで切り替わるか」を日本語の音で決め、英語側にカットの隙間を作る)
+    nrj2 = len(jx) // hop_rms
+    rj2 = np.sqrt((jx[: nrj2 * hop_rms].reshape(nrj2, hop_rms) ** 2).mean(1)) if nrj2 else np.array([0.0])
+    jthr = max(0.1 * float(np.percentile(rj2, 75)), 1e-4)
+
+    def jscore(a, jt, o, rad=0.1):
+        b = esl(jt - o - rad, len(a) / fs + 2 * rad)
+        if np.abs(b).max() < 1e-6:
+            return 0.0
+        return float(_phat_local(a - a.mean(), b, fs).max())  # 位相相関のほうが、一致と不一致の差がはっきり出る
+
+    def boundary_jp(oA, oB, j0, j1, wl, hop):
+        ts = np.arange(j0, j1 - wl + 1e-9, hop)
+        if len(ts) < 2:
+            return (j0 + j1) / 2, False
+        d = []
+        for t in ts:
+            a = jsl(t, wl)
+            d.append(jscore(a, t, oA) - jscore(a, t, oB) if float(np.sqrt((a ** 2).mean())) >= jthr else 0.0)
+        d = np.array(d)
+        pre = np.concatenate([[0], np.cumsum(d)])
+        V = 2 * pre - d.sum()
+        k = int(V.argmax())
+        c = ts + wl / 2
+        b = c[0] if k == 0 else c[-1] if k == len(ts) else (c[k - 1] + c[k]) / 2
+        return float(b), bool(abs(V[k]) >= 0.3 * np.abs(d).sum() and np.abs(d).sum() > 0.06)
+
+    for i in range(len(segs) - 1):
+        A, B = segs[i], segs[i + 1]
+        if A["jp_end"] is not None or B["jp_end"] is not None:
+            continue
+        oA, oB = A["jp_start"] - A["en_start"], B["jp_start"] - B["en_start"]
+        jsB, jeA = B["jp_start"], A["jp_start"] + (A["en_end"] - A["en_start"])
+        if oA - oB < 0.5 or jeA - jsB < 0.5:
+            continue  # カットではない
+        b1, _ = boundary_jp(oA, oB, jsB - 1.0, jeA + 1.0, 1.0, 0.1)
+        b2, sure = boundary_jp(oA, oB, b1 - 0.8, b1 + 0.8, 0.4, 0.02)
+        jb = min(max(b2, jsB), jeA)
+        A["en_end"] = round(float(jb - oA), 4)
+        B["en_start"] = round(float(jb - oB), 4)
+        B["jp_start"] = round(float(jb), 4)
+        if not sure:
+            for z_ in (A, B):
+                z_["flag"] = ("・".join(x for x in (z_["flag"], "カットの位置が不確か") if x))
+        progress(0.97, "カットの位置を調整しています…")
+    segs = [s_ for s_ in segs if s_["en_end"] - s_["en_start"] >= 0.2]
+
     unused = []
     prev_end = jo
     for s in segs:
@@ -2142,6 +2234,8 @@ class App(_TkBase):
                     finally:
                         shutil.rmtree(tmpd, ignore_errors=True)
                     span = f"英語版 {self.short(c0)}〜{self.short(c1)} を切り出し"
+                    if "カット部分を飛ばして" in buf.getvalue():
+                        span += " (日本語版でカットされた部分は飛ばしました)"
                     if flag:
                         st(f"✔ 完了 (要確認: {flag}) {span}", "warn")
                         res["warn"] += 1
