@@ -1,1 +1,1 @@
-{"version": "2026.11.09.17", "file": "syncdub.pyw", "notes": "一覧の複数選択を m2ts-encoder と同じ操作に(Shift+↑↓などでの範囲拡大にも対応)"}
+{"version": "2026.11.09.18", "file": "syncdub.pyw", "notes": "「録画から探す」: 音は合っても映像が合わないもの(声やBGMだけ同じ別CM)は書き出さず、記録だけ残すように"}

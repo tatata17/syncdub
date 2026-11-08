@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.17"
+APP_VERSION = "2026.11.09.18"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -2801,6 +2801,7 @@ class App(_TkBase):
             class _Stop(Exception):
                 pass
             found = [0] * len(cl)
+            rejected = []
             res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
             en_stem = safe(Path(en_p).stem)
             stopped = False
@@ -2842,7 +2843,11 @@ class App(_TkBase):
                     if ent and ent.get("key") == fkey and ent.get("done"):
                         st(f"前回調べ済み ({len(ent['keep'])} 件)", "ok" if ent["keep"] else "")
                         for d in ent["keep"]:
-                            found[d["k"]] += 1
+                            if d.get("v") is not None and d["v"] < VID_MIN:
+                                tt = int(d["t"])
+                                rejected.append(f"CM{d['k'] + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{d['v']:.2f}\t音{d['z']:.1f}")
+                            else:
+                                found[d["k"]] += 1
                         continue
                     if ent and ent.get("key") == fkey:
                         keep = ent["keep"]
@@ -2887,7 +2892,7 @@ class App(_TkBase):
                         st("見つかりませんでした" + el(), "")
                         continue
                     nth = {}
-                    nw = nwarn = nsk = 0
+                    nw = nwarn = nsk = nrej = 0
                     try:
                         existing = {re.sub(r"【[^】]*】", "", f.name) for f in outd.iterdir()}
                     except OSError:
@@ -2906,8 +2911,11 @@ class App(_TkBase):
                                 why.append("一部だけ一致")
                             if d.get("clash"):
                                 why.append("別のCMとも似ている")
-                        if v is not None and v < VID_MIN:
-                            why.append("映像が合わない")
+                        if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
+                            tt = int(d["t"])
+                            rejected.append(f"CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
+                            nrej += 1
+                            continue
                         base = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}"
                         name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
                             + f"({safe(Path(jp_p).stem)}).mkv"
@@ -2943,6 +2951,8 @@ class App(_TkBase):
                     msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
                     if nwarn:
                         msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が合わない)"
+                    if nrej:
+                        msg += f" ・映像が合わず除外 {nrej} 件"
                     st(msg + el(), "warn" if nwarn else "ok")
                 except _Stop:
                     st("中止しました (次回は続きから)", "warn")
@@ -2964,6 +2974,13 @@ class App(_TkBase):
                 bits = [f"書き出し {res['ok'] + res['warn']} 本"]
                 if res["warn"]:
                     bits.append(f"うち要確認 {res['warn']} 本(名前に【要確認】が付いています)")
+                if rejected:
+                    bits.append(f"音は合っても映像が合わず除外 {len(rejected)} 件(保存先の「syncdub_除外した候補.txt」に記録)")
+                    try:
+                        (outd / "syncdub_除外した候補.txt").write_text(
+                            "CM\t録画\t録画の時刻\t映像の似かた\t音の強さ\n" + "\n".join(rejected) + "\n", encoding="utf-8")
+                    except OSError:
+                        pass
                 if res["ng"]:
                     bits.append(f"失敗 {res['ng']} 録画")
                 if res["skip"]:
