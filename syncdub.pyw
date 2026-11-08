@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.26"
+APP_VERSION = "2026.11.09.27"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 10     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 11     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1504,7 +1504,7 @@ def _verify_hit(c, jx, i0, fs):
             "weak": (not ok) and n <= 2 and npass == 1 and zmax >= ZZ_PASS}
 
 
-def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
+def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, loose=False):
     """cms: [(音声 float32(SR), ...)]。録画(jp, Media)の中から各CMの音と一致する場所を全部探す。
     まずCM全体の相関で候補を広めに拾い(thr)、そのあと窓ごとの照合(_verify_hit)で本物だけを残す。
     戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 全体がよく合うか, "zz": 窓の最大, "np": 合った窓, "n": 窓の数}, ...] (cms と同じ順)]"""
@@ -1558,6 +1558,11 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
         c = cx[k]
         out = []
         for d in keep:
+            if loose:   # 短縮版の探索: 窓ごとの照合は省き、映像で確かめる前提で、ある程度はっきりした山を全部残す
+                if d["z"] >= 8.0:
+                    d["ok"], d["zz"], d["np"], d["n"], d["weak"] = False, None, None, None, True
+                    out.append(d)
+                continue
             i0 = int(round((d["t"] - jp.a_origin) * fs))
             v = _verify_hit(c, jx, i0, fs)
             if not v["pass"] and v.get("weak") and d["z"] >= 10:
@@ -1645,6 +1650,66 @@ def _edge_fit(en, jp, e, off, dirn, inner, outer, cache):
     return None
 
 
+def _discover_runs(en, jp, a_cm, b_cm, runs, jend, ecache):
+    """音で見つかった区間のまわりの録画を、映像だけで調べて、英語版の残りの部分に合う区間を探す。
+    英語版を1秒ごと、録画を0.5秒ごとに見比べて似た所を拾い、時間差がそろうものを区間にする。"""
+    cov = sorted((r["x0"], r["x1"]) for r in runs)
+    gaps, cur = [], a_cm
+    for x0, x1 in cov:
+        if x0 - cur >= 3.0:
+            gaps.append((cur, x0))
+        cur = max(cur, x1)
+    if b_cm - cur >= 3.0:
+        gaps.append((cur, b_cm))
+    if not gaps:
+        return []
+    L = b_cm - a_cm
+    lo = max(jp.a_origin, min(r["x0"] + r["o"] for r in runs) - L - 5)
+    hi = min(jend, max(r["x1"] + r["o"] for r in runs) + L + 5)
+    jt = []
+    for jj in np.arange(lo, hi, 0.5):
+        th = _thumb(jp, float(jj))
+        if th is not None:
+            jt.append((float(jj), th))
+    if len(jt) < 5:
+        return []
+    out = []
+    for g0, g1 in gaps:
+        pts = []
+        for e in np.arange(g0 + 0.5, g1, 1.0):
+            x = _thumb(en, float(e))
+            if x is None:
+                continue
+            best = max(((_pair_sim(x, th), jj) for jj, th in jt), key=lambda z_: z_[0])
+            if best[0] >= 0.8:
+                pts.append((float(e), best[1] - float(e)))
+        cl_, cur_ = [], []
+        for e, o in pts:
+            if cur_ and abs(o - cur_[-1][1]) <= 0.8 and e - cur_[-1][0] <= 3.0:
+                cur_.append((e, o))
+            else:
+                if len(cur_) >= 3:
+                    cl_.append(cur_)
+                cur_ = [(e, o)]
+        if len(cur_) >= 3:
+            cl_.append(cur_)
+        for c_ in cl_:
+            o0 = float(np.median([o for _e, o in c_]))
+            probes = [e for e, _o in c_][:: max(1, len(c_) // 3)][:3]
+
+            def score(o):
+                sc = []
+                for e in probes:
+                    x, y = _thumb(en, e), _thumb(jp, e + o)
+                    if x is not None and y is not None:
+                        sc.append(_pair_sim(x, y))
+                return float(np.mean(sc)) if sc else -1.0
+            bo = max((o0 + d_ for d_ in np.arange(-0.6, 0.61, 0.1)), key=score)
+            bo = max((bo + d_ for d_ in np.arange(-0.1, 0.101, 1 / 30)), key=score)
+            out.append({"o": float(bo), "e0": c_[0][0] - 0.5, "e1": c_[-1][0] + 0.5, "n": 1, "z": 0.0, "vid": True})
+    return out
+
+
 def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None):
     """長いCMの短縮版・途中で切れた版を探す。pieces(CMを約10秒ずつに分けたもの)の各部分を録画から探した結果 phits のうち、
     画面も合うものを、録画と英語版の時間差(オフセット)が同じ部分ごとにまとめて区間にし、画面の合う範囲に両端をぴったり合わせる。
@@ -1660,12 +1725,14 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
     for pi, h in cand[:cap]:
         k, a, b = pieces[pi]
         try:
-            v = video_similarity(en, a, b - a, jp, h["t"], vcache)
+            vf = []
+            v = video_similarity(en, a, b - a, jp, h["t"], vcache, detail=vf)
         except Exception:  # noqa: BLE001
-            v = None
+            v, vf = None, []
         if plog is not None:
-            plog.append({"k": k, "e": round(a, 1), "t": round(h["t"], 2), "z": round(h["z"], 1), "v": v})
-        if v is None or not vid_good({"v": v, "z": h["z"]}):
+            plog.append({"k": k, "e": round(a, 1), "t": round(h["t"], 2), "z": round(h["z"], 1), "v": v, "vf": vf})
+        # 部分だけ合う(一部が日本語版でカットされた)ことがあるので、平均が低くても、画面がはっきり一致する所が2か所以上あれば候補にする
+        if v is None or not (vid_good({"v": v, "z": h["z"]}) or sum(1 for f_ in vf if f_ >= 0.8) >= 2):
             continue
         hits.setdefault(k, []).append({"t": h["t"], "e": a, "l": b - a, "z": h["z"]})
     out = []
@@ -1693,6 +1760,28 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             r["x0"] = _edge_fit(en, jp, r["e0"], r["o"], -1, r["e1"], lo, ecache)
             r["x1"] = _edge_fit(en, jp, r["e1"], r["o"], +1, r["e0"], hi, ecache)
         runs = [r for r in runs if r["x0"] is not None and r["x1"] is not None and r["x1"] - r["x0"] >= 2.0]
+        if runs and (b_cm - a_cm) - sum(r["x1"] - r["x0"] for r in runs) >= 3.0:
+            try:
+                extra = _discover_runs(en, jp, a_cm, b_cm, runs, jend, ecache)
+            except Exception:  # noqa: BLE001
+                extra = []
+            for r in extra:
+                r["x0"] = _edge_fit(en, jp, r["e0"], r["o"], -1, r["e1"], max(a_cm, jp.a_origin - r["o"]), ecache)
+                r["x1"] = _edge_fit(en, jp, r["e1"], r["o"], +1, r["e0"], min(b_cm, jend - r["o"]), ecache)
+                z_ = max(x_["z"] for x_ in runs)
+                r["z"] = z_
+                if r["x0"] is not None and r["x1"] is not None and r["x1"] - r["x0"] >= 2.0:
+                    runs.append(r)
+            runs.sort(key=lambda r: r["x0"])
+            # 重なる区間は、音で見つけたほうを優先する
+            fixed = []
+            for r in runs:
+                if fixed and r["x0"] < fixed[-1]["x1"] - 0.5 and r.get("vid"):
+                    continue
+                if fixed and fixed[-1].get("vid") and r["x0"] < fixed[-1]["x1"] - 0.5:
+                    fixed.pop()
+                fixed.append(r)
+            runs = fixed
         for r, r2 in zip(runs, runs[1:]):
             if r["x1"] > r2["x0"]:
                 r["x1"] = r2["x0"] = (r["x1"] + r2["x0"]) / 2
@@ -1708,10 +1797,8 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             else:
                 chains.append([r])
         for ch in chains:
-            if sum(r["n"] for r in ch) < 2:
-                continue
             tot = sum(r["x1"] - r["x0"] for r in ch)
-            if tot < 8.0:
+            if tot < 8.0 or (sum(r["n"] for r in ch) < 2 and tot < 15.0):
                 continue
             j0, j1 = ch[0]["x0"] + ch[0]["o"], ch[-1]["x1"] + ch[-1]["o"]
             # 同じ場所を、CM全体の一致がすでに押さえていれば、それを優先する
@@ -3098,7 +3185,7 @@ class App(_TkBase):
                         pcs = make_pieces(cl)
                         if pcs:
                             try:
-                                phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog)
+                                phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog, loose=True)
                                 plog = []
                                 sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog)
                                 dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
