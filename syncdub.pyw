@@ -498,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.8"
+APP_VERSION = "2026.11.09.9"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1475,9 +1475,6 @@ TIPS = {
     "読み込む": "選んだ2つのファイルを読み込んで、波形と画面を表示します。",
     "設定を開く": "前に保存した作業(同じ場面・CMなどの指定)を開きます。",
     "設定を保存": "いまの作業を保存します。あとで「設定を開く」で続きから再開できます。",
-    "更新を確認": "新しい版があるか調べます。あれば、押すだけで更新できます。",
-    "元に戻す": "更新前の版に戻します。更新したあと調子が悪いときに使います。",
-    "起動時に更新を確認": "チェックを入れておくと、起動するたびに新しい版を確認します。",
     "全体 (Home)": "波形を全体が見える大きさに戻します。(Home キー)",
     "縮小 ↓": "波形を縮小して、広い範囲を見ます。(↓ キー / ホイール)",
     "拡大 ↑": "波形を拡大して、細かく見ます。(↑ キー / ホイール)",
@@ -2084,9 +2081,16 @@ class App(_TkBase):
         self._hdr = h
         ttk.Label(h, text=f"v{APP_VERSION}", foreground="#888").pack(side="right", padx=(8, 0))
         self.auto_upd = tk.BooleanVar(value=self._setting("auto_update", True))
-        ttk.Checkbutton(h, text="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto).pack(side="right", padx=4)
-        ttk.Button(h, text="元に戻す", command=self.rollback).pack(side="right", padx=2)
-        ttk.Button(h, text="更新を確認", command=lambda: self.check_update(True)).pack(side="right", padx=2)
+        mb = ttk.Menubutton(h, text="更新・設定 ▾")
+        m = tk.Menu(mb, tearoff=0)
+        m.add_command(label="更新を確認", command=lambda: self.check_update(True))
+        m.add_command(label="更新前の版に戻す", command=self.rollback)
+        m.add_separator()
+        m.add_checkbutton(label="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto)
+        mb["menu"] = m
+        mb.pack(side="right", padx=2)
+        self.upd_menu = mb
+        Tooltip(mb, "新しい版の確認、更新前の版に戻す、起動時の自動確認のオン/オフを選べます。")
 
     def _build_easy(self):
         f = self.easy
@@ -2118,8 +2122,17 @@ class App(_TkBase):
             self.zone[k] = {"frame": z, "title": t, "name": n, "sub": sub}
         o = ttk.Frame(c1)
         o.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Label(o, text="日本語の録画に音声が複数ある場合だけ、音声番号を変えます (通常は 0 のままでOK):").pack(side="left")
-        ttk.Spinbox(o, from_=0, to=9, width=3, textvariable=self.jp_ast).pack(side="left", padx=6)
+        ast = ttk.Frame(o)
+        def _tg():
+            if ast.winfo_ismapped():
+                ast.pack_forget(); tgb.config(text="詳細設定 ▶")
+            else:
+                ast.pack(side="left", padx=8); tgb.config(text="詳細設定 ▼")
+        tgb = ttk.Button(o, text="詳細設定 ▶", command=_tg)
+        tgb.pack(side="left")
+        Tooltip(tgb, "ふだんは触らなくて大丈夫です。日本語の録画に音声が複数あるときの番号指定を開きます。")
+        ttk.Label(ast, text="日本語の録画に音声が複数あるときだけ、使う音声の番号を変えます (通常は 0):").pack(side="left")
+        ttk.Spinbox(ast, from_=0, to=9, width=3, textvariable=self.jp_ast).pack(side="left", padx=6)
         self.en_var.trace_add("write", lambda *a: self._zone_update())
         self.jp_var.trace_add("write", lambda *a: self._zone_update())
 
