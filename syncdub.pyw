@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.12"
+APP_VERSION = "2026.11.09.13"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -685,6 +685,7 @@ class LightMedia:
         st = auds[astream].get("start_time")
         ast = float(st) if st not in (None, "N/A") else cstart
         self.a_origin = (ast - cstart) - voff
+        self.path, self.voff = path, voff
         raw = subprocess.run(
             ["ffmpeg", "-v", "error", "-i", path, "-map", f"0:a:{astream}", "-vn",
              "-ac", "1", "-ar", str(self.sr), "-f", "s16le", "-"],
@@ -793,6 +794,25 @@ def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
         return None
     best = max(res, key=lambda x: x[1])
     return best[0], best[1], own_v, res
+
+
+VID_MIN = 0.30   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす。暫定値(実データで調整中)
+
+
+def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9)):
+    """英語版CM(en の a〜a+L 秒)と、録画(jp)の t から L 秒の画面を、数か所で見比べた平均の似かた。比べられなければ None。"""
+    sc = []
+    for q in fr:
+        key = (round(a, 3), q)
+        if key not in cache:
+            cache[key] = _thumb(en, a + L * q)
+        x = cache[key]
+        if x is None:
+            continue
+        y = _thumb(jp, t + L * q)
+        if y is not None:
+            sc.append(_pair_sim(x, y))
+    return round(float(np.mean(sc)), 2) if len(sc) >= 3 else None
 
 
 def _best_peak(a0, b, fs):
@@ -1336,9 +1356,41 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-def find_in_recording(cms, jp, progress=lambda f: None, thr=9.0):
+FIND_ALGO = 2     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
+ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
+
+
+def _verify_hit(c, jx, i0, fs):
+    """見つけた場所 i0 で、CMを窓(10秒以下は前半/後半、それより長ければ約10秒ずつ)に分けて、窓ごとに音が合うか確かめる。
+    戻り値: {"zz": 一番強い窓の突出度, "np": 合った窓の数, "n": 窓の数, "pass": 採用してよいか, "strong": 全体がよく合うか}"""
+    L = len(c) / fs
+    n = 2 if L <= 10.5 else max(2, int(round(L / 10.0)))
+    edges = [int(round(len(c) * q / n)) for q in range(n + 1)]
+    npass, zmax = 0, 0.0
+    for w in range(n):
+        a = c[edges[w]: edges[w + 1]]
+        lo = i0 + edges[w] - int(3 * fs)
+        b = jx[max(lo, 0): i0 + edges[w + 1] + int(3 * fs)]
+        if len(a) < fs or len(b) <= len(a):
+            continue
+        cc2 = _phat_local(a, b, fs)
+        j = int(cc2.argmax())
+        zz = float((cc2[j] - cc2.mean()) / (cc2.std() + 1e-9))
+        if abs((max(lo, 0) + j) - (i0 + edges[w])) / fs > ZZ_LAG:
+            continue
+        zmax = max(zmax, zz)
+        if zz >= ZZ_PASS:
+            npass += 1
+    need = 1 if n <= 2 else 2
+    return {"zz": round(zmax, 1), "np": npass, "n": n, "pass": npass >= need,
+            "strong": npass >= max(need, (n + 1) // 2)}
+
+
+def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5):
     """cms: [(音声 float32(SR), ...)]。録画(jp, Media)の中から各CMの音と一致する場所を全部探す。
-    戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 前半/後半とも一致か}, ...] (cms と同じ順)]"""
+    まずCM全体の相関で候補を広めに拾い(thr)、そのあと窓ごとの照合(_verify_hit)で本物だけを残す。
+    戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 全体がよく合うか, "zz": 窓の最大, "np": 合った窓, "n": 窓の数}, ...] (cms と同じ順)]"""
     fs = SR / 2
 
     def dec(x):
@@ -1379,7 +1431,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=9.0):
                 res[k].append({"t": jp.a_origin + (s0 + i) / fs, "z": float(z)})
                 w[max(0, i - L): i + L] = -1e9
         progress((ci + 1) / nchunk)
-    # 重なった窓で同じ場所が二重に出た分をまとめ、前半/後半それぞれでも一致するか確かめる
+    # 重なった窓で同じ場所が二重に出た分をまとめ、窓ごとの照合で本物だけを残す
     for k, lst in enumerate(res):
         lst.sort(key=lambda d: -d["z"])
         keep = []
@@ -1387,25 +1439,17 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=9.0):
             if all(abs(d["t"] - e["t"]) > 0.5 for e in keep):
                 keep.append(d)
         c = cx[k]
+        out = []
         for d in keep:
-            ok = True
             i0 = int(round((d["t"] - jp.a_origin) * fs))
-            half = len(c) // 2
-            for a0 in (0, half):
-                a = c[a0: a0 + half]
-                lo = i0 + a0 - int(3 * fs)
-                b = jx[max(lo, 0): i0 + a0 + half + int(3 * fs)]
-                if len(a) < fs or len(b) <= len(a):
-                    continue
-                cc2 = _phat_local(a, b, fs)
-                j = int(cc2.argmax())
-                zz = (cc2[j] - cc2.mean()) / (cc2.std() + 1e-9)
-                if zz < 4.0 or abs((max(lo, 0) + j) - (i0 + a0)) / fs > 0.15:
-                    ok = False
-            d["ok"] = ok
-        keep = [d for d in keep if d["z"] >= 14 or (d["z"] >= thr and d["ok"])]
-        keep.sort(key=lambda d: d["t"])
-        res[k] = keep
+            v = _verify_hit(c, jx, i0, fs)
+            if not v["pass"]:
+                continue
+            d["ok"] = v["strong"]
+            d["zz"], d["np"], d["n"] = v["zz"], v["np"], v["n"]
+            out.append(d)
+        out.sort(key=lambda d: d["t"])
+        res[k] = out
     return res
 
 
@@ -2610,10 +2654,10 @@ class App(_TkBase):
             rec_p = outd / "syncdub_探索記録.json"
             st_en = Path(en_p).stat()
             sig = [en_p, st_en.st_size, int(st_en.st_mtime), [[round(a, 2), round(b, 2)] for a, b in cl]]
-            rec = {"sig": sig, "files": {}}
+            rec = {"sig": sig, "algo": FIND_ALGO, "files": {}}
             try:
                 old = json.loads(rec_p.read_text(encoding="utf-8"))
-                if old.get("sig") == sig:
+                if old.get("sig") == sig and old.get("algo") == FIND_ALGO:
                     rec = old
             except Exception:  # noqa: BLE001
                 pass
@@ -2683,7 +2727,8 @@ class App(_TkBase):
                         for k, hl in enumerate(hits):
                             L = cl[k][1] - cl[k][0]
                             for h in hl:
-                                jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L})
+                                jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L,
+                                           "zz": h.get("zz"), "np": h.get("np"), "n": h.get("n")})
                         # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
                         jo.sort(key=lambda d: -d["z"])
                         keep = []
@@ -2695,6 +2740,13 @@ class App(_TkBase):
                                 continue
                             keep.append(d)
                         keep.sort(key=lambda d: d["t"])
+                        vcache = {}
+                        for d in keep:
+                            a_, b_ = cl[d["k"]]
+                            try:
+                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache)
+                            except Exception:  # noqa: BLE001
+                                d["v"] = None
                         del jp
                         rec["files"][jp_p] = {"key": fkey, "keep": keep, "done": False}
                         save_rec()
@@ -2705,6 +2757,10 @@ class App(_TkBase):
                         continue
                     nth = {}
                     nw = nwarn = nsk = 0
+                    try:
+                        existing = {re.sub(r"【[^】]*】", "", f.name) for f in outd.iterdir()}
+                    except OSError:
+                        existing = set()
                     for j, d in enumerate(keep):
                         if stop.is_set():
                             raise _Stop()
@@ -2712,10 +2768,20 @@ class App(_TkBase):
                         a, b = cl[k]
                         nth[k] = nth.get(k, 0) + 1
                         tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
-                        name = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}({safe(Path(jp_p).stem)}).mkv"
+                        v = d.get("v")
+                        why = []
+                        if not d["ok"]:
+                            why.append("一部だけ一致")
+                        if d.get("clash"):
+                            why.append("別のCMとも似ている")
+                        if v is not None and v < VID_MIN:
+                            why.append("映像が合わない")
+                        base = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}"
+                        name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
+                            + f"({safe(Path(jp_p).stem)}).mkv"
                         out = outd / name
                         found[k] += 1
-                        if out.exists() or out.with_name(out.stem.replace("(", "【要確認】(", 1) + ".mkv").exists():
+                        if base + f"({safe(Path(jp_p).stem)}).mkv" in existing:
                             res["skip"] += 1
                             nsk += 1
                             continue
@@ -2735,20 +2801,16 @@ class App(_TkBase):
                         finally:
                             shutil.rmtree(tmpd, ignore_errors=True)
                         nw += 1
-                        if not d["ok"] or d.get("clash"):
+                        if why:
                             nwarn += 1
                             res["warn"] += 1
-                            try:
-                                out.rename(out.with_name(out.stem.replace("(", "【要確認】(", 1) + ".mkv"))
-                            except OSError:
-                                pass
                         else:
                             res["ok"] += 1
                     rec["files"][jp_p]["done"] = True
                     save_rec()
                     msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
                     if nwarn:
-                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている)"
+                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が合わない)"
                     st(msg + el(), "warn" if nwarn else "ok")
                 except _Stop:
                     st("中止しました (次回は続きから)", "warn")
