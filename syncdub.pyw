@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.19"
+APP_VERSION = "2026.11.09.20"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -898,10 +898,10 @@ def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
 
 
 VID_MIN = 0.45   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす(間違いは0.18以下、本物は0.75以上だった)
-VID_OK = 0.60    # これ以上なら映像が合っているとみなし、音の「一部だけ一致」「別のCMとも似ている」の要確認は付けない
+VID_OK = 0.70    # これ以上なら映像が合っているとみなし、音の「一部だけ一致」「別のCMとも似ている」の要確認は付けない
 
 
-def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9)):
+def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9), detail=None):
     """英語版CM(en の a〜a+L 秒)と、録画(jp)の t から L 秒の画面を、数か所で見比べた平均の似かた。比べられなければ None。"""
     sc = []
     for q in fr:
@@ -914,6 +914,8 @@ def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9)):
         y = _thumb(jp, t + L * q)
         if y is not None:
             sc.append(_pair_sim(x, y))
+    if detail is not None:
+        detail.extend(round(float(c), 2) for c in sc)
     return round(float(np.mean(sc)), 2) if len(sc) >= 3 else None
 
 
@@ -1458,7 +1460,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 4     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 5     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -2869,7 +2871,8 @@ class App(_TkBase):
                         for d in jo:
                             a_, b_ = cl[d["k"]]
                             try:
-                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache)
+                                d["vf"] = []
+                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache, detail=d["vf"])
                             except Exception:  # noqa: BLE001
                                 d["v"] = None
                         # 映像が合わないもの(声やBGMだけ同じ別CM)は先に外す。音が強い偽物が、本物を押しのけないように
@@ -2925,6 +2928,8 @@ class App(_TkBase):
                                 why.append("一部だけ一致")
                             if d.get("clash"):
                                 why.append("別のCMとも似ている")
+                        if v is not None and VID_MIN <= v < VID_OK:
+                            why.append("映像が少し違う")
                         if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
                             tt = int(d["t"])
                             rejected.append(f"CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
@@ -2964,7 +2969,7 @@ class App(_TkBase):
                     save_rec()
                     msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
                     if nwarn:
-                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が合わない)"
+                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が少し違う)"
                     if nrej:
                         msg += f" ・映像が合わず除外 {nrej} 件"
                     st(msg + el(), "warn" if nwarn else "ok")
