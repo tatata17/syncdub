@@ -498,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.7"
+APP_VERSION = "2026.11.09.8"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -661,7 +661,7 @@ class Media:
         return ("env", cols, mn, mx)
 
     # --- フレーム ---
-    def frame_png(self, t, width=240):
+    def frame_png(self, t, width=192):
         ts = max(0.0, t + self.voff)
         r = subprocess.run(
             ["ffmpeg", "-v", "error", "-ss", f"{ts:.4f}", "-i", self.path, "-frames:v", "1",
@@ -1531,7 +1531,7 @@ class Track(tk.Canvas):
                   "dim": ("#e6d9ff", "暗転・長さ違い", "#5b3aa8")}
 
     def __init__(self, master, app, key, title, **kw):
-        super().__init__(master, height=92, bg="#fbfbfd", highlightthickness=1,
+        super().__init__(master, height=78, bg="#fbfbfd", highlightthickness=1,
                          highlightbackground="#bbb", takefocus=True, **kw)
         self.app, self.key, self.title = app, key, title
         self.media = None
@@ -1920,9 +1920,9 @@ class App(_TkBase):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=4, pady=2)
         self.easy, self.manual, self.clipt = ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb)
-        self.nb.add(self.easy, text="   かんたん   ")
-        self.nb.add(self.clipt, text="   切り出し (一致部分だけ)   ")
-        self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
+        self.nb.add(self.easy, text="   かんたん (1本に合わせる)   ")
+        self.nb.add(self.clipt, text="   切り出し (長い映像から一部だけ)   ")
+        self.nb.add(self.manual, text="   手動調整 (細かく直す)   ")
         self._hdr.lift()
         top = ttk.Frame(self.manual, padding=6)
         top.pack(fill="x")
@@ -1944,14 +1944,23 @@ class App(_TkBase):
         top.columnconfigure(1, weight=1)
 
         tk.Label(self.manual, justify="left", anchor="w", bg="#fff8e1", fg="#444", font=("", 9), wraplength=1220,
-                 text="【手順】 ① 上(英語)と下(日本語)で『同じ場面』を探して登録  →  ② CM・暗転・カットがあれば、波形をドラッグして範囲を選び、"
-                      "該当するボタンで指定。 すると色つきの帯 (A・B・C…) が自動でできます。\n"
-                      "同じ色の帯 = 英語と日本語で対応する区間 / 灰色の斜線 = 使われない部分 (日本語側ならCMなど、英語側なら無音になる所)"
+                 text="① 上(英語)と下(日本語)で『同じ場面』を探して登録 → ② CM・暗転・カットがあれば、波形をドラッグして範囲を選び、"
+                      "ボタンで指定。色つきの帯(A・B・C…)が自動でできます(同じ色=対応する区間 / 灰色の斜線=使わない部分)。"
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        tk.Label(hr, fg="#777", font=("", 8), text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
-                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示").pack(side="left")
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
+        def _toggle_keys(btn):
+            if self.keys_lbl.winfo_ismapped():
+                self.keys_lbl.pack_forget()
+                btn.config(text="操作のしかた ▼")
+            else:
+                self.keys_lbl.pack(fill="x", padx=6, after=hr)
+                btn.config(text="操作のしかた ▲")
+        kb = ttk.Button(hr, text="操作のしかた ▼")
+        kb.config(command=lambda: _toggle_keys(kb))
+        kb.pack(side="left")
         ttk.Button(hr, text="全体 (Home)", width=11, command=self.fit_all).pack(side="right")
         ttk.Button(hr, text="縮小 ↓", width=7, command=lambda: self.zoom_key(1 / 0.7)).pack(side="right", padx=2)
         ttk.Button(hr, text="拡大 ↑", width=7, command=lambda: self.zoom_key(0.7)).pack(side="right")
@@ -1967,7 +1976,7 @@ class App(_TkBase):
         for k, name in (("en", "英語版 (カーソル位置の画面)"), ("jp", "日本語の録画 (カーソル位置の画面)")):
             fr = ttk.LabelFrame(mid, text=name)
             fr.grid(row=0, column=0 if k == "en" else 2, padx=4, sticky="n")
-            lab = tk.Label(fr, width=24, height=4, bg="black", fg="#888", text="(プレビュー)")
+            lab = tk.Label(fr, width=20, height=3, bg="black", fg="#888", text="(プレビュー)")
             lab.pack(padx=4, pady=4)
             self.pv[k] = lab
             row = ttk.Frame(fr)
@@ -1987,10 +1996,8 @@ class App(_TkBase):
         ctr.grid(row=0, column=1, padx=8, sticky="n")
         g1 = ttk.LabelFrame(ctr, text=" ① 同じ場面を登録する ")
         g1.pack(fill="x", pady=(0, 6))
-        tk.Label(g1, justify="left", anchor="w", wraplength=480, fg="#555", font=("", 9),
-                 text="上下のカーソルを同じ場面(同じフレーム)に合わせて押すと、音合わせの基準になります。").pack(fill="x", padx=8, pady=(4, 2))
         r1 = ttk.Frame(g1)
-        r1.pack(fill="x", padx=8, pady=2)
+        r1.pack(fill="x", padx=8, pady=(6, 2))
         ttk.Button(r1, text="A 音で探して合わせる", width=20, command=self.auto_snap).pack(side="left")
         ttk.Button(r1, text="S この2つは『同じ場面』", width=22, command=self.add_point).pack(side="left", padx=6, ipady=3)
         self.refine_v = tk.BooleanVar(value=True)
@@ -1998,14 +2005,12 @@ class App(_TkBase):
                         variable=self.refine_v).pack(anchor="w", padx=8, pady=(0, 4))
         g2 = ttk.LabelFrame(ctr, text=" ② 特別な部分 (先に波形をドラッグして範囲を選ぶ) ")
         g2.pack(fill="x")
-        for text, cmd, tip in (
-                ("CM", self.add_cm, "下(日本語)の選択範囲は『CM』。使いません"),
-                ("暗転・長さ違い", self.add_dim, "上下の選択範囲は同じ場面だが長さが違う"),
-                ("カット", self.add_cut, "上(英語)の選択範囲は日本語版でカット済み")):
-            rw = ttk.Frame(g2)
-            rw.pack(fill="x", padx=8, pady=2)
-            ttk.Button(rw, text=text, width=14, command=cmd).pack(side="left")
-            tk.Label(rw, text=tip, fg="#555", font=("", 9), anchor="w", justify="left", wraplength=330).pack(side="left", padx=8)
+        rw = ttk.Frame(g2)
+        rw.pack(fill="x", padx=8, pady=(6, 2))
+        for text, cmd in (("CM", self.add_cm), ("暗転・長さ違い", self.add_dim), ("カット", self.add_cut)):
+            ttk.Button(rw, text=text, width=14, command=cmd).pack(side="left", padx=(0, 6))
+        tk.Label(g2, text="CM=下の範囲は使わない / 暗転・長さ違い=同じ場面だが長さが違う / カット=上の範囲は日本語版でカット済み",
+                 fg="#555", font=("", 8), anchor="w", justify="left", wraplength=560).pack(fill="x", padx=8)
         r3 = ttk.Frame(g2)
         r3.pack(fill="x", padx=8, pady=(2, 4))
         self.sel_lbl = tk.Label(r3, text="選択中の範囲: なし", fg="#2f6fd0", anchor="w", font=("", 9))
@@ -2044,7 +2049,7 @@ class App(_TkBase):
         ttk.Button(bt, text="削除", width=8, command=self.del_item).pack(pady=2)
         ttk.Button(bt, text="全部削除", width=8, command=self.clear_items).pack(pady=2)
 
-        self.log = tk.Text(self.manual, height=2, bg="#111", fg="#cfc", font=("Consolas", 9))
+        self.log = tk.Text(self.manual, height=1, bg="#111", fg="#cfc", font=("Consolas", 9))
         self.log.pack(side="bottom", fill="x", padx=6, pady=(0, 2))
         bot = ttk.Frame(self.manual, padding=4)
         bot.pack(side="bottom", fill="x")
@@ -2088,7 +2093,8 @@ class App(_TkBase):
         pad = {"padx": 12, "pady": 5}
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
                  text="日本語吹き替えの音声を、きれいな英語版の映像に合わせて1本の動画にします。\n"
-                      "手順:  ① ファイルを選ぶ  →  ② 自動で合わせる  →  ③ 結果を確認  →  ④ 合成する"
+                      "手順:  ① ファイルを選ぶ  →  ② 自動で合わせる  →  ③ 結果を確認  →  ④ 合成する\n"
+                      "(英語版が長い1本で、日本語がCMや番組の一部など短いときは「切り出し」タブ、うまく合わないときは「手動調整」タブを使います)"
                  ).pack(fill="x", **pad)
 
         # ① ファイルを選ぶ
@@ -2172,11 +2178,14 @@ class App(_TkBase):
     # ---------- 切り出し (一致部分だけ) ----------
     def _build_clip(self):
         f = self.clipt
-        self.clip_en = tk.StringVar()
+        self.clip_en = self.en_var  # 英語版の映像は、どのタブでも共通
         self.clip_out = tk.StringVar()
         self.clip_crf = tk.IntVar(value=18)
         self.clip_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.clip_files = []
+        self.en_var.trace_add("write", lambda *a: (not self.clip_out.get().strip() and self.en_var.get().strip()
+                                                    and self.clip_out.set(str(Path(self.en_var.get().strip()).parent))))
+        self.nb.bind("<<NotebookTabChanged>>", self._tab_changed)
         pad = {"padx": 12, "pady": 5}
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
                  text="英語版が長い1本で、日本語の音声が短いファイル(CMや番組の一部など)のときに使います。\n"
@@ -2233,6 +2242,16 @@ class App(_TkBase):
         r5.pack(side="bottom", fill="x", **pad)
         c3.pack(side="bottom", fill="x", **pad)
         c2.pack(side="top", fill="both", expand=True, **pad)
+
+    def _tab_changed(self, _e=None):
+        """切り出しタブを開いたとき、「かんたん」タブで選んだ日本語ファイルが一覧になければ入れる(ファイル指定をタブ間で共通に)。"""
+        try:
+            if self.nb.select() == str(self.clipt) and not self.clip_files:
+                jp = self.jp_var.get().strip()
+                if jp and Path(jp).exists():
+                    self._clip_add_files([jp])
+        except Exception:  # noqa: BLE001
+            pass
 
     def _open_dir(self, d):
         try:
