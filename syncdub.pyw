@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.15"
+APP_VERSION = "2026.11.09.16"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -737,6 +737,50 @@ def _phat_local(a, b, fs):
     f = np.fft.rfftfreq(N, 1 / fs)
     G = G * ((f > 250) & (f < fs * 0.48))
     return np.fft.irfft(G, N)[: m - n + 1]
+
+
+def enable_multiselect(tree, on_delete=None):
+    """一覧(Treeview)で、Ctrl+クリック(追加/解除)、Shift+クリック(範囲)、Ctrl+A(全部)、Delete(外す)を確実に使えるようにする。"""
+    tree._anchor = None
+
+    def row(e):
+        r = tree.identify_row(e.y)
+        return r or None
+
+    def plain(e):
+        r = row(e)
+        tree.focus_set()
+        if r:
+            tree._anchor = r
+
+    def ctrl(e):
+        r = row(e)
+        tree.focus_set()
+        if r:
+            tree.selection_toggle(r)
+            tree._anchor = r
+        return "break"
+
+    def shift(e):
+        r = row(e)
+        tree.focus_set()
+        if r:
+            items = list(tree.get_children())
+            a = tree._anchor if tree._anchor in items else (tree.selection()[0] if tree.selection() else r)
+            i, j = items.index(a), items.index(r)
+            tree.selection_set(items[min(i, j): max(i, j) + 1])
+        return "break"
+
+    def all_(e):
+        tree.selection_set(list(tree.get_children()))
+        return "break"
+    tree.bind("<Button-1>", plain, add="+")
+    tree.bind("<Control-Button-1>", ctrl)
+    tree.bind("<Shift-Button-1>", shift)
+    tree.bind("<Control-a>", all_)
+    tree.bind("<Control-A>", all_)
+    if on_delete:
+        tree.bind("<Delete>", lambda e: (on_delete(), "break")[1])
 
 
 def _thumb(m, t, W=48, H=36):
@@ -2412,6 +2456,7 @@ class App(_TkBase):
         self.clip_tree.tag_configure("warn", background="#ffe9c7")
         self.clip_tree.tag_configure("ng", background="#ffe0e0")
         self.clip_tree.pack(side="left", fill="both", expand=True)
+        enable_multiselect(self.clip_tree)
         bt = ttk.Frame(r2)
         bt.pack(side="left", padx=8, anchor="n")
         ttk.Button(bt, text="追加...", width=10, command=self._clip_add).pack(pady=2)
@@ -2454,6 +2499,8 @@ class App(_TkBase):
         self.find_crf = tk.IntVar(value=18)
         self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.find_files, self.find_cms = [], []
+        self._find_cms_src = ""  # 一覧の元になった英語版のファイル(替えたら一覧を消して、やり直す)
+        self.en_var.trace_add("write", lambda *a: self._find_en_changed())
         self._find_stop_ev = threading.Event()
         self.en_var.trace_add("write", lambda *a: (not self.find_out.get().strip() and self.en_var.get().strip()
                                                     and self.find_out.set(str(Path(self.en_var.get().strip()).parent))))
@@ -2478,10 +2525,11 @@ class App(_TkBase):
             self.cm_tree.heading(c, text=h)
             self.cm_tree.column(c, width=w, anchor="center")
         self.cm_tree.pack(side="left", fill="both", expand=True)
+        enable_multiselect(self.cm_tree, lambda: self._cm_remove())
         b1 = ttk.Frame(r1b)
         b1.pack(side="left", padx=8, anchor="n")
         ttk.Button(b1, text="外す", width=10, command=self._cm_remove).pack(pady=2)
-        self.cm_note = ttk.Label(c1, text="「CMを切り分ける」を押すと、ここに一覧が出ます(押さずにスタートしても、自動で切り分けます)。間違って分けた所は選んで「外す」で消せます。", foreground="#667")
+        self.cm_note = ttk.Label(c1, text=self.CM_NOTE0, foreground="#667")
         self.cm_note.pack(anchor="w", padx=10, pady=(0, 6))
 
         c2 = ttk.LabelFrame(f, text=" ② 日本語の録画 (複数OK。ファイルやフォルダをここにドロップ、または追加) ")
@@ -2494,6 +2542,7 @@ class App(_TkBase):
         for tg, bg in (("ok", "#e6f6ec"), ("warn", "#ffe9c7"), ("ng", "#ffe0e0")):
             self.find_tree.tag_configure(tg, background=bg)
         self.find_tree.pack(side="left", fill="both", expand=True)
+        enable_multiselect(self.find_tree, lambda: self._find_remove())
         bt = ttk.Frame(r2)
         bt.pack(side="left", padx=8, anchor="n")
         ttk.Button(bt, text="追加...", width=10, command=self._find_add).pack(pady=2)
@@ -2543,6 +2592,14 @@ class App(_TkBase):
             self.cm_tree.insert("", "end", iid=str(i), values=(f"CM{i + 1:02d}", f"{self.short(a)} 〜 {self.short(b)}",
                                                                 f"{b - a:.1f} 秒", f"{round5(b - a)} 秒"))
 
+    CM_NOTE0 = "「CMを切り分ける」を押すと、ここに一覧が出ます(押さずにスタートしても、自動で切り分けます)。間違って分けた所は選んで「外す」で消せます。"
+
+    def _find_en_changed(self):
+        if self.find_cms and self.en_var.get().strip() != self._find_cms_src:
+            self.find_cms = []
+            self._cm_fill()
+            self.cm_note.config(text="英語版が替わったので、CMの一覧を消しました。スタートすると、切り分けから自動でやり直します。", foreground="#8a5a00")
+
     def _cm_remove(self):
         sel = {int(i) for i in self.cm_tree.selection()}
         if sel:
@@ -2567,6 +2624,7 @@ class App(_TkBase):
 
             def done():
                 self.find_cms = cms
+                self._find_cms_src = en_p
                 self._cm_fill()
                 self.find_split_btn.state(["!disabled"])
                 if cms:
@@ -2628,7 +2686,7 @@ class App(_TkBase):
             crf = 18
         codec = "h264" if self.find_codec.get().startswith("H.264") else "auto"
         ast = self.jp_ast.get()
-        cms_ts = list(self.find_cms)
+        cms_ts = list(self.find_cms) if self._find_cms_src == en_p else []  # 別の英語版の一覧は使わない
         self.find_btn.state(["disabled"])
         self._find_stop_ev.clear()
         self.find_stop.state(["!disabled"])
@@ -2653,6 +2711,7 @@ class App(_TkBase):
                     if cl:
                         def show(c=list(cl)):
                             self.find_cms = c
+                            self._find_cms_src = en_p
                             self._cm_fill()
                             self.cm_note.config(text=f"{len(c)} 本に分けました(スタート時に自動で)。", foreground="#1f6f43")
                         self.q.put(show)
