@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.22"
+APP_VERSION = "2026.11.09.23"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -917,7 +917,10 @@ def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9), detai
         x = cache[key]
         if x is None:
             continue
-        y = _thumb(jp, t + L * q)
+        jk = ("j", round(t + L * q, 1))
+        if jk not in cache:
+            cache[jk] = _thumb(jp, t + L * q)
+        y = cache[jk]
         if y is not None:
             sc.append(_pair_sim(x, y))
     if detail is not None:
@@ -1466,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 6     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 7     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1496,7 +1499,9 @@ def _verify_hit(c, jx, i0, fs):
     need = 1 if n <= 2 else 2
     ok = npass >= need and not (n <= 2 and npass == 1 and zmax < ZZ_SOLO)
     return {"zz": round(zmax, 1), "np": npass, "n": n, "pass": ok,
-            "strong": ok and npass >= max(need, (n + 1) // 2)}
+            "strong": ok and npass >= max(need, (n + 1) // 2),
+            # 音だけでは決めきれない(片方の窓だけ弱く合う)。映像が合えば採用するための候補
+            "weak": (not ok) and n <= 2 and npass == 1 and zmax >= ZZ_PASS}
 
 
 def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
@@ -1555,6 +1560,12 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
         for d in keep:
             i0 = int(round((d["t"] - jp.a_origin) * fs))
             v = _verify_hit(c, jx, i0, fs)
+            if not v["pass"] and v.get("weak") and d["z"] >= 20:
+                d["ok"] = False
+                d["zz"], d["np"], d["n"] = v["zz"], v["np"], v["n"]
+                d["weak"] = True
+                out.append(d)
+                continue
             if not v["pass"]:
                 if dropped is not None and d["z"] >= 14:  # 後で原因を調べられるように、強く出たのに落としたものを記録する
                     dropped.append({"k": k, "t": round(d["t"], 2), "z": round(d["z"], 1), "zz": v["zz"], "np": v["np"], "n": v["n"]})
@@ -2876,6 +2887,9 @@ class App(_TkBase):
                                 jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L,
                                            "zz": h.get("zz"), "np": h.get("np"), "n": h.get("n")})
                         # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
+                        wk = sorted((d for d in jo if d.get("weak")), key=lambda d: -d["z"])
+                        for d in wk[12:]:  # 弱い候補が多すぎるときは、強いほうから12件だけ映像で確かめる
+                            jo.remove(d)
                         vcache = {}
                         for d in jo:
                             a_, b_ = cl[d["k"]]
@@ -2884,6 +2898,11 @@ class App(_TkBase):
                                 d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache, detail=d["vf"])
                             except Exception:  # noqa: BLE001
                                 d["v"] = None
+                        # 音が弱くしか合わなかった候補は、映像が合うときだけ採用する(音が似ているだけの別CMを避ける)
+                        for d in list(jo):
+                            if d.get("weak") and not (d["v"] is not None and d["v"] >= VID_OK):
+                                dropped.append({"k": d["k"], "t": round(d["t"], 2), "z": round(d["z"], 1), "zz": d["zz"], "np": d["np"], "n": d["n"], "v": d["v"], "weak": True})
+                                jo.remove(d)
                         # 映像が合わないもの(声やBGMだけ同じ別CM)は先に外す。音が強い偽物が、本物を押しのけないように
                         bad = [d for d in jo if d["v"] is not None and d["v"] < VID_MIN]
                         good = [d for d in jo if not (d["v"] is not None and d["v"] < VID_MIN)]
