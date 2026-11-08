@@ -1,1 +1,1 @@
-{"version": "2026.11.09.16", "file": "syncdub.pyw", "notes": "「録画から探す」: 英語版を替えたら切り分けをやり直す・一覧でShift/Ctrlによる複数選択を確実に"}
+{"version": "2026.11.09.17", "file": "syncdub.pyw", "notes": "一覧の複数選択を m2ts-encoder と同じ操作に(Shift+↑↓などでの範囲拡大にも対応)"}

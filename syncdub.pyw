@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.16"
+APP_VERSION = "2026.11.09.17"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -739,44 +739,101 @@ def _phat_local(a, b, fs):
     return np.fft.irfft(G, N)[: m - n + 1]
 
 
+class RangeSelect:
+    """一覧(Treeview)の複数選択を、m2ts-encoder と同じ操作にそろえる。
+    クリック/Ctrl+クリック=その行が起点、Shift+クリック=起点からその行まで、
+    Shift+↑↓/PageUp/PageDown/Home/End=起点からフォーカス行を動かした所まで。"""
+    PAGE = 10
+
+    def __init__(self, tree):
+        self.tree = tree
+        self.anchor = None
+        tree.bind("<Button-1>", self._on_click, add="+")
+        tree.bind("<Control-Button-1>", self._on_ctrl_click, add="+")
+        tree.bind("<Shift-Button-1>", self._on_shift_click)
+        tree.bind("<Shift-Down>", lambda e: self._extend(1))
+        tree.bind("<Shift-Up>", lambda e: self._extend(-1))
+        tree.bind("<Shift-Next>", lambda e: self._extend(self.PAGE))
+        tree.bind("<Shift-Prior>", lambda e: self._extend(-self.PAGE))
+        tree.bind("<Shift-End>", lambda e: self._extend(len(self.tree.get_children(""))))
+        tree.bind("<Shift-Home>", lambda e: self._extend(-len(self.tree.get_children(""))))
+        for key in ("Up", "Down", "Home", "End", "Prior", "Next"):
+            tree.bind(f"<{key}>", self._on_plain_key, add="+")
+
+    def _valid_anchor(self, children):
+        return self.anchor if self.anchor in children else None
+
+    def _on_click(self, event):
+        self.tree.focus_set()
+        if not (event.state & 0x0001) and not (event.state & 0x0004):
+            row = self.tree.identify_row(event.y)
+            if row:
+                self.anchor = row
+
+    def _on_plain_key(self, event):
+        if event.state & 0x0001 or event.state & 0x0004:
+            return
+        self.tree.after_idle(self._sync_anchor)
+
+    def _sync_anchor(self):
+        focus = self.tree.focus()
+        if focus:
+            self.anchor = focus
+
+    def _on_ctrl_click(self, event):
+        row = self.tree.identify_row(event.y)
+        if row and not (event.state & 0x0001):
+            self.anchor = row
+            self.tree.focus(row)
+
+    def _base(self, children, row):
+        """範囲の起点を決める(なければ、フォーカス行→選択の先頭→row の順)。"""
+        anchor = self._valid_anchor(children)
+        if anchor is None:
+            focus = self.tree.focus()
+            selection = self.tree.selection()
+            anchor = focus if focus in children else (selection[0] if selection else row)
+            self.anchor = anchor
+        return anchor
+
+    def _on_shift_click(self, event):
+        self.tree.focus_set()
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return "break"
+        children = self.tree.get_children("")
+        anchor = self._base(children, row)
+        start, end = sorted((children.index(anchor), children.index(row)))
+        rng = children[start:end + 1]
+        if event.state & 0x0004:
+            self.tree.selection_add(*rng)
+        else:
+            self.tree.selection_set(rng)
+        self.tree.focus(row)
+        return "break"
+
+    def _extend(self, delta):
+        children = self.tree.get_children("")
+        if not children:
+            return "break"
+        focus = self.tree.focus()
+        cur = children.index(focus) if focus in children else 0
+        anchor = self._base(children, children[cur])
+        new = max(0, min(len(children) - 1, cur + delta))
+        start, end = sorted((children.index(anchor), new))
+        self.tree.selection_set(children[start:end + 1])
+        self.tree.focus(children[new])
+        self.tree.see(children[new])
+        return "break"
+
+
 def enable_multiselect(tree, on_delete=None):
-    """一覧(Treeview)で、Ctrl+クリック(追加/解除)、Shift+クリック(範囲)、Ctrl+A(全部)、Delete(外す)を確実に使えるようにする。"""
-    tree._anchor = None
-
-    def row(e):
-        r = tree.identify_row(e.y)
-        return r or None
-
-    def plain(e):
-        r = row(e)
-        tree.focus_set()
-        if r:
-            tree._anchor = r
-
-    def ctrl(e):
-        r = row(e)
-        tree.focus_set()
-        if r:
-            tree.selection_toggle(r)
-            tree._anchor = r
-        return "break"
-
-    def shift(e):
-        r = row(e)
-        tree.focus_set()
-        if r:
-            items = list(tree.get_children())
-            a = tree._anchor if tree._anchor in items else (tree.selection()[0] if tree.selection() else r)
-            i, j = items.index(a), items.index(r)
-            tree.selection_set(items[min(i, j): max(i, j) + 1])
-        return "break"
+    """一覧の複数選択(RangeSelect)に、Ctrl+A(全部選ぶ)と Delete(外す)を足す。"""
+    tree._range = RangeSelect(tree)
 
     def all_(e):
         tree.selection_set(list(tree.get_children()))
         return "break"
-    tree.bind("<Button-1>", plain, add="+")
-    tree.bind("<Control-Button-1>", ctrl)
-    tree.bind("<Shift-Button-1>", shift)
     tree.bind("<Control-a>", all_)
     tree.bind("<Control-A>", all_)
     if on_delete:

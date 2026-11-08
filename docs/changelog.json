@@ -1,6 +1,16 @@
 [
  {
   "date": "2026-11-09",
+  "version": "2026.11.09.17",
+  "tags": [
+   "改善"
+  ],
+  "notes": [
+   "「録画から探す」「切り出し」の一覧の複数選択を、m2ts-encoder と同じ操作にそろえました(Shift+クリックで範囲、Ctrl+クリックで追加・解除、Shift+↑↓・PageUp/PageDown・Home/Endで範囲を広げる、Ctrl+Aで全部、Deleteで外す)"
+  ]
+ },
+ {
+  "date": "2026-11-09",
   "version": "2026.11.09.16",
   "tags": [
    "修正"
