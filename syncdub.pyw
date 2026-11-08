@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.24"
+APP_VERSION = "2026.11.09.25"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -911,7 +911,7 @@ def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9), detai
     """英語版CM(en の a〜a+L 秒)と、録画(jp)の t から L 秒の画面を、数か所で見比べた平均の似かた。比べられなければ None。"""
     sc = []
     for q in fr:
-        key = (round(a, 3), q)
+        key = ("e", round(a + L * q, 2))   # 時刻そのものをキーにする(同じ開始でも長さが違えば別の画面)
         if key not in cache:
             cache[key] = _thumb(en, a + L * q)
         x = cache[key]
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 8     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 9     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1576,6 +1576,171 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
         out.sort(key=lambda d: d["t"])
         res[k] = out
     return res
+
+
+SHORT_MIN_L = 35.0   # この秒数以上の長いCMだけ、短縮版・途中で切れた版も探す
+EDGE_SIM = 0.5       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
+
+
+def make_pieces(cl):
+    """長いCMを約10秒ずつに分けた [(CMの番号, 開始, 終了), …]。短縮版・途中で切れた版を、部分ごとに探すため。"""
+    out = []
+    for k, (a, b) in enumerate(cl):
+        L = b - a
+        if L < SHORT_MIN_L:
+            continue
+        n = max(3, int(round(L / 10.0)))
+        for q in range(n):
+            out.append((k, a + L * q / n, a + L * (q + 1) / n))
+    return out
+
+
+def _same_frame(en, jp, e, j, cache):
+    """英語版の e 秒と録画の j 秒の画面が同じか。"""
+    if j < 0:
+        return False
+    ke, kj = ("e", round(e, 2)), ("j", round(j, 2))
+    if ke not in cache:
+        cache[ke] = _thumb(en, e)
+    if kj not in cache:
+        cache[kj] = _thumb(jp, j)
+    x, y = cache[ke], cache[kj]
+    if x is None and y is None:
+        return True      # どちらも真っ暗
+    if x is None or y is None:
+        return False
+    return _pair_sim(x, y) >= EDGE_SIM
+
+
+def _edge_fit(en, jp, e, off, dirn, inner, outer, cache):
+    """区間の端 e を、画面が合う範囲ぴったりに合わせる。dirn=-1 は先頭の端、+1 は終わりの端。
+    端の内側 0.1 秒の画面が合っていれば、outer(英語版の時刻)に向かって合い続ける所まで広げ、
+    合っていなければ inner に向かって合う所まで縮める。1秒刻みで進み、最後は0.25秒刻みで詰める。
+    off = 録画の時刻 − 英語版の時刻。合う所がなければ None。"""
+    def ok(x):
+        pr = x - dirn * 0.1
+        return _same_frame(en, jp, pr, pr + off, cache)
+    if ok(e):
+        cur = e
+        while (outer - cur) * dirn > 1e-6:
+            nxt = cur + dirn * min(1.0, abs(outer - cur))
+            if ok(nxt):
+                cur = nxt
+                continue
+            for s_ in (0.75, 0.5, 0.25):
+                if s_ < abs(nxt - cur) and ok(cur + dirn * s_):
+                    cur += dirn * s_
+                    break
+            break
+        return cur
+    cur = e
+    while (inner - cur) * -dirn > 1e-6:
+        nxt = cur - dirn * min(1.0, abs(inner - cur))
+        if ok(nxt):
+            for s_ in (0.25, 0.5, 0.75):   # 合わなかった位置と合った位置の間を詰める
+                if s_ < abs(nxt - cur) and ok(cur - dirn * s_):
+                    return cur - dirn * s_
+            return nxt
+        cur = nxt
+    return None
+
+
+def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40):
+    """長いCMの短縮版・途中で切れた版を探す。pieces(CMを約10秒ずつに分けたもの)の各部分を録画から探した結果 phits のうち、
+    画面も合うものを、録画と英語版の時間差(オフセット)が同じ部分ごとにまとめて区間にし、画面の合う範囲に両端をぴったり合わせる。
+    区間が順番どおりに並び、合計2か所以上で合っていれば1つの短縮版とみなす。
+    戻り値: keep に足す項目 [{"k","t","z","ok","L","v","short","out_len","runs":[[英開始,英終了,録画開始],…]}, …]"""
+    cand = []
+    for pi, hl in enumerate(phits):
+        for h in hl:
+            cand.append((pi, h))
+    cand.sort(key=lambda x: -x[1]["z"])
+    hits = {}
+    jend = jp.a_origin + len(jp.x) / jp.sr
+    for pi, h in cand[:cap]:
+        k, a, b = pieces[pi]
+        try:
+            v = video_similarity(en, a, b - a, jp, h["t"], vcache)
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is None or not vid_good({"v": v, "z": h["z"]}):
+            continue
+        hits.setdefault(k, []).append({"t": h["t"], "e": a, "l": b - a, "z": h["z"]})
+    out = []
+    ecache = {}
+    for k, hl in hits.items():
+        a_cm, b_cm = cl[k]
+        groups = []
+        for h in sorted(hl, key=lambda x: x["e"]):
+            o = h["t"] - h["e"]
+            for g in groups:
+                if abs(o - g["o"]) <= 0.4:
+                    g["h"].append(h)
+                    g["o"] = float(np.median([x["t"] - x["e"] for x in g["h"]]))
+                    break
+            else:
+                groups.append({"o": o, "h": [h]})
+        runs = [{"o": g["o"], "e0": min(x["e"] for x in g["h"]), "e1": max(x["e"] + x["l"] for x in g["h"]),
+                 "n": len(g["h"]), "z": max(x["z"] for x in g["h"])} for g in groups]
+        runs.sort(key=lambda r: r["e0"])
+        for i, r in enumerate(runs):
+            lo = runs[i - 1]["e1"] if i else a_cm
+            hi = runs[i + 1]["e0"] if i + 1 < len(runs) else b_cm
+            lo = max(min(lo, r["e0"]), jp.a_origin - r["o"], a_cm)
+            hi = min(max(hi, r["e1"]), jend - r["o"], b_cm)
+            r["x0"] = _edge_fit(en, jp, r["e0"], r["o"], -1, r["e1"], lo, ecache)
+            r["x1"] = _edge_fit(en, jp, r["e1"], r["o"], +1, r["e0"], hi, ecache)
+        runs = [r for r in runs if r["x0"] is not None and r["x1"] is not None and r["x1"] - r["x0"] >= 2.0]
+        for r, r2 in zip(runs, runs[1:]):
+            if r["x1"] > r2["x0"]:
+                r["x1"] = r2["x0"] = (r["x1"] + r2["x0"]) / 2
+        # 録画で順番どおりに、ほぼ続けて並ぶ区間を1つの短縮版にまとめる
+        chains = []
+        for r in runs:
+            for ch in chains:
+                last = ch[-1]
+                gap = (r["x0"] + r["o"]) - (last["x1"] + last["o"])
+                if -0.7 <= gap <= 3.0:
+                    ch.append(r)
+                    break
+            else:
+                chains.append([r])
+        for ch in chains:
+            if sum(r["n"] for r in ch) < 2:
+                continue
+            tot = sum(r["x1"] - r["x0"] for r in ch)
+            if tot < 8.0:
+                continue
+            j0, j1 = ch[0]["x0"] + ch[0]["o"], ch[-1]["x1"] + ch[-1]["o"]
+            # 同じ場所を、CM全体の一致がすでに押さえていれば、それを優先する
+            ov = [e_ for e_ in keep if (e_.get("v") is None or e_["v"] >= VID_MIN)
+                  and min(j1, e_["t"] + e_["L"]) - max(j0, e_["t"]) > 0.5 * min(j1 - j0, e_["L"])]
+            ws = vs = 0.0
+            for r in ch:
+                try:
+                    v = video_similarity(en, r["x0"], r["x1"] - r["x0"], jp, r["x0"] + r["o"], vcache)
+                except Exception:  # noqa: BLE001
+                    v = None
+                if v is not None:
+                    ws += r["x1"] - r["x0"]
+                    vs += v * (r["x1"] - r["x0"])
+            vm = round(vs / ws, 2) if ws >= 0.6 * tot else None
+            z = max(r["z"] for r in ch)
+            if vm is None or not vid_good({"v": vm, "z": z}):
+                if dropped is not None:
+                    dropped.append({"k": k, "t": round(j0, 2), "z": round(z, 1), "v": vm, "short": True})
+                continue
+            short = tot < 0.95 * (b_cm - a_cm)
+            if ov:
+                # 一部の画面だけ合わないCM全体の一致(終わりが途中で切れた版など)は、画面の合う範囲だけの短縮版に置きかえる
+                if not (short and all((not e_.get("runs")) and e_.get("vf") and min(e_["vf"]) < 0.4 and vm >= e_["v"] + 0.1 for e_ in ov)):
+                    continue
+                for e_ in ov:
+                    keep.remove(e_)
+            out.append({"k": k, "t": j0, "z": z, "ok": True, "L": j1 - j0, "zz": None, "np": None, "n": None,
+                        "v": vm, "vf": [], "short": short, "out_len": tot,
+                        "runs": [[round(r["x0"], 4), round(r["x1"], 4), round(r["x0"] + r["o"], 4)] for r in ch]})
+    return out
 
 
 def build_from_items(items, en_rng, jp_rng):
@@ -2927,6 +3092,20 @@ class App(_TkBase):
                                     e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"], "rej": True})
                             else:
                                 keep.append(d)
+                        # 長いCMの短縮版・途中で切れた版(部分ごとに探して、順番に並んでいるものをまとめる)
+                        pcs = make_pieces(cl)
+                        if pcs:
+                            try:
+                                phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog)
+                                for e_ in find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped):
+                                    # 短縮版と重なる「映像が合わず除外」の記録は、短縮版だったという説明がつくので消す
+                                    keep[:] = [x for x in keep if not (x["k"] == e_["k"] and x.get("v") is not None and x["v"] < VID_MIN
+                                                                       and min(x["t"] + x["L"], e_["t"] + e_["L"]) - max(x["t"], e_["t"]) > 0)]
+                                    keep.append(e_)
+                            except _Stop:
+                                raise
+                            except Exception:  # noqa: BLE001
+                                pass
                         keep.sort(key=lambda d: d["t"])
                         del jp
                         rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted(dropped, key=lambda x: -x["z"])[:40], "done": False}
@@ -2963,12 +3142,12 @@ class App(_TkBase):
                             rejected.append(f"CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
                             nrej += 1
                             continue
-                        base = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}"
+                        base = f"{round5(d.get('out_len', b - a))}秒_{en_stem}_CM{k + 1:02d}{tail}" + ("【短縮版】" if d.get("short") else "")
                         name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
                             + f"({safe(Path(jp_p).stem)}).mkv"
                         out = outd / name
                         found[k] += 1
-                        if base + f"({safe(Path(jp_p).stem)}).mkv" in existing:
+                        if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing:
                             res["skip"] += 1
                             nsk += 1
                             continue
@@ -2976,8 +3155,12 @@ class App(_TkBase):
                         self.q.put(lambda i=i, j=j, m=len(keep): self.find_bar.config(value=(i + 0.5 + 0.5 * j / m) / n * 100))
                         proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
                                 "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
-                                "segments": [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}],
-                                "clip": {"start": round(a, 4), "end": round(b, 4), "crf": crf, "preset": "medium", "codec": codec}}
+                                "segments": ([{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "fit": "stretch"} for r_ in d["runs"]]
+                                             if d.get("runs") else
+                                             [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}]),
+                                "clip": ({"start": d["runs"][0][0], "end": d["runs"][-1][1], "crf": crf, "preset": "medium", "codec": codec}
+                                         if d.get("runs") else
+                                         {"start": round(a, 4), "end": round(b, 4), "crf": crf, "preset": "medium", "codec": codec})}
                         tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
                         try:
                             pj = tmpd / "project.json"
