@@ -498,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.10"
+APP_VERSION = "2026.11.09.11"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -2385,6 +2385,7 @@ class App(_TkBase):
         self.find_crf = tk.IntVar(value=18)
         self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.find_files, self.find_cms = [], []
+        self._find_stop_ev = threading.Event()
         self.en_var.trace_add("write", lambda *a: (not self.find_out.get().strip() and self.en_var.get().strip()
                                                     and self.find_out.set(str(Path(self.en_var.get().strip()).parent))))
         pad = {"padx": 12, "pady": 5}
@@ -2448,6 +2449,9 @@ class App(_TkBase):
         r5 = ttk.Frame(f)
         self.find_btn = ttk.Button(r5, text="探してスタート", command=self.run_find)
         self.find_btn.pack(side="left", ipadx=14, ipady=4)
+        self.find_stop = ttk.Button(r5, text="中止", command=self._find_cancel)
+        self.find_stop.pack(side="left", padx=(8, 0), ipady=4)
+        self.find_stop.state(["disabled"])
         self.find_bar = ttk.Progressbar(r5, mode="determinate", maximum=100)
         self.find_bar.pack(side="left", fill="x", expand=True, padx=12)
         self.find_msg = tk.Label(f, text="", anchor="w", justify="left", fg="#333", wraplength=1050)
@@ -2458,6 +2462,11 @@ class App(_TkBase):
         c1.pack_forget()
         c1.pack(side="top", fill="x", **pad)
         c2.pack(side="top", fill="both", expand=True, **pad)
+
+    def _find_cancel(self):
+        self._find_stop_ev.set()
+        self.find_stop.state(["disabled"])
+        self.find_msg.config(text="中止しています…(いま書き出し中のファイルが終わったら止まります)", fg="#8a5a00")
 
     def _cm_fill(self):
         self.cm_tree.delete(*self.cm_tree.get_children())
@@ -2552,6 +2561,8 @@ class App(_TkBase):
         ast = self.jp_ast.get()
         cms_ts = list(self.find_cms)
         self.find_btn.state(["disabled"])
+        self._find_stop_ev.clear()
+        self.find_stop.state(["!disabled"])
         self.find_open.pack_forget()
         self.find_msg.config(text="英語版を読み込んでいます…", fg="#333")
         self.find_bar.config(value=0)
@@ -2573,51 +2584,100 @@ class App(_TkBase):
                                     self.find_btn.state(["!disabled"])))
                 return
             outd.mkdir(parents=True, exist_ok=True)
+            stop = self._find_stop_ev
+            rec_p = outd / "syncdub_探索記録.json"
+            st_en = Path(en_p).stat()
+            sig = [en_p, st_en.st_size, int(st_en.st_mtime), [[round(a, 2), round(b, 2)] for a, b in cl]]
+            rec = {"sig": sig, "files": {}}
+            try:
+                old = json.loads(rec_p.read_text(encoding="utf-8"))
+                if old.get("sig") == sig:
+                    rec = old
+            except Exception:  # noqa: BLE001
+                pass
+
+            def save_rec():
+                try:
+                    rec_p.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    pass
+
+            class _Stop(Exception):
+                pass
             found = [0] * len(cl)
             res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
             en_stem = safe(Path(en_p).stem)
+            stopped = False
             for i, jp_p in enumerate(files):
+                if stop.is_set():
+                    stopped = True
+                    break
+
                 def st(text, tag="", i=i):
                     self.q.put(lambda: self._find_set(i, text, tag))
 
                 def prog(fr, i=i):
+                    if stop.is_set():
+                        raise _Stop()
                     self.q.put(lambda: (self.find_bar.config(value=(i + fr * 0.5) / n * 100),
                                         self.find_msg.config(text=f"({i + 1}/{n}) {Path(jp_p).name}: 音を探しています…", fg="#333")))
                 try:
-                    st("音を探しています…")
-                    jp = Media(jp_p, ast)
-                    hits = find_in_recording(cms, jp, prog)
-                    jo = []
-                    for k, hl in enumerate(hits):
-                        L = cl[k][1] - cl[k][0]
-                        for h in hl:
-                            jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L})
-                    # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
-                    jo.sort(key=lambda d: -d["z"])
-                    keep = []
-                    for d in jo:
-                        clash = [e for e in keep if min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])]
-                        if clash:
-                            for e in clash:
-                                e["clash"] = True
-                            continue
-                        keep.append(d)
-                    keep.sort(key=lambda d: d["t"])
-                    del jp
+                    try:
+                        fst = Path(jp_p).stat()
+                        fkey = [fst.st_size, int(fst.st_mtime)]
+                    except OSError:
+                        fkey = None
+                    ent = rec["files"].get(jp_p)
+                    if ent and ent.get("key") == fkey and ent.get("done"):
+                        st(f"前回調べ済み ({len(ent['keep'])} 件)", "ok" if ent["keep"] else "")
+                        for d in ent["keep"]:
+                            found[d["k"]] += 1
+                        continue
+                    if ent and ent.get("key") == fkey:
+                        keep = ent["keep"]
+                    else:
+                        st("音を探しています…")
+                        jp = Media(jp_p, ast)
+                        hits = find_in_recording(cms, jp, prog)
+                        jo = []
+                        for k, hl in enumerate(hits):
+                            L = cl[k][1] - cl[k][0]
+                            for h in hl:
+                                jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L})
+                        # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
+                        jo.sort(key=lambda d: -d["z"])
+                        keep = []
+                        for d in jo:
+                            clash = [e for e in keep if min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])]
+                            if clash:
+                                for e in clash:
+                                    e["clash"] = True
+                                continue
+                            keep.append(d)
+                        keep.sort(key=lambda d: d["t"])
+                        del jp
+                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "done": False}
+                        save_rec()
                     if not keep:
+                        rec["files"][jp_p]["done"] = True
+                        save_rec()
                         st("見つかりませんでした", "")
                         continue
                     nth = {}
-                    nw = nwarn = 0
+                    nw = nwarn = nsk = 0
                     for j, d in enumerate(keep):
+                        if stop.is_set():
+                            raise _Stop()
                         k = d["k"]
                         a, b = cl[k]
                         nth[k] = nth.get(k, 0) + 1
                         tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
                         name = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}({safe(Path(jp_p).stem)}).mkv"
                         out = outd / name
+                        found[k] += 1
                         if out.exists() or out.with_name(out.stem.replace("(", "【要確認】(", 1) + ".mkv").exists():
                             res["skip"] += 1
+                            nsk += 1
                             continue
                         st(f"書き出しています… ({j + 1}/{len(keep)})")
                         self.q.put(lambda i=i, j=j, m=len(keep): self.find_bar.config(value=(i + 0.5 + 0.5 * j / m) / n * 100))
@@ -2634,7 +2694,6 @@ class App(_TkBase):
                                 main([str(pj)])
                         finally:
                             shutil.rmtree(tmpd, ignore_errors=True)
-                        found[k] += 1
                         nw += 1
                         if not d["ok"] or d.get("clash"):
                             nwarn += 1
@@ -2645,10 +2704,16 @@ class App(_TkBase):
                                 pass
                         else:
                             res["ok"] += 1
-                    msg = f"✔ {nw} 件書き出しました"
+                    rec["files"][jp_p]["done"] = True
+                    save_rec()
+                    msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
                     if nwarn:
                         msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている)"
                     st(msg, "warn" if nwarn else "ok")
+                except _Stop:
+                    st("中止しました (次回は続きから)", "warn")
+                    stopped = True
+                    break
                 except subprocess.CalledProcessError as ex:
                     st("× ffmpegでエラー: " + (ex.stderr or "")[-120:].replace("\n", " "), "ng")
                     res["ng"] += 1
@@ -2659,6 +2724,7 @@ class App(_TkBase):
 
             def fin():
                 self.find_btn.state(["!disabled"])
+                self.find_stop.state(["disabled"])
                 bits = [f"書き出し {res['ok'] + res['warn']} 本"]
                 if res["warn"]:
                     bits.append(f"うち要確認 {res['warn']} 本(名前に【要確認】が付いています)")
@@ -2667,9 +2733,11 @@ class App(_TkBase):
                 if res["skip"]:
                     bits.append(f"同じ名前があって飛ばした {res['skip']} 本")
                 miss = [f"CM{k + 1:02d}" for k, c in enumerate(found) if c == 0]
-                if miss and len(cl) > 1:
+                if miss and len(cl) > 1 and not stopped:
                     bits.append("どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
-                self.find_msg.config(text="✔ " + "。".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
+                if stopped:
+                    bits.insert(0, "中止しました(もう一度スタートすると、調べ済みの録画は飛ばして続きから進みます)")
+                self.find_msg.config(text=("" if stopped else "✔ ") + "。".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
                 if res["ok"] + res["warn"]:
                     self.find_open.pack(side="left", padx=8)
                 self.say("探索完了")
