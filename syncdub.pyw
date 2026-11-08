@@ -414,7 +414,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.1"
+APP_VERSION = "2026.11.09.2"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1971,7 +1971,6 @@ class App(_TkBase):
         self.clip_en_ent.pack(side="left", fill="x", expand=True)
         ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
         c2 = ttk.LabelFrame(f, text=" ② 日本語のファイル (CMごと。ここにドロップ、または追加) ")
-        c2.pack(fill="both", expand=True, **pad)
         r2 = ttk.Frame(c2)
         r2.pack(fill="both", expand=True, padx=8, pady=6)
         self.clip_tree = ttk.Treeview(r2, columns=("f", "st"), show="headings", height=6, selectmode="extended")
@@ -1988,7 +1987,6 @@ class App(_TkBase):
         ttk.Button(bt, text="外す", width=10, command=self._clip_remove).pack(pady=2)
         ttk.Button(bt, text="全部外す", width=10, command=self._clip_clear).pack(pady=2)
         c3 = ttk.LabelFrame(f, text=" ③ 書き出し ")
-        c3.pack(fill="x", **pad)
         r3 = ttk.Frame(c3)
         r3.pack(fill="x", padx=8, pady=(8, 2))
         ttk.Label(r3, text="保存先フォルダ:").pack(side="left")
@@ -2000,18 +1998,17 @@ class App(_TkBase):
         ttk.Spinbox(r4, from_=12, to=28, width=4, textvariable=self.clip_crf).pack(side="left", padx=6)
         ttk.Label(r4, text="ファイル名は「日本語ファイル名_jpdub.mkv」になります。", foreground="#667").pack(side="left", padx=12)
         r5 = ttk.Frame(f)
-        r5.pack(fill="x", **pad)
         self.clip_btn = ttk.Button(r5, text="切り出しスタート", command=self.run_clip)
         self.clip_btn.pack(side="left", ipadx=14, ipady=4)
         self.clip_bar = ttk.Progressbar(r5, mode="determinate", maximum=100)
         self.clip_bar.pack(side="left", fill="x", expand=True, padx=12)
         self.clip_msg = tk.Label(f, text="", anchor="w", justify="left", fg="#333", wraplength=1050)
-        self.clip_msg.pack(fill="x", padx=12, pady=(0, 6))
-        self.clip_open = ttk.Button(f, text="フォルダを開く", command=lambda: self._open_dir(self.clip_out.get()))
-        if DND_FILES:
-            for w in (self.clip_tree, c2):
-                w.drop_target_register(DND_FILES)
-                w.dnd_bind("<<Drop>>", self._clip_drop)
+        self.clip_open = ttk.Button(r5, text="フォルダを開く", command=lambda: self._open_dir(self.clip_out.get()))
+        # 下の部品を先に確保してから、一覧を残りの場所に広げる(窓が低くても、スタートボタンが隠れない)
+        self.clip_msg.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        r5.pack(side="bottom", fill="x", **pad)
+        c3.pack(side="bottom", fill="x", **pad)
+        c2.pack(side="top", fill="both", expand=True, **pad)
 
     def _open_dir(self, d):
         try:
@@ -2171,7 +2168,7 @@ class App(_TkBase):
                     bits.append(f"飛ばした {res['skip']} 本")
                 self.clip_msg.config(text="✔ " + "、".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
                 if res["ok"] + res["warn"]:
-                    self.clip_open.pack(anchor="w", padx=12, pady=(0, 6))
+                    self.clip_open.pack(side="left", padx=8)
                 self.say("切り出し完了")
             self.q.put(fin)
         threading.Thread(target=work, daemon=True).start()
@@ -2368,7 +2365,7 @@ class App(_TkBase):
         if not DND_FILES:
             self.say("ドラッグ&ドロップを使うには: pip install tkinterdnd2 (なくても動作します)")
             return
-        targets = {self: None, self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
+        targets = {self: None, self.clip_en_ent: "clipen", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
                    self.jp_ent: "jp", self.tr["jp"]: "jp", self.pv["jp"]: "jp"}
         for k, z in self.zone.items():
             for w in (z["frame"], z["title"], z["name"]):
@@ -2380,6 +2377,14 @@ class App(_TkBase):
     def _on_drop(self, ev, k):
         files = list(self.tk.splitlist(ev.data))
         if not files:
+            return
+        if k == "clipen":  # 切り出しタブの、英語版の入力欄
+            self.clip_en.set(files[0])
+            if not self.clip_out.get():
+                self.clip_out.set(str(Path(files[0]).parent))
+            return
+        if self.nb.select() == str(self.clipt):  # 切り出しタブが開いているときは、どこにドロップしても日本語ファイルの追加
+            self._clip_add_files(files)
             return
         if files[0].lower().endswith(".json"):
             self.load_project(files[0])
