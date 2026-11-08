@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.14"
+APP_VERSION = "2026.11.09.15"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -796,7 +796,8 @@ def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
     return best[0], best[1], own_v, res
 
 
-VID_MIN = 0.30   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす。暫定値(実データで調整中)
+VID_MIN = 0.45   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす(間違いは0.18以下、本物は0.75以上だった)
+VID_OK = 0.60    # これ以上なら映像が合っているとみなし、音の「一部だけ一致」「別のCMとも似ている」の要確認は付けない
 
 
 def video_similarity(en, a, L, jp, t, cache, fr=(0.1, 0.3, 0.5, 0.7, 0.9)):
@@ -1356,8 +1357,9 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 2     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 3     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
+ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
 
 
@@ -1383,8 +1385,9 @@ def _verify_hit(c, jx, i0, fs):
         if zz >= ZZ_PASS:
             npass += 1
     need = 1 if n <= 2 else 2
-    return {"zz": round(zmax, 1), "np": npass, "n": n, "pass": npass >= need,
-            "strong": npass >= max(need, (n + 1) // 2)}
+    ok = npass >= need and not (n <= 2 and npass == 1 and zmax < ZZ_SOLO)
+    return {"zz": round(zmax, 1), "np": npass, "n": n, "pass": ok,
+            "strong": ok and npass >= max(need, (n + 1) // 2)}
 
 
 def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5):
@@ -2741,7 +2744,15 @@ class App(_TkBase):
                                 jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L,
                                            "zz": h.get("zz"), "np": h.get("np"), "n": h.get("n")})
                         # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
-                        jo.sort(key=lambda d: -d["z"])
+                        vcache = {}
+                        for d in jo:
+                            a_, b_ = cl[d["k"]]
+                            try:
+                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache)
+                            except Exception:  # noqa: BLE001
+                                d["v"] = None
+                        # 映像まで合うものを先に、そのあと音がはっきりしているものの順で残す
+                        jo.sort(key=lambda d: (not (d["v"] is not None and d["v"] >= VID_OK), -d["z"]))
                         keep = []
                         for d in jo:
                             clash = [e for e in keep if min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])]
@@ -2751,13 +2762,6 @@ class App(_TkBase):
                                 continue
                             keep.append(d)
                         keep.sort(key=lambda d: d["t"])
-                        vcache = {}
-                        for d in keep:
-                            a_, b_ = cl[d["k"]]
-                            try:
-                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache)
-                            except Exception:  # noqa: BLE001
-                                d["v"] = None
                         del jp
                         rec["files"][jp_p] = {"key": fkey, "keep": keep, "done": False}
                         save_rec()
@@ -2781,10 +2785,11 @@ class App(_TkBase):
                         tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
                         v = d.get("v")
                         why = []
-                        if not d["ok"]:
-                            why.append("一部だけ一致")
-                        if d.get("clash"):
-                            why.append("別のCMとも似ている")
+                        if not (v is not None and v >= VID_OK):  # 映像まで合っていれば、音の曖昧さは気にしない
+                            if not d["ok"]:
+                                why.append("一部だけ一致")
+                            if d.get("clash"):
+                                why.append("別のCMとも似ている")
                         if v is not None and v < VID_MIN:
                             why.append("映像が合わない")
                         base = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}"
