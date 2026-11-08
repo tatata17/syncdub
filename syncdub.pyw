@@ -80,7 +80,7 @@ def probe(path):
     # ファイル名やタグ(日本語・記号を含みやすい)は取得せず、必要な数値項目だけ読む
     out = run(["ffprobe", "-v", "error", "-show_entries",
                "format=start_time,duration:stream=index,codec_type,codec_name,channels,sample_rate,"
-               "start_time,avg_frame_rate", "-of", "json", str(path)]).stdout
+               "start_time,avg_frame_rate,field_order", "-of", "json", str(path)]).stdout
     try:
         return json.loads(out)
     except ValueError:  # 念のため: 不正なバックスラッシュを無害化して再試行
@@ -265,6 +265,24 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
     return ";\n".join(lines), warns
 
 
+def clip_segments(segs, c0, c1):
+    """英語版の c0〜c1 だけを残し、時刻を c0=0 に詰めた区間リストを返す (切り出し用)。"""
+    out = []
+    for s in segs:
+        a, b = max(s.en_start, c0), min(s.en_end, c1)
+        if b - a <= 1e-6:
+            continue
+        n = Seg(a - c0, b - c0, s.jp_start, s.jp_end, s.fit, s.note, s.english)
+        if s.jp_start is not None and s.dur > 0:
+            je = s.jp_end if s.jp_end is not None else s.jp_start + s.dur
+            r = (je - s.jp_start) / s.dur  # 日本語側は、切り詰めた分だけ(速度比をかけて)進める
+            n.jp_start = s.jp_start + (a - s.en_start) * r
+            if s.jp_end is not None:
+                n.jp_end = s.jp_start + (b - s.en_start) * r
+        out.append(n)
+    return out
+
+
 # ---------------------------------------------------------------- メイン
 
 
@@ -312,9 +330,19 @@ def _main(argv, tmp):
     jp_a = int(proj.get("jp_audio_stream", 0))
     jp_off, en_off = video_start_offset(jp), video_start_offset(en)
     single = bool(a.audio_only)
-    filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
-                               in_idx=0 if single else 1, lead=0.0 if single else en_off,
-                               en_idx=1 if single else 0, en_off=en_off)
+    clip = None if single else proj.get("clip")
+    if clip:
+        # 切り出し: 英語版の c0〜c1 だけを書き出す。英語版の入力は c0 から読むので、音声の時刻も c0=0 に詰める
+        c0 = max(0.0, float(clip["start"]))
+        c1 = min(en_dur, float(clip["end"])) if en_dur else float(clip["end"])
+        segs = clip_segments(segs, c0, c1)
+        if not segs or c1 - c0 <= 0.05:
+            raise ValueError("切り出す範囲が空です")
+        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0)
+    else:
+        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
+                                   in_idx=0 if single else 1, lead=0.0 if single else en_off,
+                                   en_idx=1 if single else 0, en_off=en_off)
 
     print(f"EN映像先頭 +{en_off:.3f}s / JP映像先頭 +{jp_off:.3f}s (コンテナ開始比) / EN長さ {en_dur:.3f}s / 区間 {len(segs)}")
     for i, s in enumerate(segs):
@@ -343,15 +371,27 @@ def _main(argv, tmp):
         codec = proj.get("audio_codec", "aac")
         bitrate = proj.get("audio_bitrate", "256k")
         keep_en = proj.get("keep_en_audio", True)
-        cmd = ["ffmpeg", "-y", "-i", en_path, "-i", jp_path, "-filter_complex_script", str(script),
-               "-map", "0:v:0", "-map", "[aout]"]
+        pre = ["-ss", f"{c0 + en_off:.6f}", "-t", f"{c1 - c0:.6f}"] if clip else []
+        cmd = ["ffmpeg", "-y"] + pre + ["-i", en_path, "-i", jp_path, "-filter_complex_script", str(script),
+                                         "-map", "0:v:0", "-map", "[aout]"]
         if keep_en:
             cmd += ["-map", "0:a:0"]
-        cmd += ["-c:v", "copy", "-c:a:0", codec]
+        if clip:  # 映像を再エンコード (キーフレームに関係なく、フレーム単位で切り出せる)
+            cmd += ["-c:v", "libx264", "-preset", str(clip.get("preset", "medium")), "-crf", str(clip.get("crf", 18)),
+                    "-pix_fmt", "yuv420p"]
+            fo = next((st.get("field_order") for st in en["streams"] if st["codec_type"] == "video"), None)
+            if fo in ("tt", "bb", "tb", "bt"):  # インターレース映像は、そのまま(縞を保って)エンコードする
+                cmd += ["-flags", "+ilme+ildct", "-top", "1" if fo in ("tt", "tb") else "0"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-c:a:0", codec]
         if codec in ("aac", "ac3", "eac3", "libopus"):
             cmd += ["-b:a:0", bitrate]
         if keep_en:
-            cmd += ["-c:a:1", "copy"]
+            # 切り出しでは、英語版の音声も(シークの位置ずれを避けるため)エンコードし直す。通常は無加工コピー
+            cmd += ["-c:a:1", codec] if clip else ["-c:a:1", "copy"]
+            if clip and codec in ("aac", "ac3", "eac3", "libopus"):
+                cmd += ["-b:a:1", bitrate]
         cmd += ["-metadata:s:a:0", "language=jpn", "-metadata:s:a:0", "title=Japanese dub (synced)",
                 "-disposition:a:0", "default"]
         if keep_en:
@@ -374,7 +414,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.07.27"
+APP_VERSION = "2026.11.09.1"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -684,6 +724,55 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 arr[lo:hi] = mu
         progress(0.02 + 0.28 * (q + 1) / K, "全体の音を照合しています…")
     del FJ
+    if j_dur < 0.7 * e_dur:
+        # 日本語のほうが短い(英語版が1本にまとまっていて、日本語はCM1本分など): 日本語側から窓を取り、英語版全体から探す
+        Wj = float(min(W, max(2.0, j_dur * 0.8)))
+        nj = int(Wj * fs)
+        Ne = 1 << int(np.ceil(np.log2(len(ex) + nj)))
+        FE = np.fft.rfft(ex, Ne)
+        ee = np.concatenate([[0], np.cumsum(ex ** 2)])
+        _f2 = np.fft.rfftfreq(Ne, 1 / fs)
+        fmask2 = (_f2 > 250) & (_f2 < fs * 0.48)
+        nrj = len(jx) // hop_rms
+        rj = np.sqrt((jx[: nrj * hop_rms].reshape(nrj, hop_rms) ** 2).mean(1)) if nrj else np.array([0.0])
+        thr_j = max(0.1 * float(np.percentile(rj, 75)), 1e-4)
+        Kj = int(min(28, max(4, j_dur / 12)))
+        weak = []
+        for q, t in enumerate(np.linspace(jo, max(jo + j_dur - Wj, jo), Kj)):
+            a = jsl(t, Wj)
+            if float(np.sqrt((a ** 2).mean())) < thr_j:
+                continue
+            a0 = a - a.mean()
+            G = FE * np.conj(np.fft.rfft(a0, Ne))
+            c = np.fft.irfft(G, Ne)[: len(ex) - nj + 1]
+            loc = np.sqrt(np.maximum(ee[nj:] - ee[:-nj], 0) + 1e-9) * np.sqrt((a0 ** 2).sum())
+            nc = c / loc
+            Gp = G / (np.abs(G) + 1e-9) * fmask2
+            pc = np.fft.irfft(Gp, Ne)[: len(ex) - nj + 1]
+            for arr in (nc, pc):
+                mu, sd = arr.mean(), arr.std() + 1e-9
+                for _ in range(2):
+                    k = int(arr.argmax())
+                    z = (arr[k] - mu) / sd
+                    if z >= 8:
+                        cand.append((t - (eo + k / fs), z))  # 日本語時刻 - 英語時刻
+                    elif z >= 5.0:
+                        weak.append((t - (eo + k / fs), z, q))  # 弱い候補: 別の窓でも同じ位置が出たときだけ採用
+                    lo, hi = max(0, k - int(fs)), min(len(arr), k + int(fs))
+                    arr = arr.copy()
+                    arr[lo:hi] = mu
+            progress(0.30 * (q + 1) / Kj, "日本語の音を英語版全体から探しています…")
+        del FE
+        weak.sort()
+        grp = []
+        for item in weak:
+            if grp and item[0] - grp[-1][-1][0] <= 0.15:
+                grp[-1].append(item)
+            else:
+                grp.append([item])
+        for g_ in grp:
+            if len({w_[2] for w_ in g_}) >= 2 and max(w_[1] for w_ in g_) >= 5.5:
+                cand.append((float(np.median([w_[0] for w_ in g_])), max(w_[1] for w_ in g_)))
     if not cand:
         return [], {"ok": False, "unused_jp": [],
                     "msg": "音が一致する部分が見つかりませんでした。別の音声番号を試すか、「手動調整」タブをお使いください。"}
@@ -780,7 +869,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
         return WL, wts, lab, off_i, z_i, inferred, rr
 
     tries = [(5.0, 2.0, 0.5, 7.0, 2)]
-    if e_dur < 60:
+    if min(e_dur, j_dur) < 60:
         tries += [(3.0, 1.0, 0.5, 6.0, 2), (2.0, 0.5, 0.5, 5.5, 3)]
     for WL, HOP, RAD, ZM, MINRUN in tries:
         WL, wts, lab, off_i, z_i, inferred, rr = attempt(WL, HOP, RAD, ZM, MINRUN)
@@ -1193,6 +1282,10 @@ TIPS = {
     "▶ 日本語を聞く": "選んだ区間の先頭付近を、日本語の録画の音で再生します。聞き比べて確かめます。",
     "手動で直す →": "手動調整のタブを開きます。自動でうまくいかない区間を直せます。",
     "フォルダを開く": "出来上がったファイルのあるフォルダを開きます。",
+    "追加...": "日本語のファイルを選んで一覧に足します(複数まとめて選べます)。",
+    "外す": "一覧で選んだファイルを外します(ファイルそのものは消えません)。",
+    "全部外す": "一覧を空にします。",
+    "切り出しスタート": "一覧のファイルを1本ずつ自動で合わせ、一致した部分だけを英語版から切り出して書き出します。",
 }
 
 
@@ -1609,8 +1702,9 @@ class App(_TkBase):
         self._build_header()
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=4, pady=2)
-        self.easy, self.manual = ttk.Frame(self.nb), ttk.Frame(self.nb)
+        self.easy, self.manual, self.clipt = ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb)
         self.nb.add(self.easy, text="   かんたん   ")
+        self.nb.add(self.clipt, text="   切り出し (CMごと)   ")
         self.nb.add(self.manual, text="   手動調整 (上級者向け)   ")
         self._hdr.lift()
         top = ttk.Frame(self.manual, padding=6)
@@ -1745,7 +1839,10 @@ class App(_TkBase):
         lf.pack_forget()  # 一覧を最後に詰め直す = 窓が低いときは一覧のほうが縮み、保存先・合成ボタンは隠れない
         lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
         self._build_easy()
+        self._build_clip()
         attach_tips(self, extra=[
+            (self.clip_tree, "切り出したい日本語のファイルの一覧です。ここにファイルをドロップして追加できます。"),
+            (self.clip_en_ent, "CMなどが1本にまとまっている、英語版の映像ファイルです。"),
             (self.en_ent, "英語版(きれいな映像)のファイルの場所です。"),
             (self.jp_ent, "日本語吹き替えの音声が入った録画ファイルの場所です。"),
             (self.itree, "登録した指定の一覧です。行をクリックすると、その場所に移動します。"),
@@ -1852,6 +1949,232 @@ class App(_TkBase):
         self.easy_done = tk.Label(r5, text="", anchor="w", fg="#2a7")
         self.easy_done.pack(side="left", padx=10)
         self.open_btn = ttk.Button(r5, text="フォルダを開く", command=self.open_folder)
+
+    # ---------- 切り出し (CMごと) ----------
+    def _build_clip(self):
+        f = self.clipt
+        self.clip_en = tk.StringVar()
+        self.clip_out = tk.StringVar()
+        self.clip_crf = tk.IntVar(value=18)
+        self.clip_files = []
+        pad = {"padx": 12, "pady": 5}
+        tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
+                 text="英語版が1本にまとまっていて、日本語の音声が CM ごとのバラバラのファイルのときに使います。\n"
+                      "日本語のファイルを1本ずつ自動で合わせ、一致した部分だけを英語版から切り出して、日本語の音声をつけて書き出します。\n"
+                      "この切り出しだけは映像を再エンコードします(フレーム単位で切れます)。"
+                      "「かんたん」タブの、映像をそのままコピーする合成は今までどおりです。").pack(fill="x", **pad)
+        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 (1本にまとまったもの) ")
+        c1.pack(fill="x", **pad)
+        r1 = ttk.Frame(c1)
+        r1.pack(fill="x", padx=8, pady=8)
+        self.clip_en_ent = ttk.Entry(r1, textvariable=self.clip_en)
+        self.clip_en_ent.pack(side="left", fill="x", expand=True)
+        ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
+        c2 = ttk.LabelFrame(f, text=" ② 日本語のファイル (CMごと。ここにドロップ、または追加) ")
+        c2.pack(fill="both", expand=True, **pad)
+        r2 = ttk.Frame(c2)
+        r2.pack(fill="both", expand=True, padx=8, pady=6)
+        self.clip_tree = ttk.Treeview(r2, columns=("f", "st"), show="headings", height=6, selectmode="extended")
+        for c, h, w in (("f", "ファイル", 520), ("st", "状態", 520)):
+            self.clip_tree.heading(c, text=h)
+            self.clip_tree.column(c, width=w, anchor="w")
+        self.clip_tree.tag_configure("ok", background="#e6f6ec")
+        self.clip_tree.tag_configure("warn", background="#ffe9c7")
+        self.clip_tree.tag_configure("ng", background="#ffe0e0")
+        self.clip_tree.pack(side="left", fill="both", expand=True)
+        bt = ttk.Frame(r2)
+        bt.pack(side="left", padx=8, anchor="n")
+        ttk.Button(bt, text="追加...", width=10, command=self._clip_add).pack(pady=2)
+        ttk.Button(bt, text="外す", width=10, command=self._clip_remove).pack(pady=2)
+        ttk.Button(bt, text="全部外す", width=10, command=self._clip_clear).pack(pady=2)
+        c3 = ttk.LabelFrame(f, text=" ③ 書き出し ")
+        c3.pack(fill="x", **pad)
+        r3 = ttk.Frame(c3)
+        r3.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(r3, text="保存先フォルダ:").pack(side="left")
+        ttk.Entry(r3, textvariable=self.clip_out).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(r3, text="変更", command=self._clip_pick_out).pack(side="left")
+        r4 = ttk.Frame(c3)
+        r4.pack(fill="x", padx=8, pady=(2, 8))
+        ttk.Label(r4, text="画質 (数字が小さいほど高画質・大きいファイル。通常は 18):").pack(side="left")
+        ttk.Spinbox(r4, from_=12, to=28, width=4, textvariable=self.clip_crf).pack(side="left", padx=6)
+        ttk.Label(r4, text="ファイル名は「日本語ファイル名_jpdub.mkv」になります。", foreground="#667").pack(side="left", padx=12)
+        r5 = ttk.Frame(f)
+        r5.pack(fill="x", **pad)
+        self.clip_btn = ttk.Button(r5, text="切り出しスタート", command=self.run_clip)
+        self.clip_btn.pack(side="left", ipadx=14, ipady=4)
+        self.clip_bar = ttk.Progressbar(r5, mode="determinate", maximum=100)
+        self.clip_bar.pack(side="left", fill="x", expand=True, padx=12)
+        self.clip_msg = tk.Label(f, text="", anchor="w", justify="left", fg="#333", wraplength=1050)
+        self.clip_msg.pack(fill="x", padx=12, pady=(0, 6))
+        self.clip_open = ttk.Button(f, text="フォルダを開く", command=lambda: self._open_dir(self.clip_out.get()))
+        if DND_FILES:
+            for w in (self.clip_tree, c2):
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind("<<Drop>>", self._clip_drop)
+
+    def _open_dir(self, d):
+        try:
+            if sys.platform == "win32":
+                os.startfile(d)  # noqa: S606
+            else:
+                subprocess.Popen(["xdg-open", d])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _clip_pick_en(self):
+        p = filedialog.askopenfilename(title="英語版の映像を選択")
+        if p:
+            self.clip_en.set(p)
+            if not self.clip_out.get():
+                self.clip_out.set(str(Path(p).parent))
+
+    def _clip_pick_out(self):
+        d = filedialog.askdirectory(title="保存先フォルダを選択")
+        if d:
+            self.clip_out.set(d)
+
+    def _clip_add_files(self, files):
+        for p in files:
+            if p and p not in self.clip_files and not p.lower().endswith(".json"):
+                self.clip_files.append(p)
+                self.clip_tree.insert("", "end", iid=str(len(self.clip_files) - 1), values=(Path(p).name, "待機中"))
+
+    def _clip_add(self):
+        self._clip_add_files(list(filedialog.askopenfilenames(title="日本語のファイルを選択 (複数選べます)")))
+
+    def _clip_drop(self, ev):
+        self._clip_add_files(list(self.tk.splitlist(ev.data)))
+
+    def _clip_remove(self):
+        sel = set(self.clip_tree.selection())
+        if not sel:
+            return
+        keep = [p for i, p in enumerate(self.clip_files) if str(i) not in sel]
+        st = {p: self.clip_tree.item(str(i), "values")[1] for i, p in enumerate(self.clip_files)}
+        self._clip_clear()
+        self._clip_add_files(keep)
+        for i, p in enumerate(self.clip_files):
+            self.clip_tree.set(str(i), "st", st[p])
+
+    def _clip_clear(self):
+        self.clip_files = []
+        self.clip_tree.delete(*self.clip_tree.get_children())
+
+    def _clip_set(self, i, text, tag=""):
+        iid = str(i)
+        if self.clip_tree.exists(iid):
+            self.clip_tree.set(iid, "st", text)
+            self.clip_tree.item(iid, tags=(tag,) if tag else ())
+
+    def run_clip(self):
+        en_p, files = self.clip_en.get().strip(), list(self.clip_files)
+        if not en_p or not Path(en_p).exists():
+            messagebox.showinfo("英語版の映像", "英語版の映像を選んでください。")
+            return
+        if not files:
+            messagebox.showinfo("日本語のファイル", "日本語のファイルを追加してください。")
+            return
+        outd = Path(self.clip_out.get().strip() or Path(en_p).parent)
+        self.clip_out.set(str(outd))
+        outs = [outd / (Path(p).stem + "_jpdub.mkv") for p in files]
+        over = False
+        if any(o.exists() for o in outs):
+            over = messagebox.askyesno("上書き確認", "同じ名前のファイルが既にあります。上書きしますか?\n(「いいえ」だと、その分は飛ばします)")
+        try:
+            crf = int(self.clip_crf.get())
+        except (tk.TclError, ValueError):
+            crf = 18
+        crf = max(0, min(51, crf))
+        ast = self.jp_ast.get()
+        self.clip_btn.state(["disabled"])
+        self.clip_open.pack_forget()
+        self.clip_msg.config(text="英語版を読み込んでいます…", fg="#333")
+        self.clip_bar.config(value=0)
+        n = len(files)
+
+        def work():
+            try:
+                en = Media(en_p, 0)
+            except Exception as ex:  # noqa: BLE001
+                self.q.put(lambda: (self.clip_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
+                                    self.clip_btn.state(["!disabled"])))
+                return
+            done = 0
+            res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
+            for i, (jp_p, out) in enumerate(zip(files, outs)):
+                def st(text, tag="", i=i):
+                    self.q.put(lambda: self._clip_set(i, text, tag))
+
+                def prog(fr, msg, i=i):
+                    self.q.put(lambda: (self.clip_bar.config(value=(i + fr * 0.5) / n * 100),
+                                        self.clip_msg.config(text=f"({i + 1}/{n}) {Path(jp_p).name}: {msg}", fg="#333")))
+                if out.exists() and not over:
+                    st("飛ばしました (同じ名前のファイルがあります)", "warn")
+                    res["skip"] += 1
+                    continue
+                try:
+                    st("音を照合しています…")
+                    jp = Media(jp_p, ast)
+                    segs, info = auto_align(en, jp, prog)
+                    if not info["ok"] or not segs:
+                        st("× " + (info.get("msg") or "一致する場所が見つかりませんでした"), "ng")
+                        res["ng"] += 1
+                        continue
+                    c0, c1 = segs[0]["en_start"], segs[-1]["en_end"]
+                    flag = "・".join(sorted({s["flag"] for s in segs if s.get("flag")}))
+                    st("切り出して書き出しています…")
+                    self.q.put(lambda i=i: self.clip_bar.config(value=(i + 0.6) / n * 100))
+                    sg = []
+                    for s in segs:
+                        d = {"en_start": round(s["en_start"], 4), "en_end": round(s["en_end"], 4),
+                             "jp_start": round(s["jp_start"], 4), "fit": s.get("fit", "stretch")}
+                        if s["jp_end"] is not None:
+                            d["jp_end"] = round(s["jp_end"], 4)
+                        sg.append(d)
+                    proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
+                            "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k", "segments": sg,
+                            "clip": {"start": round(c0, 4), "end": round(c1, 4), "crf": crf, "preset": "medium"}}
+                    tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
+                    try:
+                        pj = tmpd / "project.json"
+                        pj.write_text(json.dumps(proj, ensure_ascii=False), encoding="utf-8")
+                        buf = io.StringIO()
+                        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                            main([str(pj)])
+                    finally:
+                        shutil.rmtree(tmpd, ignore_errors=True)
+                    span = f"英語版 {self.short(c0)}〜{self.short(c1)} を切り出し"
+                    if flag:
+                        st(f"✔ 完了 (要確認: {flag}) {span}", "warn")
+                        res["warn"] += 1
+                    else:
+                        st(f"✔ 完了 {span}", "ok")
+                        res["ok"] += 1
+                except subprocess.CalledProcessError as ex:
+                    st("× ffmpegでエラー: " + (ex.stderr or "")[-120:].replace("\n", " "), "ng")
+                    res["ng"] += 1
+                except Exception as ex:  # noqa: BLE001
+                    st(f"× エラー: {ex}", "ng")
+                    res["ng"] += 1
+                done += 1
+                self.q.put(lambda i=i: self.clip_bar.config(value=(i + 1) / n * 100))
+
+            def fin():
+                self.clip_btn.state(["!disabled"])
+                bits = [f"完了 {res['ok'] + res['warn']} 本"]
+                if res["warn"]:
+                    bits.append(f"うち要確認 {res['warn']} 本(聞いて確かめてください)")
+                if res["ng"]:
+                    bits.append(f"失敗 {res['ng']} 本")
+                if res["skip"]:
+                    bits.append(f"飛ばした {res['skip']} 本")
+                self.clip_msg.config(text="✔ " + "、".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
+                if res["ok"] + res["warn"]:
+                    self.clip_open.pack(anchor="w", padx=12, pady=(0, 6))
+                self.say("切り出し完了")
+            self.q.put(fin)
+        threading.Thread(target=work, daemon=True).start()
 
     @staticmethod
     def short(t):
