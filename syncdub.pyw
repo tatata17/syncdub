@@ -498,7 +498,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.9"
+APP_VERSION = "2026.11.09.10"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1272,6 +1272,121 @@ def auto_align(en, jp, progress=lambda f, m: None):
 
 # ------------------------------------------------------------------ 指定 → 区間の計算
 
+def split_commercials(path, min_len=4.0):
+    """英語版の長い映像を、黒い画面+無音を目印にCM(など)1本ずつに切り分ける。[(開始, 終了)] を返す。"""
+    r = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-vf", "blackdetect=d=0.08:pix_th=0.1",
+         "-af", "silencedetect=n=-50dB:d=0.15", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace", **NOWIN)
+    txt = r.stderr
+    blacks = [(float(a), float(b)) for a, b in re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", txt)]
+    sil, cur = [], None
+    for m in re.finditer(r"silence_(start|end): (-?[\d.]+)", txt):
+        if m.group(1) == "start":
+            cur = float(m.group(2))
+        elif cur is not None:
+            sil.append((cur, float(m.group(2))))
+            cur = None
+    if cur is not None:
+        sil.append((cur, 1e9))
+    dur = 0.0
+    m = re.findall(r"Duration: (\d+):(\d+):([\d.]+)", txt)
+    if m:
+        h, mi, se = m[0]
+        dur = int(h) * 3600 + int(mi) * 60 + float(se)
+    gaps = []
+    for b0, b1 in blacks:
+        has_sil = any(s0 < b1 + 0.3 and s1 > b0 - 0.3 for s0, s1 in sil)
+        if has_sil or b1 - b0 >= 0.4:
+            gaps.append((b0, b1))
+    out, t = [], 0.0
+    for b0, b1 in gaps:
+        if b0 - t >= min_len:
+            out.append((t, b0))
+        t = max(t, b1)
+    if dur - t >= min_len:
+        out.append((t, dur))
+    return out
+
+
+def round5(sec):
+    """秒数を5秒刻みに四捨五入 (28→30, 12→10, 13→15)。最小5。"""
+    return max(5, int(sec / 5.0 + 0.5) * 5)
+
+
+def find_in_recording(cms, jp, progress=lambda f: None, thr=9.0):
+    """cms: [(音声 float32(SR), ...)]。録画(jp, Media)の中から各CMの音と一致する場所を全部探す。
+    戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 前半/後半とも一致か}, ...] (cms と同じ順)]"""
+    fs = SR / 2
+
+    def dec(x):
+        n = len(x) // 2 * 2
+        return x[:n].reshape(-1, 2).mean(1).astype(np.float64)
+    jx = dec(jp.x)
+    cx = [dec(c) for c in cms]
+    Lmax = max(len(c) for c in cx)
+    jx = np.concatenate([jx, np.zeros(Lmax)])  # 録画の最後で切れているCMも探せるように
+    N = 1 << int(np.ceil(np.log2(max(Lmax * 2, 1 << 19))))
+    hop = N - Lmax
+    f = np.fft.rfftfreq(N, 1 / fs)
+    band = (f > 250) & (f < fs * 0.48)
+    Fc = [np.conj(np.fft.rfft(c - c.mean(), N)).astype(np.complex64) for c in cx]
+    res = [[] for _ in cx]
+    nchunk = max(1, int(np.ceil(max(len(jx) - Lmax, 1) / hop)))
+    for ci in range(nchunk):
+        s0 = ci * hop
+        seg = jx[s0: s0 + N]
+        if len(seg) < 2 * fs:
+            break
+        Fj = np.fft.rfft(seg - seg.mean(), N)
+        for k, c in enumerate(cx):
+            L = len(c)
+            valid = len(seg) - L + 1
+            if valid < 1:
+                continue
+            G = Fj * Fc[k]
+            G = G / (np.abs(G) + 1e-9) * band
+            cc = np.fft.irfft(G, N)[:valid]
+            mu, sd = float(cc.mean()), float(cc.std()) + 1e-9
+            w = cc.copy()
+            for _ in range(12):
+                i = int(w.argmax())
+                z = (w[i] - mu) / sd
+                if z < thr:
+                    break
+                res[k].append({"t": jp.a_origin + (s0 + i) / fs, "z": float(z)})
+                w[max(0, i - L): i + L] = -1e9
+        progress((ci + 1) / nchunk)
+    # 重なった窓で同じ場所が二重に出た分をまとめ、前半/後半それぞれでも一致するか確かめる
+    for k, lst in enumerate(res):
+        lst.sort(key=lambda d: -d["z"])
+        keep = []
+        for d in lst:
+            if all(abs(d["t"] - e["t"]) > 0.5 for e in keep):
+                keep.append(d)
+        c = cx[k]
+        for d in keep:
+            ok = True
+            i0 = int(round((d["t"] - jp.a_origin) * fs))
+            half = len(c) // 2
+            for a0 in (0, half):
+                a = c[a0: a0 + half]
+                lo = i0 + a0 - int(3 * fs)
+                b = jx[max(lo, 0): i0 + a0 + half + int(3 * fs)]
+                if len(a) < fs or len(b) <= len(a):
+                    continue
+                cc2 = _phat_local(a, b, fs)
+                j = int(cc2.argmax())
+                zz = (cc2[j] - cc2.mean()) / (cc2.std() + 1e-9)
+                if zz < 4.0 or abs((max(lo, 0) + j) - (i0 + a0)) / fs > 0.15:
+                    ok = False
+            d["ok"] = ok
+        keep = [d for d in keep if d["z"] >= 14 or (d["z"] >= thr and d["ok"])]
+        keep.sort(key=lambda d: d["t"])
+        res[k] = keep
+    return res
+
+
 def build_from_items(items, en_rng, jp_rng):
     """指定(同じ場面/CM/暗転・長さ違い/カット)から、エンジン用の区間リストを組み立てる。
 
@@ -1499,6 +1614,8 @@ TIPS = {
     "追加...": "日本語のファイルを選んで一覧に足します(複数まとめて選べます)。",
     "外す": "一覧で選んだファイルを外します(ファイルそのものは消えません)。",
     "全部外す": "一覧を空にします。",
+    "CMを切り分ける": "英語版の映像を、黒い画面と無音を目印にCM1本ずつに分けて一覧にします。",
+    "探してスタート": "日本語の録画を1本ずつ調べ、英語版の各CMと同じ音の場所を全部探して、日本語音声つきで書き出します。",
     "切り出しスタート": "一覧のファイルを1本ずつ自動で合わせ、一致した部分だけを英語版から切り出して書き出します。",
 }
 
@@ -1916,9 +2033,11 @@ class App(_TkBase):
         self._build_header()
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=4, pady=2)
-        self.easy, self.manual, self.clipt = ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb)
+        self.easy, self.manual, self.clipt, self.findt = (ttk.Frame(self.nb), ttk.Frame(self.nb), ttk.Frame(self.nb),
+                                                          ttk.Frame(self.nb))
         self.nb.add(self.easy, text="   かんたん (1本に合わせる)   ")
         self.nb.add(self.clipt, text="   切り出し (長い映像から一部だけ)   ")
+        self.nb.add(self.findt, text="   録画から探す (CMの日本語版を集める)   ")
         self.nb.add(self.manual, text="   手動調整 (細かく直す)   ")
         self._hdr.lift()
         top = ttk.Frame(self.manual, padding=6)
@@ -2059,6 +2178,7 @@ class App(_TkBase):
         lf.pack(side="top", fill="both", expand=True, padx=6, pady=(4, 0))
         self._build_easy()
         self._build_clip()
+        self._build_find()
         attach_tips(self, extra=[
             (self.clip_tree, "切り出したい日本語のファイルの一覧です。ここにファイルをドロップして追加できます。"),
             (self.clip_en_ent, "元になる、長い(まとまった)英語版の映像ファイルです。"),
@@ -2098,7 +2218,7 @@ class App(_TkBase):
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
                  text="日本語吹き替えの音声を、きれいな英語版の映像に合わせて1本の動画にします。\n"
                       "手順:  ① ファイルを選ぶ  →  ② 自動で合わせる  →  ③ 結果を確認  →  ④ 合成する\n"
-                      "(英語版が長い1本で、日本語がCMや番組の一部など短いときは「切り出し」タブ、うまく合わないときは「手動調整」タブを使います)"
+                      "(英語版が長い1本で、日本語がCMや番組の一部など短いときは「切り出し」タブ、日本語の録画が大量にあって探したいときは「録画から探す」タブ、\n うまく合わないときは「手動調整」タブを使います)"
                  ).pack(fill="x", **pad)
 
         # ① ファイルを選ぶ
@@ -2255,6 +2375,306 @@ class App(_TkBase):
         r5.pack(side="bottom", fill="x", **pad)
         c3.pack(side="bottom", fill="x", **pad)
         c2.pack(side="top", fill="both", expand=True, **pad)
+
+    # ---------- 録画から探す ----------
+    VIDEO_EXT = (".ts", ".m2ts", ".mts", ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".mpg", ".mpeg", ".m4v", ".flv", ".webm")
+
+    def _build_find(self):
+        f = self.findt
+        self.find_out = tk.StringVar()
+        self.find_crf = tk.IntVar(value=18)
+        self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
+        self.find_files, self.find_cms = [], []
+        self.en_var.trace_add("write", lambda *a: (not self.find_out.get().strip() and self.en_var.get().strip()
+                                                    and self.find_out.set(str(Path(self.en_var.get().strip()).parent))))
+        pad = {"padx": 12, "pady": 5}
+        tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
+                 text="英語版のCM(1本につながったものでもOK)と同じ音を、日本語のテレビ録画の中から探して、日本語音声つきで書き出します。\n"
+                      "同じCMが何回流れていても全部書き出します。ファイル名は「30秒_英語版名_CM01(録画名).mkv」の形です(秒数は5秒きざみ)。\n"
+                      "書き出しは映像を再エンコードします(CMの切れ目をフレーム単位で合わせるため)。").pack(fill="x", **pad)
+        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 → CMを切り分ける ")
+        c1.pack(fill="x", **pad)
+        r1 = ttk.Frame(c1)
+        r1.pack(fill="x", padx=8, pady=(8, 4))
+        self.find_en_ent = ttk.Entry(r1, textvariable=self.en_var)
+        self.find_en_ent.pack(side="left", fill="x", expand=True)
+        ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
+        self.find_split_btn = ttk.Button(r1, text="CMを切り分ける", command=self.run_split)
+        self.find_split_btn.pack(side="left")
+        r1b = ttk.Frame(c1)
+        r1b.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        self.cm_tree = ttk.Treeview(r1b, columns=("n", "t", "len", "sec"), show="headings", height=4, selectmode="extended")
+        for c, h, w in (("n", "CM", 80), ("t", "英語版の時間", 300), ("len", "長さ", 160), ("sec", "名前に付く秒数", 200)):
+            self.cm_tree.heading(c, text=h)
+            self.cm_tree.column(c, width=w, anchor="center")
+        self.cm_tree.pack(side="left", fill="both", expand=True)
+        b1 = ttk.Frame(r1b)
+        b1.pack(side="left", padx=8, anchor="n")
+        ttk.Button(b1, text="外す", width=10, command=self._cm_remove).pack(pady=2)
+        self.cm_note = ttk.Label(c1, text="「CMを切り分ける」を押すと、ここに一覧が出ます。間違って分けた所は選んで「外す」で消せます。", foreground="#667")
+        self.cm_note.pack(anchor="w", padx=10, pady=(0, 6))
+
+        c2 = ttk.LabelFrame(f, text=" ② 日本語の録画 (複数OK。ファイルやフォルダをここにドロップ、または追加) ")
+        r2 = ttk.Frame(c2)
+        r2.pack(fill="both", expand=True, padx=8, pady=6)
+        self.find_tree = ttk.Treeview(r2, columns=("f", "st"), show="headings", height=5, selectmode="extended")
+        for c, h, w in (("f", "録画ファイル", 520), ("st", "状態", 520)):
+            self.find_tree.heading(c, text=h)
+            self.find_tree.column(c, width=w, anchor="w")
+        for tg, bg in (("ok", "#e6f6ec"), ("warn", "#ffe9c7"), ("ng", "#ffe0e0")):
+            self.find_tree.tag_configure(tg, background=bg)
+        self.find_tree.pack(side="left", fill="both", expand=True)
+        bt = ttk.Frame(r2)
+        bt.pack(side="left", padx=8, anchor="n")
+        ttk.Button(bt, text="追加...", width=10, command=self._find_add).pack(pady=2)
+        ttk.Button(bt, text="フォルダ...", width=10, command=self._find_add_dir).pack(pady=2)
+        ttk.Button(bt, text="外す", width=10, command=self._find_remove).pack(pady=2)
+        ttk.Button(bt, text="全部外す", width=10, command=self._find_clear).pack(pady=2)
+
+        c3 = ttk.LabelFrame(f, text=" ③ 書き出し ")
+        r3 = ttk.Frame(c3)
+        r3.pack(fill="x", padx=8, pady=(8, 2))
+        ttk.Label(r3, text="保存先フォルダ:").pack(side="left")
+        ttk.Entry(r3, textvariable=self.find_out).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(r3, text="変更", command=lambda: (lambda d: d and self.find_out.set(d))(filedialog.askdirectory(title="保存先フォルダを選択"))).pack(side="left")
+        r4 = ttk.Frame(c3)
+        r4.pack(fill="x", padx=8, pady=(2, 8))
+        ttk.Label(r4, text="画質 (通常は 18):").pack(side="left")
+        ttk.Spinbox(r4, from_=12, to=28, width=4, textvariable=self.find_crf).pack(side="left", padx=6)
+        ttk.Label(r4, text="映像の形式:").pack(side="left", padx=(18, 4))
+        self.find_codec_cb = ttk.Combobox(r4, textvariable=self.find_codec, state="readonly", width=20,
+                                          values=("自動 (HEVC優先)", "H.264 (どの機器でも再生しやすい)"))
+        self.find_codec_cb.pack(side="left")
+        r5 = ttk.Frame(f)
+        self.find_btn = ttk.Button(r5, text="探してスタート", command=self.run_find)
+        self.find_btn.pack(side="left", ipadx=14, ipady=4)
+        self.find_bar = ttk.Progressbar(r5, mode="determinate", maximum=100)
+        self.find_bar.pack(side="left", fill="x", expand=True, padx=12)
+        self.find_msg = tk.Label(f, text="", anchor="w", justify="left", fg="#333", wraplength=1050)
+        self.find_open = ttk.Button(r5, text="フォルダを開く", command=lambda: self._open_dir(self.find_out.get()))
+        self.find_msg.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        r5.pack(side="bottom", fill="x", **pad)
+        c3.pack(side="bottom", fill="x", **pad)
+        c1.pack_forget()
+        c1.pack(side="top", fill="x", **pad)
+        c2.pack(side="top", fill="both", expand=True, **pad)
+
+    def _cm_fill(self):
+        self.cm_tree.delete(*self.cm_tree.get_children())
+        for i, (a, b) in enumerate(self.find_cms):
+            self.cm_tree.insert("", "end", iid=str(i), values=(f"CM{i + 1:02d}", f"{self.short(a)} 〜 {self.short(b)}",
+                                                                f"{b - a:.1f} 秒", f"{round5(b - a)} 秒"))
+
+    def _cm_remove(self):
+        sel = {int(i) for i in self.cm_tree.selection()}
+        if sel:
+            self.find_cms = [c for i, c in enumerate(self.find_cms) if i not in sel]
+            self._cm_fill()
+
+    def run_split(self):
+        en_p = self.en_var.get().strip()
+        if not en_p or not Path(en_p).exists():
+            messagebox.showinfo("英語版の映像", "英語版の映像を選んでください。")
+            return
+        self.find_split_btn.state(["disabled"])
+        self.cm_note.config(text="CMを探しています…", foreground="#333")
+
+        def work():
+            try:
+                cms = split_commercials(en_p)
+            except Exception as ex:  # noqa: BLE001
+                self.q.put(lambda: (self.cm_note.config(text=f"⚠ 調べられませんでした: {ex}", foreground="#b33"),
+                                    self.find_split_btn.state(["!disabled"])))
+                return
+
+            def done():
+                self.find_cms = cms
+                self._cm_fill()
+                self.find_split_btn.state(["!disabled"])
+                if cms:
+                    self.cm_note.config(text=f"{len(cms)} 本に分けました。違う所があれば選んで「外す」。", foreground="#1f6f43")
+                else:
+                    self.cm_note.config(text="黒い画面で区切られた部分が見つかりませんでした。映像全体を1本として探します。", foreground="#8a5a00")
+            self.q.put(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _find_add_files(self, files):
+        for p in files:
+            pp = Path(p)
+            cand = sorted(x for x in pp.rglob("*") if x.suffix.lower() in self.VIDEO_EXT) if pp.is_dir() else [pp]
+            for x in cand:
+                x = str(x)
+                if x not in self.find_files and not x.lower().endswith(".json"):
+                    self.find_files.append(x)
+                    self.find_tree.insert("", "end", iid=str(len(self.find_files) - 1), values=(Path(x).name, "待機中"))
+
+    def _find_add(self):
+        self._find_add_files(list(filedialog.askopenfilenames(title="日本語の録画を選択 (複数選べます)")))
+
+    def _find_add_dir(self):
+        d = filedialog.askdirectory(title="録画が入っているフォルダを選択 (中のフォルダも探します)")
+        if d:
+            self._find_add_files([d])
+
+    def _find_remove(self):
+        sel = set(self.find_tree.selection())
+        if not sel:
+            return
+        keep = [p for i, p in enumerate(self.find_files) if str(i) not in sel]
+        self._find_clear()
+        self._find_add_files(keep)
+
+    def _find_clear(self):
+        self.find_files = []
+        self.find_tree.delete(*self.find_tree.get_children())
+
+    def _find_set(self, i, text, tag=""):
+        iid = str(i)
+        if self.find_tree.exists(iid):
+            self.find_tree.set(iid, "st", text)
+            self.find_tree.item(iid, tags=(tag,) if tag else ())
+
+    def run_find(self):
+        en_p, files = self.en_var.get().strip(), list(self.find_files)
+        if not en_p or not Path(en_p).exists():
+            messagebox.showinfo("英語版の映像", "英語版の映像を選んでください。")
+            return
+        if not files:
+            messagebox.showinfo("日本語の録画", "日本語の録画を追加してください。")
+            return
+        outd = Path(self.find_out.get().strip() or Path(en_p).parent)
+        self.find_out.set(str(outd))
+        try:
+            crf = max(0, min(51, int(self.find_crf.get())))
+        except (tk.TclError, ValueError):
+            crf = 18
+        codec = "h264" if self.find_codec.get().startswith("H.264") else "auto"
+        ast = self.jp_ast.get()
+        cms_ts = list(self.find_cms)
+        self.find_btn.state(["disabled"])
+        self.find_open.pack_forget()
+        self.find_msg.config(text="英語版を読み込んでいます…", fg="#333")
+        self.find_bar.config(value=0)
+        n = len(files)
+
+        def safe(t):
+            return re.sub(r'[\\/:*?"<>|]', "_", t)
+
+        def work():
+            try:
+                en = Media(en_p, 0)
+                if not cms_ts:
+                    cl = [(0.0, en.end)]
+                else:
+                    cl = cms_ts
+                cms = [en.slice(a, b) for a, b in cl]
+            except Exception as ex:  # noqa: BLE001
+                self.q.put(lambda: (self.find_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
+                                    self.find_btn.state(["!disabled"])))
+                return
+            outd.mkdir(parents=True, exist_ok=True)
+            found = [0] * len(cl)
+            res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
+            en_stem = safe(Path(en_p).stem)
+            for i, jp_p in enumerate(files):
+                def st(text, tag="", i=i):
+                    self.q.put(lambda: self._find_set(i, text, tag))
+
+                def prog(fr, i=i):
+                    self.q.put(lambda: (self.find_bar.config(value=(i + fr * 0.5) / n * 100),
+                                        self.find_msg.config(text=f"({i + 1}/{n}) {Path(jp_p).name}: 音を探しています…", fg="#333")))
+                try:
+                    st("音を探しています…")
+                    jp = Media(jp_p, ast)
+                    hits = find_in_recording(cms, jp, prog)
+                    jo = []
+                    for k, hl in enumerate(hits):
+                        L = cl[k][1] - cl[k][0]
+                        for h in hl:
+                            jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L})
+                    # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
+                    jo.sort(key=lambda d: -d["z"])
+                    keep = []
+                    for d in jo:
+                        clash = [e for e in keep if min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])]
+                        if clash:
+                            for e in clash:
+                                e["clash"] = True
+                            continue
+                        keep.append(d)
+                    keep.sort(key=lambda d: d["t"])
+                    del jp
+                    if not keep:
+                        st("見つかりませんでした", "")
+                        continue
+                    nth = {}
+                    nw = nwarn = 0
+                    for j, d in enumerate(keep):
+                        k = d["k"]
+                        a, b = cl[k]
+                        nth[k] = nth.get(k, 0) + 1
+                        tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
+                        name = f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}{tail}({safe(Path(jp_p).stem)}).mkv"
+                        out = outd / name
+                        if out.exists() or out.with_name(out.stem.replace("(", "【要確認】(", 1) + ".mkv").exists():
+                            res["skip"] += 1
+                            continue
+                        st(f"書き出しています… ({j + 1}/{len(keep)})")
+                        self.q.put(lambda i=i, j=j, m=len(keep): self.find_bar.config(value=(i + 0.5 + 0.5 * j / m) / n * 100))
+                        proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
+                                "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
+                                "segments": [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}],
+                                "clip": {"start": round(a, 4), "end": round(b, 4), "crf": crf, "preset": "medium", "codec": codec}}
+                        tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
+                        try:
+                            pj = tmpd / "project.json"
+                            pj.write_text(json.dumps(proj, ensure_ascii=False), encoding="utf-8")
+                            buf = io.StringIO()
+                            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                                main([str(pj)])
+                        finally:
+                            shutil.rmtree(tmpd, ignore_errors=True)
+                        found[k] += 1
+                        nw += 1
+                        if not d["ok"] or d.get("clash"):
+                            nwarn += 1
+                            res["warn"] += 1
+                            try:
+                                out.rename(out.with_name(out.stem.replace("(", "【要確認】(", 1) + ".mkv"))
+                            except OSError:
+                                pass
+                        else:
+                            res["ok"] += 1
+                    msg = f"✔ {nw} 件書き出しました"
+                    if nwarn:
+                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている)"
+                    st(msg, "warn" if nwarn else "ok")
+                except subprocess.CalledProcessError as ex:
+                    st("× ffmpegでエラー: " + (ex.stderr or "")[-120:].replace("\n", " "), "ng")
+                    res["ng"] += 1
+                except Exception as ex:  # noqa: BLE001
+                    st(f"× エラー: {ex}", "ng")
+                    res["ng"] += 1
+                self.q.put(lambda i=i: self.find_bar.config(value=(i + 1) / n * 100))
+
+            def fin():
+                self.find_btn.state(["!disabled"])
+                bits = [f"書き出し {res['ok'] + res['warn']} 本"]
+                if res["warn"]:
+                    bits.append(f"うち要確認 {res['warn']} 本(名前に【要確認】が付いています)")
+                if res["ng"]:
+                    bits.append(f"失敗 {res['ng']} 録画")
+                if res["skip"]:
+                    bits.append(f"同じ名前があって飛ばした {res['skip']} 本")
+                miss = [f"CM{k + 1:02d}" for k, c in enumerate(found) if c == 0]
+                if miss and len(cl) > 1:
+                    bits.append("どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
+                self.find_msg.config(text="✔ " + "。".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
+                if res["ok"] + res["warn"]:
+                    self.find_open.pack(side="left", padx=8)
+                self.say("探索完了")
+            self.q.put(fin)
+        threading.Thread(target=work, daemon=True).start()
 
     def _tab_changed(self, _e=None):
         """切り出しタブを開いたとき、「かんたん」タブで選んだ日本語ファイルが一覧になければ入れる(ファイル指定をタブ間で共通に)。"""
@@ -2627,7 +3047,7 @@ class App(_TkBase):
         if not DND_FILES:
             self.say("ドラッグ&ドロップを使うには: pip install tkinterdnd2 (なくても動作します)")
             return
-        targets = {self: None, self.clip_en_ent: "clipen", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
+        targets = {self: None, self.clip_en_ent: "clipen", self.find_en_ent: "clipen", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
                    self.jp_ent: "jp", self.tr["jp"]: "jp", self.pv["jp"]: "jp"}
         for k, z in self.zone.items():
             for w in (z["frame"], z["title"], z["name"]):
@@ -2644,6 +3064,9 @@ class App(_TkBase):
             self.clip_en.set(files[0])
             if not self.clip_out.get():
                 self.clip_out.set(str(Path(files[0]).parent))
+            return
+        if self.nb.select() == str(self.findt):  # 録画から探すタブ: ファイルもフォルダも日本語の録画として追加
+            self._find_add_files(files)
             return
         if self.nb.select() == str(self.clipt):  # 切り出しタブが開いているときは、どこにドロップしても日本語ファイルの追加
             self._clip_add_files(files)

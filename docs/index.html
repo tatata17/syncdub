@@ -206,12 +206,13 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
     <li><a href="#install"><span class="tn">01</span>必要なものと導入</a></li>
     <li><a href="#basic"><span class="tn">02</span>かんたんな使い方</a></li>
     <li><a href="#clip"><span class="tn">03</span>切り出し(一致部分だけ)の使い方</a></li>
-    <li><a href="#manual"><span class="tn">04</span>手動調整の使い方</a></li>
-    <li><a href="#keys"><span class="tn">05</span>ショートカット</a></li>
-    <li><a href="#update"><span class="tn">06</span>更新のしかた</a></li>
-    <li><a href="#trouble"><span class="tn">07</span>困ったとき</a></li>
-    <li><a href="#files"><span class="tn">08</span>ファイルの場所</a></li>
-    <li><a href="#history"><span class="tn">09</span>更新履歴</a></li>
+    <li><a href="#find"><span class="tn">04</span>録画から探す(CMの日本語版を集める)</a></li>
+    <li><a href="#manual"><span class="tn">05</span>手動調整の使い方</a></li>
+    <li><a href="#keys"><span class="tn">06</span>ショートカット</a></li>
+    <li><a href="#update"><span class="tn">07</span>更新のしかた</a></li>
+    <li><a href="#trouble"><span class="tn">08</span>困ったとき</a></li>
+    <li><a href="#files"><span class="tn">09</span>ファイルの場所</a></li>
+    <li><a href="#history"><span class="tn">10</span>更新履歴</a></li>
   </ol>
 </nav>
 
@@ -278,7 +279,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 
 <section id="clip">
  <h2><span class="n">03</span>切り出し(一致部分だけ)の使い方</h2>
- <p>英語版の映像が<b>長い1本</b>で、日本語の音声が<b>短いファイル</b>(CM、番組の一部、コーナーなど)のときに使う、「切り出し (一致部分だけ)」タブです。英語版を手で分割しなくても、日本語ファイルに一致した部分だけが、1本ずつの mkv になります。CMに限らず、日本語ファイルが英語版の一部に当たるものなら使えます。</p>
+ <p>英語版の映像が<b>長い1本</b>で、日本語の音声が<b>短いファイル</b>(CM、番組の一部、コーナーなど)のときに使う、「切り出し (長い映像から一部だけ)」タブです。英語版を手で分割しなくても、日本語ファイルに一致した部分だけが、1本ずつの mkv になります。CMに限らず、日本語ファイルが英語版の一部に当たるものなら使えます。</p>
  <ol class="steps">
   <li><strong>英語版の映像を選ぶ</strong>1本にまとまったファイルを選びます。</li>
   <li><strong>日本語のファイルを入れる</strong>一覧にドロップ(または「追加...」)します。複数まとめて入れられます。</li>
@@ -291,8 +292,22 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
  <div class="note"><b class="lb">ヒント</b>音が少ない(声だけ)の場面は、見つからないことがあります。そのときは、そのファイルを「かんたん」タブか「手動調整」タブで扱ってください。</div>
 </section>
 
+<section id="find">
+ <h2><span class="n">04</span>録画から探す(CMの日本語版を集める)の使い方</h2>
+ <p>日本語のテレビ録画が<b>たくさんあって、どこにどのCMがあるか分からない</b>ときに使う、「録画から探す」タブです。英語版のCMと同じ音を録画の中から探し、見つかった所を日本語の音声つきで、1本ずつ書き出します。英語版は、CMが何本もつながった1本のままで構いません。</p>
+ <ol class="steps">
+  <li><strong>英語版を選んで「CMを切り分ける」</strong>黒い画面と無音を目印に、CM1本ずつに分けた一覧が出ます。分け方が違う所は、選んで「外す」で消せます。</li>
+  <li><strong>日本語の録画を入れる</strong>ファイルやフォルダをドロップ(または「追加...」「フォルダ...」)します。フォルダは中のフォルダも探します。</li>
+  <li><strong>探してスタート</strong>保存先フォルダを決めてボタンを押します。録画を1本ずつ調べ、見つかった分から順に書き出します。</li>
+ </ol>
+ <p>同じCMが同じ録画に何回あっても、別の録画にあっても、全部書き出します。ファイル名は <b>30秒_英語版名_CM01(録画名).mkv</b> の形です。秒数はCMの長さを5秒きざみに四捨五入したもの(28秒→30秒、12秒→10秒)、末尾のかっこは元の録画のファイル名です。同じ録画に同じCMが複数あるときは「_1回目」「_2回目」が付きます。</p>
+ <div class="warn"><b class="lb">注意</b>映像は<b>再エンコード</b>します(CMの切れ目をフレーム単位で合わせるため)。録画が多いと時間がかかるので、一晩かけるつもりで使ってください。</div>
+ <p><b>要確認のもの。</b>CMの一部だけが一致した場合(放送で前後が欠けているなど)や、同じ場所が別のCMとも似ている場合は、ファイル名に「【要確認】」が付きます。聞いて確かめてください。終わったあと、どの録画にも見つからなかったCMも表示されます。</p>
+ <div class="note"><b class="lb">ヒント</b>CMの切り分けは、黒い画面がないつなぎ目や、CMの中に暗転がある場合は、うまく分かれないことがあります。一覧を見て、おかしければ「切り出し」タブで1本ずつ試してください。</div>
+</section>
+
 <section id="manual">
- <h2><span class="n">04</span>手動調整の使い方</h2>
+ <h2><span class="n">05</span>手動調整の使い方</h2>
  <p>自動でうまくいかないときや、自分で細かく決めたいときに使う、「手動調整」タブです。上が英語版、下が日本語の録画の波形です。</p>
  <div class="mock pad" role="img" aria-label="手動調整画面の図(イメージ)">
   <div class="tr"><div class="wave"></div>
@@ -336,7 +351,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="keys">
- <h2><span class="n">05</span>ショートカット</h2>
+ <h2><span class="n">06</span>ショートカット</h2>
  <div class="table-wrap"><table>
   <tr><th>キー</th><th>動き</th></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す</td></tr>
@@ -353,7 +368,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="update">
- <h2><span class="n">06</span>更新のしかた</h2>
+ <h2><span class="n">07</span>更新のしかた</h2>
  <ul>
   <li>起動時に新しい版があるか自動で確認します(右上の「更新・設定」メニューで切り替え)。同じメニューの「更新を確認」で手動でも確認できます。</li>
   <li>更新すると、旧版は <code>syncdub_backups</code> フォルダに残ります(5つまで)。</li>
@@ -362,7 +377,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="trouble">
- <h2><span class="n">07</span>困ったとき</h2>
+ <h2><span class="n">08</span>困ったとき</h2>
  <div class="table-wrap"><table>
   <tr><th>症状</th><th>原因と対処</th></tr>
   <tr><td>読み込めない・エラーが出る</td><td>ffmpeg / ffprobe が PATH にない可能性があります(「01 必要なものと導入」の「ffmpeg の入れかた」を参照)。<code>ffmpeg -version</code> を確認してください。</td></tr>
@@ -381,7 +396,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="files">
- <h2><span class="n">08</span>ファイルの場所</h2>
+ <h2><span class="n">09</span>ファイルの場所</h2>
  <div class="table-wrap"><table>
   <tr><th>ファイル</th><th>内容</th></tr>
   <tr><td><code>syncdub.pyw</code></td><td>本体(これ1つで動きます)</td></tr>
@@ -393,7 +408,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
 </section>
 
 <section id="history">
- <h2><span class="n">09</span>更新履歴</h2>
+ <h2><span class="n">10</span>更新履歴</h2>
  <p>新しい順です。同じ日の更新はまとめています。過去の日付は、クリックで開きます。</p>
  <div id="cl"><p class="muted">読み込んでいます…</p></div>
  <noscript><p><a href="https://github.com/tatata17/syncdub/blob/main/docs/changelog.json">更新履歴(GitHub)</a></p></noscript>
