@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.21"
+APP_VERSION = "2026.11.09.22"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -897,7 +897,7 @@ def _pick_offset_by_video(en, jp, js, dur, offs, offs_z, own, e_dur):
     return best[0], best[1], own_v, res
 
 
-VID_MIN = 0.45   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなす(間違いは0.18以下、本物は0.75以上だった)
+VID_MIN = 0.62   # 映像の似かた(相関)がこれ未満なら「映像が合わない」とみなして書き出さない(BGMだけ同じ別CMは0.61以下、本物は0.67以上だった)
 VID_OK = 0.70    # これ以上なら映像が合っているとみなし、音の「一部だけ一致」「別のCMとも似ている」の要確認は付けない
 
 
@@ -1466,7 +1466,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 5     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 6     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1499,7 +1499,7 @@ def _verify_hit(c, jx, i0, fs):
             "strong": ok and npass >= max(need, (n + 1) // 2)}
 
 
-def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5):
+def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None):
     """cms: [(音声 float32(SR), ...)]。録画(jp, Media)の中から各CMの音と一致する場所を全部探す。
     まずCM全体の相関で候補を広めに拾い(thr)、そのあと窓ごとの照合(_verify_hit)で本物だけを残す。
     戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 全体がよく合うか, "zz": 窓の最大, "np": 合った窓, "n": 窓の数}, ...] (cms と同じ順)]"""
@@ -1556,6 +1556,8 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5):
             i0 = int(round((d["t"] - jp.a_origin) * fs))
             v = _verify_hit(c, jx, i0, fs)
             if not v["pass"]:
+                if dropped is not None and d["z"] >= 14:  # 後で原因を調べられるように、強く出たのに落としたものを記録する
+                    dropped.append({"k": k, "t": round(d["t"], 2), "z": round(d["z"], 1), "zz": v["zz"], "np": v["np"], "n": v["n"]})
                 continue
             d["ok"] = v["strong"]
             d["zz"], d["np"], d["n"] = v["zz"], v["np"], v["n"]
@@ -2865,7 +2867,8 @@ class App(_TkBase):
                         jp = fut.result() if fut else LightMedia(jp_p, ast)
                         if i + 1 < n and files[i + 1] not in pre and needs(files[i + 1]):
                             pre[files[i + 1]] = pool.submit(LightMedia, files[i + 1], ast)  # 次の録画を、探している間に先に読み込んでおく
-                        hits = find_in_recording(cms, jp, prog)
+                        dropped = []
+                        hits = find_in_recording(cms, jp, prog, dropped=dropped)
                         jo = []
                         for k, hl in enumerate(hits):
                             L = cl[k][1] - cl[k][0]
@@ -2907,7 +2910,7 @@ class App(_TkBase):
                                 keep.append(d)
                         keep.sort(key=lambda d: d["t"])
                         del jp
-                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "done": False}
+                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted(dropped, key=lambda x: -x["z"])[:40], "done": False}
                         save_rec()
                     if not keep:
                         rec["files"][jp_p]["done"] = True
