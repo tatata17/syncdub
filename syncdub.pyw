@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.33"
+APP_VERSION = "2026.11.10.34"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 20     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 21     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1617,6 +1617,35 @@ def _same_frame(en, jp, e, j, cache):
     if x is None or y is None:
         return False
     return _pair_sim(x, y) >= EDGE_SIM
+
+
+def _trim_edge_frames(en, jp, r, sides=(0, 1), win=0.5, fps=29.97):
+    """区間 r(x0,x1,o)の先頭と末尾を、1コマ単位で整える。端の数コマだけ、直前・直後の別の場面が混ざっていたら、その分だけ削る。"""
+    try:
+        for side in sides:
+            t_en = r["x0"] if side == 0 else r["x1"] - win
+            if r["x1"] - r["x0"] < 4 * win:
+                return
+            EX, eok = _thumbs_fps(en.path, fps, t_en + en.voff, win)
+            JX, jok = _thumbs_fps(jp.path, fps, t_en + r["o"] + jp.voff, win)
+            n = min(len(EX), len(JX))
+            if n < 6:
+                continue
+            sm = np.where(eok[:n] & jok[:n], (EX[:n] * JX[:n]).sum(1) / EX.shape[1], 0.0)
+            if side == 1:
+                sm = sm[::-1]
+            k = 0
+            while k < n - 3 and not (sm[k] >= 0.6 and sm[k + 1] >= 0.5 and sm[k + 2] >= 0.5):
+                k += 1
+            if k == 0 or k >= n - 3 or sm[:k].max() >= 0.6:
+                continue    # 先頭から合っている/合う所が見つからない/途中に合うコマがある(暗転など)は触らない
+            d = k / fps
+            if side == 0:
+                r["x0"] += d
+            else:
+                r["x1"] -= d
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _edge_fit(en, jp, e, off, dirn, inner, outer, cache):
@@ -2138,6 +2167,10 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             tot = sum(r["x1"] - r["x0"] for r in ch)
             if tot < 8.0 or (sum(r["n"] for r in ch) < 2 and tot < 15.0):
                 continue
+            _trim_edge_frames(en, jp, ch[0], (0, 1) if len(ch) == 1 else (0,))
+            if len(ch) > 1:
+                _trim_edge_frames(en, jp, ch[-1], (1,))
+            tot = sum(r["x1"] - r["x0"] for r in ch)
             j0, j1 = ch[0]["x0"] + ch[0]["o"], ch[-1]["x1"] + ch[-1]["o"]
             # 同じ場所を、CM全体の一致がすでに押さえていれば、それを優先する
             ov = [e_ for e_ in keep if (e_.get("v") is None or e_["v"] >= VID_MIN)
