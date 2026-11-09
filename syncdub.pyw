@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.10.34"
+APP_VERSION = "2026.11.10.35"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 21     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 22     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1997,7 +1997,7 @@ def refine_fine_cuts(en, jp, runs, fps=29.97):
     return runs
 
 
-def fine_version(en, jp, a_cm, b_cm, j0, j1, margin=6.0, diag=None):
+def _fine_version_once(en, jp, a_cm, b_cm, j0, j1, margin=6.0, diag=None):
     """録画の j0〜j1 付近にある、英語版CM(a_cm〜b_cm)を細かく編集し直した版を調べる。
     日本語版の画面を英語版へ1コマずつ当てて、合う範囲が全体の85%以上なら、その区間の並びを返す。
     戻り値: None または {"runs":[[英開始,英終了,録画開始],…], "jp0","jp1","v"}"""
@@ -2050,6 +2050,24 @@ def fine_version(en, jp, a_cm, b_cm, j0, j1, margin=6.0, diag=None):
         return None   # 英語版の時刻が前に戻る/重なるものは対象外
     return {"runs": [[round(r["en0"], 4), round(r["en1"], 4), round(r["jp0"], 4)] for r in runs],
             "jp0": runs[0]["jp0"], "jp1": runs[-1]["jp1"], "v": round(sim, 2)}
+
+
+def fine_version(en, jp, a_cm, b_cm, j0, j1, margin=6.0, diag=None):
+    """_fine_version_once を呼ぶ。見つかった範囲が英語版CMの頭や終わりに届かない(=日本語版の前後にまだ続きがあるかもしれない)ときは、
+    日本語版の調べる範囲をCMの長さぶんまで広げて、もう一度調べる。"""
+    r = _fine_version_once(en, jp, a_cm, b_cm, j0, j1, margin, diag)
+    wide = min(70.0, b_cm - a_cm)
+    if wide <= margin + 1.0:
+        return r
+    need = r is None
+    if r is not None:
+        need = r["runs"][0][0] - a_cm > 1.5 or b_cm - r["runs"][-1][1] > 1.5
+    if need:
+        d2 = {} if diag is not None else None
+        r2 = _fine_version_once(en, jp, a_cm, b_cm, j0, j1, wide, d2)
+        if r2 is not None and (r is None or (r2["jp1"] - r2["jp0"]) > (r["jp1"] - r["jp0"]) + 0.3):
+            return r2
+    return r
 
 
 def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None, extra=None):
