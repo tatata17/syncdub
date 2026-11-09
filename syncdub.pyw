@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.31"
+APP_VERSION = "2026.11.09.32"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 15     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 16     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1858,8 +1858,9 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
         if v is None or not (vid_good({"v": v, "z": h["z"]}) or sum(1 for f_ in vf if f_ >= 0.8) >= 2):
             continue
         hits.setdefault(k, []).append({"t": h["t"], "e": a, "l": b - a, "z": h["z"]})
-    for k, hl_ in (extra or {}).items():   # 映像だけで見つけた場所(音が合わない版)
-        hits.setdefault(k, []).extend(hl_)
+    for k, hl_ in (extra or {}).items():   # 映像だけで見つけた場所(音が合わない版)。音で見つかったCMには使わない(時間差の誤差が混ざるため。残りの部分は後で映像で探す)
+        if k not in hits:
+            hits[k] = list(hl_)
     out = []
     ecache = {}
     for k, hl in hits.items():
@@ -1907,9 +1908,23 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
                     fixed.pop()
                 fixed.append(r)
             runs = fixed
-        for r, r2 in zip(runs, runs[1:]):
-            if r["x1"] > r2["x0"]:
-                r["x1"] = r2["x0"] = (r["x1"] + r2["x0"]) / 2
+        # 区間が重なるときは、根拠の多い(音や映像の一致が多い・長い)ほうを残し、弱いほうの重なる分を削る
+        runs.sort(key=lambda r: r["x0"])
+        i_ = 0
+        while i_ + 1 < len(runs):
+            r, r2 = runs[i_], runs[i_ + 1]
+            if r["x1"] > r2["x0"] + 1e-6:
+                if (r["n"], r["x1"] - r["x0"]) >= (r2["n"], r2["x1"] - r2["x0"]):
+                    r2["x0"] = max(r2["x0"], r["x1"])
+                else:
+                    r["x1"] = min(r["x1"], r2["x0"])
+                if r2["x1"] - r2["x0"] < 2.0:
+                    runs.pop(i_ + 1)
+                    continue
+                if r["x1"] - r["x0"] < 2.0:
+                    runs.pop(i_)
+                    continue
+            i_ += 1
         # 録画で順番どおりに、ほぼ続けて並ぶ区間を1つの短縮版にまとめる
         chains = []
         for r in runs:
