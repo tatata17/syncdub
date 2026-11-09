@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.10.35"
+APP_VERSION = "2026.11.10.37"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -3244,6 +3244,7 @@ class App(_TkBase):
         self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.find_vscan = tk.BooleanVar(value=True)
         self.find_files, self.find_cms = [], []
+        self.find_en_extra = []   # まとめて探す、ほかの英語版
         self._find_cms_src = ""  # 一覧の元になった英語版のファイル(替えたら一覧を消して、やり直す)
         self.en_var.trace_add("write", lambda *a: self._find_en_changed())
         self._find_stop_ev = threading.Event()
@@ -3256,6 +3257,7 @@ class App(_TkBase):
                       "書き出しは映像を再エンコードします(CMの切れ目をフレーム単位で合わせるため)。").pack(fill="x", **pad)
         c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 → CMを切り分ける ")
         c1.pack(fill="x", **pad)
+        self.find_en_frame = c1   # ここへのドロップは、英語版として受ける
         r1 = ttk.Frame(c1)
         r1.pack(fill="x", padx=8, pady=(8, 4))
         self.find_en_ent = ttk.Entry(r1, textvariable=self.en_var)
@@ -3263,6 +3265,17 @@ class App(_TkBase):
         ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
         self.find_split_btn = ttk.Button(r1, text="CMを切り分ける", command=self.run_split)
         self.find_split_btn.pack(side="left")
+        r1x = ttk.Frame(c1)
+        r1x.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(r1x, text="ほかの英語版\n(まとめて探す):").pack(side="left", anchor="n")
+        self.en2_tree = ttk.Treeview(r1x, columns=("f",), show="headings", height=2, selectmode="extended")
+        self.en2_tree.heading("f", text="追加した英語版 (CMは、スタート時に自動で切り分けます)")
+        self.en2_tree.column("f", anchor="w")
+        self.en2_tree.pack(side="left", fill="x", expand=True, padx=6)
+        bx = ttk.Frame(r1x)
+        bx.pack(side="left", anchor="n")
+        ttk.Button(bx, text="追加...", width=8, command=self._en2_add).pack(pady=1)
+        ttk.Button(bx, text="外す", width=8, command=self._en2_remove).pack(pady=1)
         r1b = ttk.Frame(c1)
         r1b.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self.cm_tree = ttk.Treeview(r1b, columns=("n", "t", "len", "sec"), show="headings", height=4, selectmode="extended")
@@ -3328,6 +3341,22 @@ class App(_TkBase):
         c1.pack_forget()
         c1.pack(side="top", fill="x", **pad)
         c2.pack(side="top", fill="both", expand=True, **pad)
+
+    def _en2_fill(self):
+        self.en2_tree.delete(*self.en2_tree.get_children())
+        for i, x in enumerate(self.find_en_extra):
+            self.en2_tree.insert("", "end", iid=str(i), values=(x,))
+
+    def _en2_add(self):
+        for x in filedialog.askopenfilenames(title="まとめて探す、ほかの英語版を選択 (複数選べます)"):
+            if x not in self.find_en_extra and x != self.en_var.get().strip():
+                self.find_en_extra.append(x)
+        self._en2_fill()
+
+    def _en2_remove(self):
+        sel = {int(i) for i in self.en2_tree.selection()}
+        self.find_en_extra = [x for i, x in enumerate(self.find_en_extra) if i not in sel]
+        self._en2_fill()
 
     def _find_cancel(self):
         self._find_stop_ev.set()
@@ -3436,6 +3465,10 @@ class App(_TkBase):
         ast = self.jp_ast.get()
         vscan = bool(self.find_vscan.get())
         cms_ts = list(self.find_cms) if self._find_cms_src == en_p else []  # 別の英語版の一覧は使わない
+        extras = []   # ほかの英語版(まとめて探す)。1本目と同じものは外す
+        for x_ in self.find_en_extra:
+            if x_ and x_ != en_p and x_ not in extras and Path(x_).exists():
+                extras.append(x_)
         self.find_btn.state(["disabled"])
         self._find_stop_ev.clear()
         self.find_stop.state(["!disabled"])
@@ -3448,300 +3481,330 @@ class App(_TkBase):
             return re.sub(r'[\\/:*?"<>|]', "_", t)
 
         def work():
-            try:
-                en = Media(en_p, 0)
-                cl = cms_ts
+            outd.mkdir(parents=True, exist_ok=True)
+
+            def setup_en(p, cl_pre, primary):
+                en = Media(p, 0)
+                cl = cl_pre
                 if not cl:  # 「CMを切り分ける」を押していなければ、ここで自動で切り分ける
-                    self.q.put(lambda: self.find_msg.config(text="英語版のCMを切り分けています…", fg="#333"))
+                    self.q.put(lambda: self.find_msg.config(text=f"英語版のCMを切り分けています…({Path(p).name})", fg="#333"))
                     try:
-                        cl = split_commercials(en_p)
+                        cl = split_commercials(p)
                     except Exception:  # noqa: BLE001
                         cl = []
                     if cl:
-                        def show(c=list(cl)):
-                            self.find_cms = c
-                            self._find_cms_src = en_p
-                            self._cm_fill()
-                            self.cm_note.config(text=f"{len(c)} 本に分けました(スタート時に自動で)。", foreground="#1f6f43")
-                        self.q.put(show)
+                        if primary:
+                            def show(c=list(cl)):
+                                self.find_cms = c
+                                self._find_cms_src = p
+                                self._cm_fill()
+                                self.cm_note.config(text=f"{len(c)} 本に分けました(スタート時に自動で)。", foreground="#1f6f43")
+                            self.q.put(show)
                     else:
                         cl = [(0.0, en.end)]
-                cms = [en.slice(a, b) for a, b in cl]
-            except Exception as ex:  # noqa: BLE001
-                self.q.put(lambda: (self.find_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
-                                    self.find_btn.state(["!disabled"])))
-                return
-            outd.mkdir(parents=True, exist_ok=True)
-            stop = self._find_stop_ev
-            rec_p = outd / "syncdub_探索記録.json"
-            st_en = Path(en_p).stat()
-            sig = [en_p, st_en.st_size, int(st_en.st_mtime), [[round(a, 2), round(b, 2)] for a, b in cl]]
-            rec = {"sig": sig, "algo": FIND_ALGO, "files": {}}
-            try:
-                old = json.loads(rec_p.read_text(encoding="utf-8"))
-                if old.get("sig") == sig and old.get("algo") == FIND_ALGO:
-                    rec = old
-            except Exception:  # noqa: BLE001
-                pass
-
-            def save_rec():
+                cms_ = [en.slice(a_, b_) for a_, b_ in cl]
+                st_en = Path(p).stat()
+                sig = [p, st_en.st_size, int(st_en.st_mtime), [[round(a_, 2), round(b_, 2)] for a_, b_ in cl]]
+                rec_p = outd / f"syncdub_探索記録_{safe(Path(p).stem)}.json"
+                rec = {"sig": sig, "algo": FIND_ALGO, "files": {}}
                 try:
-                    rec_p.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+                    old = json.loads(rec_p.read_text(encoding="utf-8"))
+                    if old.get("sig") == sig and old.get("algo") == FIND_ALGO:
+                        rec = old
+                except Exception:  # noqa: BLE001
+                    pass
+                probes = {}
+                if vscan:
+                    try:
+                        probes = en_probes(en, cl)
+                    except Exception:  # noqa: BLE001
+                        probes = {}
+                return {"en_p": p, "en": en, "cl": cl, "cms": cms_, "rec": rec, "rec_p": rec_p, "found": [0] * len(cl),
+                        "en_stem": safe(Path(p).stem), "probes": probes}
+
+            ctxs, skipped_en = [], []
+            for ei_, p_ in enumerate([en_p] + extras):
+                self.q.put(lambda p_=p_: self.find_msg.config(text=f"英語版を読み込んでいます…({Path(p_).name})", fg="#333"))
+                try:
+                    ctxs.append(setup_en(p_, cms_ts if ei_ == 0 else [], ei_ == 0))
+                except Exception as ex:  # noqa: BLE001
+                    if ei_ == 0:
+                        self.q.put(lambda ex=ex: (self.find_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
+                                                  self.find_btn.state(["!disabled"])))
+                        return
+                    skipped_en.append(Path(p_).name)
+            stop = self._find_stop_ev
+
+            def save_rec(cx):
+                try:
+                    cx["rec_p"].write_text(json.dumps(cx["rec"], ensure_ascii=False), encoding="utf-8")
                 except OSError:
                     pass
 
             class _Stop(Exception):
                 pass
-            found = [0] * len(cl)
             rejected = []
             res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
-            en_stem = safe(Path(en_p).stem)
             stopped = False
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
             pre = {}
             prev = {}
-            probes = {}
-            if vscan:
-                try:
-                    probes = en_probes(en, cl)
-                except Exception:  # noqa: BLE001
-                    probes = {}
+            thc = {}   # 映像の下調べ(1秒1コマ)の結果。英語版が何本あっても、録画ごとに1回だけ
+            M = len(ctxs)
+            nn = n * M
 
             def needs(p):
                 try:
-                    e = rec["files"].get(p)
                     sx = Path(p).stat()
-                    return not (e and e.get("key") == [sx.st_size, int(sx.st_mtime), int(vscan)])
+                    for c_ in ctxs:
+                        e = c_["rec"]["files"].get(p)
+                        if not (e and e.get("key") == [sx.st_size, int(sx.st_mtime), int(vscan)]):
+                            return True
+                    return False
                 except OSError:
                     return False
             for i, jp_p in enumerate(files):
                 if stop.is_set():
                     stopped = True
                     break
-                t_rec = time.time()
+                jp_loaded = {}   # 録画の読み込みは、英語版が何本あっても1回だけ
+                for ei, cx in enumerate(ctxs):
+                    en, cl, cms, rec, found, en_stem, probes = cx["en"], cx["cl"], cx["cms"], cx["rec"], cx["found"], cx["en_stem"], cx["probes"]
+                    ii = i * M + ei
+                    lab = f"[{en_stem}] " if M > 1 else ""
+                    t_rec = time.time()
 
-                def el(t_rec=t_rec):
-                    d = int(time.time() - t_rec)
-                    return f" [{d // 60}分{d % 60:02d}秒]" if d >= 60 else f" [{d}秒]"
+                    def el(t_rec=t_rec):
+                        d = int(time.time() - t_rec)
+                        return f" [{d // 60}分{d % 60:02d}秒]" if d >= 60 else f" [{d}秒]"
 
-                def st(text, tag="", i=i):
-                    self.q.put(lambda: self._find_set(i, text, tag))
+                    def st(text, tag="", i=i, lab=lab):
+                        self.q.put(lambda: self._find_set(i, lab + text, tag))
 
-                def prog(fr, i=i):
-                    if stop.is_set():
-                        raise _Stop()
-                    self.q.put(lambda: (self.find_bar.config(value=(i + fr * 0.5) / n * 100),
-                                        self.find_msg.config(text=f"({i + 1}/{n}) {Path(jp_p).name}: 音を探しています…", fg="#333")))
-                try:
-                    try:
-                        fst = Path(jp_p).stat()
-                        fkey = [fst.st_size, int(fst.st_mtime), int(vscan)]
-                    except OSError:
-                        fkey = None
-                    ent = rec["files"].get(jp_p)
-                    if ent and ent.get("key") == fkey and ent.get("done"):
-                        st(f"前回調べ済み ({len(ent['keep'])} 件)", "ok" if ent["keep"] else "")
-                        for d in ent["keep"]:
-                            if d.get("v") is not None and d["v"] < VID_MIN:
-                                tt = int(d["t"])
-                                rejected.append(f"CM{d['k'] + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{d['v']:.2f}\t音{d['z']:.1f}")
-                            else:
-                                found[d["k"]] += 1
-                        continue
-                    if ent and ent.get("key") == fkey:
-                        keep = ent["keep"]
-                    else:
-                        st("音を探しています…")
-                        fut = pre.pop(jp_p, None)
-                        jp = fut.result() if fut else LightMedia(jp_p, ast)
-                        if probes and jp_p not in prev:
-                            prev[jp_p] = pool.submit(scan_jp_thumbs, jp_p, stop)   # 映像の下調べ(1秒1コマ)も、音を探している間に進めておく
-                        if i + 1 < n and files[i + 1] not in pre and needs(files[i + 1]):
-                            pre[files[i + 1]] = pool.submit(LightMedia, files[i + 1], ast)  # 次の録画を、探している間に先に読み込んでおく
-                            if probes:
-                                prev[files[i + 1]] = pool.submit(scan_jp_thumbs, files[i + 1], stop)
-                        dropped = []
-                        hits = find_in_recording(cms, jp, prog, dropped=dropped)
-                        jo = []
-                        for k, hl in enumerate(hits):
-                            L = cl[k][1] - cl[k][0]
-                            for h in hl:
-                                jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L,
-                                           "zz": h.get("zz"), "np": h.get("np"), "n": h.get("n")})
-                        # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
-                        wk = sorted((d for d in jo if d.get("weak")), key=lambda d: -d["z"])
-                        for d in wk[12:]:  # 弱い候補が多すぎるときは、強いほうから12件だけ映像で確かめる
-                            jo.remove(d)
-                        vcache = {}
-                        for d in jo:
-                            a_, b_ = cl[d["k"]]
-                            try:
-                                d["vf"] = []
-                                d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache, detail=d["vf"])
-                            except Exception:  # noqa: BLE001
-                                d["v"] = None
-                        # 音が弱くしか合わなかった候補は、映像が合うときだけ採用する(音が似ているだけの別CMを避ける)
-                        for d in list(jo):
-                            if d.get("weak") and not (d["v"] is not None and d["v"] >= VID_OK):
-                                dropped.append({"k": d["k"], "t": round(d["t"], 2), "z": round(d["z"], 1), "zz": d["zz"], "np": d["np"], "n": d["n"], "v": d["v"], "weak": True})
-                                jo.remove(d)
-                        # 映像が合わないもの(声やBGMだけ同じ別CM)は先に外す。音が強い偽物が、本物を押しのけないように
-                        bad = [d for d in jo if d["v"] is not None and d["v"] < VID_MIN]
-                        good = [d for d in jo if not (d["v"] is not None and d["v"] < VID_MIN)]
-
-                        def over(d, e):
-                            return min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])
-                        # 映像まで合うものを先に、次に映像が似ているもの、最後に音がはっきりしているものの順で残す
-                        good.sort(key=lambda d: (not vid_good(d), -(d["v"] or 0), -d["z"]))
-                        keep = []
-                        for d in good:
-                            clash = [e for e in keep if over(d, e)]
-                            if clash:
-                                for e in clash:
-                                    e["clash"] = True
-                                    e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"]})
-                                continue
-                            keep.append(d)
-                        for d in bad:  # 映像が合わず外したもの(重なる本物がなければ、記録として残す)
-                            clash = [e for e in keep if over(d, e)]
-                            if clash:
-                                for e in clash:
-                                    e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"], "rej": True})
-                            else:
-                                keep.append(d)
-                        # 長いCMの短縮版・途中で切れた版(部分ごとに探して、順番に並んでいるものをまとめる)
-                        pcs = make_pieces(cl)
-                        if pcs:
-                            try:
-                                phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog, loose=True)
-                                plog = []
-                                extra = {}
-                                fv_ = prev.pop(jp_p, None)
-                                if fv_ is not None:
-                                    st("映像を調べています…")
-                                    th_ = fv_.result()
-                                    if stop.is_set():
-                                        raise _Stop()
-                                    if th_ is not None:
-                                        vd_ = {}
-                                        extra = video_scan_hits(en, jp, probes, th_, diag=vd_)
-                                        vd_["best"] = sorted(vd_.get("best", []), key=lambda x: -x[1])[:8]
-                                        dropped.append({"video_scan_diag": vd_})
-                                        dropped.append({"video_scan": {str(k_): [[round(h_["e"], 1), round(h_["t"], 1), round(h_["l"], 1)] for h_ in v_] for k_, v_ in extra.items()}})
-                                sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog, extra=extra)
-                                dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
-                                for e_ in sv_:
-                                    # 短縮版と重なる「映像が合わず除外」の記録は、短縮版だったという説明がつくので消す
-                                    keep[:] = [x for x in keep if not (x["k"] == e_["k"] and x.get("v") is not None and x["v"] < VID_MIN
-                                                                       and min(x["t"] + x["L"], e_["t"] + e_["L"]) - max(x["t"], e_["t"]) > 0)]
-                                    keep.append(e_)
-                            except _Stop:
-                                raise
-                            except Exception as ex_:  # noqa: BLE001
-                                dropped.append({"short_error": repr(ex_)})
-                        keep.sort(key=lambda d: d["t"])
-                        del jp
-                        rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted([x for x in dropped if "z" in x], key=lambda x: -x["z"])[:40] + [x for x in dropped if "z" not in x], "done": False}
-                        save_rec()
-                    if not keep:
-                        rec["files"][jp_p]["done"] = True
-                        save_rec()
-                        st("見つかりませんでした" + el(), "")
-                        continue
-                    nth = {}
-                    nw = nwarn = nsk = nrej = 0
-                    try:
-                        existing = {re.sub(r"【[^】]*】", "", f.name) for f in outd.iterdir()}
-                    except OSError:
-                        existing = set()
-                    for j, d in enumerate(keep):
+                    def prog(fr, i=i, ii=ii, lab=lab):
                         if stop.is_set():
                             raise _Stop()
-                        k = d["k"]
-                        a, b = cl[k]
-                        nth[k] = nth.get(k, 0) + 1
-                        tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
-                        v = d.get("v")
-                        why = []
-                        if not vid_good(d):  # 映像まで合っていれば、音の曖昧さは気にしない
-                            if not d["ok"]:
-                                why.append("一部だけ一致")
-                            if d.get("clash"):
-                                why.append("別のCMとも似ている")
-                        if v is not None and VID_MIN <= v and not vid_good(d):
-                            why.append("映像が少し違う")
-                        if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
-                            tt = int(d["t"])
-                            rejected.append(f"CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
-                            nrej += 1
-                            continue
-                        base = f"{round5(d.get('out_len', b - a))}秒_{en_stem}_CM{k + 1:02d}{tail}" + ("【短縮版】" if d.get("short") else "")
-                        name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
-                            + f"({safe(Path(jp_p).stem)}).mkv"
-                        out = outd / name
-                        found[k] += 1
-                        if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing:
-                            res["skip"] += 1
-                            nsk += 1
-                            continue
-                        st(f"書き出しています… ({j + 1}/{len(keep)})")
-                        self.q.put(lambda i=i, j=j, m=len(keep): self.find_bar.config(value=(i + 0.5 + 0.5 * j / m) / n * 100))
-                        proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
-                                "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
-                                "segments": ([{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "fit": "stretch"} for r_ in d["runs"]]
-                                             if d.get("runs") and not d.get("fine") else
-                                             [{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "jp_end": (d["runs"][q_ + 1][2] if q_ + 1 < len(d["runs"]) else d["jp_span"][1]), "fit": "stretch"}
-                                              for q_, r_ in enumerate(d["runs"])] if d.get("fine") else
-                                             [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}]),
-                                "clip": ({"start": d["runs"][0][0], "end": d["runs"][-1][1], "crf": crf, "preset": "medium", "codec": codec}
-                                         if d.get("runs") else
-                                         {"start": round(a, 4), "end": round(b, 4), "crf": crf, "preset": "medium", "codec": codec})}
-                        tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
+                        self.q.put(lambda: (self.find_bar.config(value=(ii + fr * 0.5) / nn * 100),
+                                            self.find_msg.config(text=f"({i + 1}/{n}) {lab}{Path(jp_p).name}: 音を探しています…", fg="#333")))
+                    try:
                         try:
-                            pj = tmpd / "project.json"
-                            pj.write_text(json.dumps(proj, ensure_ascii=False), encoding="utf-8")
-                            buf = io.StringIO()
-                            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                                main([str(pj)])
-                            if d.get("fine"):
-                                # 細かく編集し直された版は、日本語音声が連続しているので、区間ごとに切らず元の音をそのまま使う
-                                # (区間ごとに切ると、つなぎ目で数ミリ秒の音の欠けやずれが出る)
-                                tmp_o = out.with_name(out.stem + ".tmp.mkv")
-                                j0_, j1_ = d["jp_span"]
-                                cmd_ = ["ffmpeg", "-y", "-v", "error", "-i", str(out), "-ss", f"{j0_ + d.get('voff', 0.0):.6f}", "-t", f"{j1_ - j0_:.6f}",
-                                        "-i", jp_p, "-map", "0:v:0", "-map", f"1:a:{int(ast or 0)}", "-map", "0:a:1?", "-c:v", "copy",
-                                        "-c:a:0", "aac", "-b:a:0", "256k", "-c:a:1", "copy",
-                                        "-metadata:s:a:0", "language=jpn", "-metadata:s:a:0", "title=Japanese dub (synced)", "-disposition:a:0", "default",
-                                        "-metadata:s:a:1", "language=eng", "-disposition:a:1", "0", str(tmp_o)]
-                                subprocess.run(cmd_, check=True, capture_output=True, **NOWIN)
-                                os.replace(tmp_o, out)
-                        finally:
-                            shutil.rmtree(tmpd, ignore_errors=True)
-                        nw += 1
-                        if why:
-                            nwarn += 1
-                            res["warn"] += 1
+                            fst = Path(jp_p).stat()
+                            fkey = [fst.st_size, int(fst.st_mtime), int(vscan)]
+                        except OSError:
+                            fkey = None
+                        ent = rec["files"].get(jp_p)
+                        if ent and ent.get("key") == fkey and ent.get("done"):
+                            st(f"前回調べ済み ({len(ent['keep'])} 件)", "ok" if ent["keep"] else "")
+                            for d in ent["keep"]:
+                                if d.get("v") is not None and d["v"] < VID_MIN:
+                                    tt = int(d["t"])
+                                    rejected.append(f"{lab}CM{d['k'] + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{d['v']:.2f}\t音{d['z']:.1f}")
+                                else:
+                                    found[d["k"]] += 1
+                            continue
+                        if ent and ent.get("key") == fkey:
+                            keep = ent["keep"]
                         else:
-                            res["ok"] += 1
-                    rec["files"][jp_p]["done"] = True
-                    save_rec()
-                    msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
-                    if nwarn:
-                        msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が少し違う)"
-                    if nrej:
-                        msg += f" ・映像が合わず除外 {nrej} 件"
-                    st(msg + el(), "warn" if nwarn else "ok")
-                except _Stop:
-                    st("中止しました (次回は続きから)", "warn")
-                    stopped = True
+                            st("音を探しています…")
+                            fut = pre.pop(jp_p, None)
+                            jp = jp_loaded.get(jp_p) or (fut.result() if fut else LightMedia(jp_p, ast))
+                            jp_loaded[jp_p] = jp
+                            if probes and jp_p not in prev and jp_p not in thc:
+                                prev[jp_p] = pool.submit(scan_jp_thumbs, jp_p, stop)   # 映像の下調べ(1秒1コマ)も、音を探している間に進めておく
+                            if i + 1 < n and files[i + 1] not in pre and needs(files[i + 1]):
+                                pre[files[i + 1]] = pool.submit(LightMedia, files[i + 1], ast)  # 次の録画を、探している間に先に読み込んでおく
+                                if probes:
+                                    prev[files[i + 1]] = pool.submit(scan_jp_thumbs, files[i + 1], stop)
+                            dropped = []
+                            hits = find_in_recording(cms, jp, prog, dropped=dropped)
+                            jo = []
+                            for k, hl in enumerate(hits):
+                                L = cl[k][1] - cl[k][0]
+                                for h in hl:
+                                    jo.append({"k": k, "t": h["t"], "z": h["z"], "ok": h["ok"], "L": L,
+                                               "zz": h.get("zz"), "np": h.get("np"), "n": h.get("n")})
+                            # 同じ場所に複数のCMが当てはまったら、はっきりしているほうだけ残す
+                            wk = sorted((d for d in jo if d.get("weak")), key=lambda d: -d["z"])
+                            for d in wk[12:]:  # 弱い候補が多すぎるときは、強いほうから12件だけ映像で確かめる
+                                jo.remove(d)
+                            vcache = {}
+                            for d in jo:
+                                a_, b_ = cl[d["k"]]
+                                try:
+                                    d["vf"] = []
+                                    d["v"] = video_similarity(en, a_, b_ - a_, jp, d["t"], vcache, detail=d["vf"])
+                                except Exception:  # noqa: BLE001
+                                    d["v"] = None
+                            # 音が弱くしか合わなかった候補は、映像が合うときだけ採用する(音が似ているだけの別CMを避ける)
+                            for d in list(jo):
+                                if d.get("weak") and not (d["v"] is not None and d["v"] >= VID_OK):
+                                    dropped.append({"k": d["k"], "t": round(d["t"], 2), "z": round(d["z"], 1), "zz": d["zz"], "np": d["np"], "n": d["n"], "v": d["v"], "weak": True})
+                                    jo.remove(d)
+                            # 映像が合わないもの(声やBGMだけ同じ別CM)は先に外す。音が強い偽物が、本物を押しのけないように
+                            bad = [d for d in jo if d["v"] is not None and d["v"] < VID_MIN]
+                            good = [d for d in jo if not (d["v"] is not None and d["v"] < VID_MIN)]
+
+                            def over(d, e):
+                                return min(d["t"] + d["L"], e["t"] + e["L"]) - max(d["t"], e["t"]) > 0.5 * min(d["L"], e["L"])
+                            # 映像まで合うものを先に、次に映像が似ているもの、最後に音がはっきりしているものの順で残す
+                            good.sort(key=lambda d: (not vid_good(d), -(d["v"] or 0), -d["z"]))
+                            keep = []
+                            for d in good:
+                                clash = [e for e in keep if over(d, e)]
+                                if clash:
+                                    for e in clash:
+                                        e["clash"] = True
+                                        e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"]})
+                                    continue
+                                keep.append(d)
+                            for d in bad:  # 映像が合わず外したもの(重なる本物がなければ、記録として残す)
+                                clash = [e for e in keep if over(d, e)]
+                                if clash:
+                                    for e in clash:
+                                        e.setdefault("alts", []).append({"k": d["k"], "z": round(d["z"], 1), "v": d["v"], "rej": True})
+                                else:
+                                    keep.append(d)
+                            # 長いCMの短縮版・途中で切れた版(部分ごとに探して、順番に並んでいるものをまとめる)
+                            pcs = make_pieces(cl)
+                            if pcs:
+                                try:
+                                    phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog, loose=True)
+                                    plog = []
+                                    extra = {}
+                                    fv_ = prev.pop(jp_p, None)
+                                    if fv_ is not None or jp_p in thc:
+                                        st("映像を調べています…")
+                                        if fv_ is not None:
+                                            thc[jp_p] = fv_.result()
+                                        th_ = thc[jp_p]
+                                        if stop.is_set():
+                                            raise _Stop()
+                                        if th_ is not None:
+                                            vd_ = {}
+                                            extra = video_scan_hits(en, jp, probes, th_, diag=vd_)
+                                            vd_["best"] = sorted(vd_.get("best", []), key=lambda x: -x[1])[:8]
+                                            dropped.append({"video_scan_diag": vd_})
+                                            dropped.append({"video_scan": {str(k_): [[round(h_["e"], 1), round(h_["t"], 1), round(h_["l"], 1)] for h_ in v_] for k_, v_ in extra.items()}})
+                                    sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog, extra=extra)
+                                    dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
+                                    for e_ in sv_:
+                                        # 短縮版と重なる「映像が合わず除外」の記録は、短縮版だったという説明がつくので消す
+                                        keep[:] = [x for x in keep if not (x["k"] == e_["k"] and x.get("v") is not None and x["v"] < VID_MIN
+                                                                           and min(x["t"] + x["L"], e_["t"] + e_["L"]) - max(x["t"], e_["t"]) > 0)]
+                                        keep.append(e_)
+                                except _Stop:
+                                    raise
+                                except Exception as ex_:  # noqa: BLE001
+                                    dropped.append({"short_error": repr(ex_)})
+                            keep.sort(key=lambda d: d["t"])
+                            jp = None
+                            rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted([x for x in dropped if "z" in x], key=lambda x: -x["z"])[:40] + [x for x in dropped if "z" not in x], "done": False}
+                            save_rec(cx)
+                        if not keep:
+                            rec["files"][jp_p]["done"] = True
+                            save_rec(cx)
+                            st("見つかりませんでした" + el(), "")
+                            continue
+                        nth = {}
+                        nw = nwarn = nsk = nrej = 0
+                        try:
+                            existing = {re.sub(r"【[^】]*】", "", f.name) for f in outd.iterdir()}
+                        except OSError:
+                            existing = set()
+                        for j, d in enumerate(keep):
+                            if stop.is_set():
+                                raise _Stop()
+                            k = d["k"]
+                            a, b = cl[k]
+                            nth[k] = nth.get(k, 0) + 1
+                            tail = f"_{nth[k]}回目" if sum(1 for e in keep if e["k"] == k) > 1 else ""
+                            v = d.get("v")
+                            why = []
+                            if not vid_good(d):  # 映像まで合っていれば、音の曖昧さは気にしない
+                                if not d["ok"]:
+                                    why.append("一部だけ一致")
+                                if d.get("clash"):
+                                    why.append("別のCMとも似ている")
+                            if v is not None and VID_MIN <= v and not vid_good(d):
+                                why.append("映像が少し違う")
+                            if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
+                                tt = int(d["t"])
+                                rejected.append(f"{lab}CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
+                                nrej += 1
+                                continue
+                            base = f"{round5(d.get('out_len', b - a))}秒_{en_stem}_CM{k + 1:02d}{tail}" + ("【短縮版】" if d.get("short") else "")
+                            name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
+                                + f"({safe(Path(jp_p).stem)}).mkv"
+                            out = outd / name
+                            found[k] += 1
+                            if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing:
+                                res["skip"] += 1
+                                nsk += 1
+                                continue
+                            st(f"書き出しています… ({j + 1}/{len(keep)})")
+                            self.q.put(lambda ii=ii, j=j, m=len(keep): self.find_bar.config(value=(ii + 0.5 + 0.5 * j / m) / nn * 100))
+                            proj = {"en_video": cx["en_p"], "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
+                                    "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
+                                    "segments": ([{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "fit": "stretch"} for r_ in d["runs"]]
+                                                 if d.get("runs") and not d.get("fine") else
+                                                 [{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "jp_end": (d["runs"][q_ + 1][2] if q_ + 1 < len(d["runs"]) else d["jp_span"][1]), "fit": "stretch"}
+                                                  for q_, r_ in enumerate(d["runs"])] if d.get("fine") else
+                                                 [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}]),
+                                    "clip": ({"start": d["runs"][0][0], "end": d["runs"][-1][1], "crf": crf, "preset": "medium", "codec": codec}
+                                             if d.get("runs") else
+                                             {"start": round(a, 4), "end": round(b, 4), "crf": crf, "preset": "medium", "codec": codec})}
+                            tmpd = Path(tempfile.mkdtemp(prefix="syncdub_"))
+                            try:
+                                pj = tmpd / "project.json"
+                                pj.write_text(json.dumps(proj, ensure_ascii=False), encoding="utf-8")
+                                buf = io.StringIO()
+                                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                                    main([str(pj)])
+                                if d.get("fine"):
+                                    # 細かく編集し直された版は、日本語音声が連続しているので、区間ごとに切らず元の音をそのまま使う
+                                    # (区間ごとに切ると、つなぎ目で数ミリ秒の音の欠けやずれが出る)
+                                    tmp_o = out.with_name(out.stem + ".tmp.mkv")
+                                    j0_, j1_ = d["jp_span"]
+                                    cmd_ = ["ffmpeg", "-y", "-v", "error", "-i", str(out), "-ss", f"{j0_ + d.get('voff', 0.0):.6f}", "-t", f"{j1_ - j0_:.6f}",
+                                            "-i", jp_p, "-map", "0:v:0", "-map", f"1:a:{int(ast or 0)}", "-map", "0:a:1?", "-c:v", "copy",
+                                            "-c:a:0", "aac", "-b:a:0", "256k", "-c:a:1", "copy",
+                                            "-metadata:s:a:0", "language=jpn", "-metadata:s:a:0", "title=Japanese dub (synced)", "-disposition:a:0", "default",
+                                            "-metadata:s:a:1", "language=eng", "-disposition:a:1", "0", str(tmp_o)]
+                                    subprocess.run(cmd_, check=True, capture_output=True, **NOWIN)
+                                    os.replace(tmp_o, out)
+                            finally:
+                                shutil.rmtree(tmpd, ignore_errors=True)
+                            nw += 1
+                            if why:
+                                nwarn += 1
+                                res["warn"] += 1
+                            else:
+                                res["ok"] += 1
+                        rec["files"][jp_p]["done"] = True
+                        save_rec(cx)
+                        msg = f"✔ {nw + nsk} 件" + (f" (うち {nsk} 件は書き出し済み)" if nsk else " 書き出しました")
+                        if nwarn:
+                            msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が少し違う)"
+                        if nrej:
+                            msg += f" ・映像が合わず除外 {nrej} 件"
+                        st(msg + el(), "warn" if nwarn else "ok")
+                    except _Stop:
+                        st("中止しました (次回は続きから)", "warn")
+                        stopped = True
+                        break
+                    except subprocess.CalledProcessError as ex:
+                        st("× ffmpegでエラー: " + (ex.stderr or "")[-120:].replace("\n", " "), "ng")
+                        res["ng"] += 1
+                    except Exception as ex:  # noqa: BLE001
+                        st(f"× エラー: {ex}", "ng")
+                        res["ng"] += 1
+                    if stopped:
+                        break
+                if stopped:
                     break
-                except subprocess.CalledProcessError as ex:
-                    st("× ffmpegでエラー: " + (ex.stderr or "")[-120:].replace("\n", " "), "ng")
-                    res["ng"] += 1
-                except Exception as ex:  # noqa: BLE001
-                    st(f"× エラー: {ex}", "ng")
-                    res["ng"] += 1
+                thc.pop(jp_p, None)
                 self.q.put(lambda i=i: self.find_bar.config(value=(i + 1) / n * 100))
+
 
             pool.shutdown(wait=False, cancel_futures=True)
 
@@ -3762,9 +3825,13 @@ class App(_TkBase):
                     bits.append(f"失敗 {res['ng']} 録画")
                 if res["skip"]:
                     bits.append(f"同じ名前があって飛ばした {res['skip']} 本")
-                miss = [f"CM{k + 1:02d}" for k, c in enumerate(found) if c == 0]
-                if miss and len(cl) > 1 and not stopped:
-                    bits.append("どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
+                if not stopped:
+                    for c_ in ctxs:
+                        miss = [f"CM{k + 1:02d}" for k, c in enumerate(c_["found"]) if c == 0]
+                        if miss and len(c_["cl"]) > 1:
+                            bits.append((f"[{c_['en_stem']}] " if len(ctxs) > 1 else "") + "どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
+                if skipped_en:
+                    bits.append("読み込めなかった英語版: " + "、".join(skipped_en))
                 if stopped:
                     bits.insert(0, "中止しました(もう一度スタートすると、調べ済みの録画は飛ばして続きから進みます)")
                 self.find_msg.config(text=("" if stopped else "✔ ") + "。".join(bits), fg="#1f6f43" if not (res["ng"] or res["warn"]) else "#8a5a00")
@@ -4145,7 +4212,7 @@ class App(_TkBase):
         if not DND_FILES:
             self.say("ドラッグ&ドロップを使うには: pip install tkinterdnd2 (なくても動作します)")
             return
-        targets = {self: None, self.clip_en_ent: "clipen", self.find_en_ent: "clipen", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
+        targets = {self: None, self.clip_en_ent: "clipen", self.find_en_ent: "clipen", self.find_en_frame: "findens", self.en2_tree: "findens", self.cm_tree: "findens", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
                    self.jp_ent: "jp", self.tr["jp"]: "jp", self.pv["jp"]: "jp"}
         for k, z in self.zone.items():
             for w in (z["frame"], z["title"], z["name"]):
@@ -4162,6 +4229,15 @@ class App(_TkBase):
             self.clip_en.set(files[0])
             if not self.clip_out.get():
                 self.clip_out.set(str(Path(files[0]).parent))
+            return
+        if k == "findens":  # 録画から探すタブの、英語版の欄: 1本目が空なら1本目に、すでにあれば「ほかの英語版」に追加
+            fl = [f for f in files if Path(f).is_file() and not f.lower().endswith(".json")]
+            if fl and not self.en_var.get().strip():
+                self.en_var.set(fl.pop(0))
+            for x in fl:
+                if x not in self.find_en_extra and x != self.en_var.get().strip():
+                    self.find_en_extra.append(x)
+            self._en2_fill()
             return
         if self.nb.select() == str(self.findt):  # 録画から探すタブ: ファイルもフォルダも日本語の録画として追加
             self._find_add_files(files)
