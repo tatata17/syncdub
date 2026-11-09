@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.30"
+APP_VERSION = "2026.11.09.31"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 14     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 15     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1583,6 +1583,8 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, l
     return res
 
 
+VSCAN_SIM = 0.7     # 映像だけで探すとき、画面が「似ている」とみなす基準
+VSCAN_WIN = 3.0     # 時間差がこの秒数の範囲に入るものを同じ並びとみなす
 SHORT_MIN_L = 35.0   # この秒数以上の長いCMだけ、短縮版・途中で切れた版も探す
 EDGE_SIM = 0.5       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
 
@@ -1747,7 +1749,7 @@ def scan_jp_thumbs(path, stop=None):
     sd = a.std(1)
     ok = sd >= 4.0
     X = (a - a.mean(1, keepdims=True)) / np.where(ok, sd, 1.0)[:, None]
-    return X, ok
+    return X, ok, fast
 
 
 def en_probes(en, cl):
@@ -1766,11 +1768,13 @@ def en_probes(en, cl):
     return out
 
 
-def video_scan_hits(en, jp, probes, th, max_anchor=8):
+def video_scan_hits(en, jp, probes, th, max_anchor=8, diag=None):
     """録画の画面を1秒ごとに見て、英語版の長いCMの画面とよく似た所が、時間差そろって並んでいる場所を探す(音が合わない版用)。
     戻り値: {CM番号: [{"t","e","l","z"}, …]}  t=録画の時刻、e=英語版の開始、l=長さ"""
-    X, ok = th
+    X, ok = th[0], th[1]
     idx = np.where(ok)[0]
+    if diag is not None:
+        diag.update({"frames": int(len(ok)), "valid": int(ok.sum()), "fast": bool(th[2]) if len(th) > 2 else None})
     if len(idx) < 10:
         return {}
     J = X[idx]
@@ -1782,7 +1786,7 @@ def video_scan_hits(en, jp, probes, th, max_anchor=8):
         S = P @ J.T / P.shape[1]
         pairs = []
         for i in range(S.shape[0]):
-            for jj in np.nonzero(S[i] >= 0.8)[0]:
+            for jj in np.nonzero(S[i] >= VSCAN_SIM)[0]:
                 pairs.append((jsec[jj] - pr[i][0], i, float(S[i, jj])))
         if len(pairs) < 4:
             continue
@@ -1793,9 +1797,12 @@ def video_scan_hits(en, jp, probes, th, max_anchor=8):
         for a_ in range(len(pairs)):
             if used[a_]:
                 continue
-            b_ = int(np.searchsorted(os_, os_[a_] + 2.0))
+            b_ = int(np.searchsorted(os_, os_[a_] + VSCAN_WIN))
             grp = [q for q, u in zip(pairs[a_:b_], used[a_:b_]) if not u]
             ids = {q[1] for q in grp}
+            if diag is not None and len(ids) >= 2:
+                dl = diag.setdefault("best", [])
+                dl.append([int(k), len(ids), round(float(os_[a_]), 1), round(min(pr[i][0] for i in ids), 1), round(max(pr[i][0] for i in ids), 1)])
             if len(ids) >= 4:
                 es = [pr[i][0] for i in ids]
                 if max(es) - min(es) >= 9.0:
@@ -3337,7 +3344,10 @@ class App(_TkBase):
                                     if stop.is_set():
                                         raise _Stop()
                                     if th_ is not None:
-                                        extra = video_scan_hits(en, jp, probes, th_)
+                                        vd_ = {}
+                                        extra = video_scan_hits(en, jp, probes, th_, diag=vd_)
+                                        vd_["best"] = sorted(vd_.get("best", []), key=lambda x: -x[1])[:8]
+                                        dropped.append({"video_scan_diag": vd_})
                                         dropped.append({"video_scan": {str(k_): [[round(h_["e"], 1), round(h_["t"], 1), round(h_["l"], 1)] for h_ in v_] for k_, v_ in extra.items()}})
                                 sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog, extra=extra)
                                 dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
