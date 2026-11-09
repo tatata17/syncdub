@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.29"
+APP_VERSION = "2026.11.09.30"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 13     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 14     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1710,7 +1710,123 @@ def _discover_runs(en, jp, a_cm, b_cm, runs, jend, ecache):
     return out
 
 
-def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None):
+def scan_jp_thumbs(path, stop=None):
+    """録画全体を、1秒に1コマ(キーフレームだけを読むので速い)の小さな白黒画像にして返す。
+    戻り値: (正規化した画像 (N, 1728) float32, 使える画像か (N,) bool)。止められたら None。"""
+    W, H = 48, 36
+    # キーフレームが約3秒以内ごとにある録画だけ、キーフレームだけ読んで速くする(間隔が長いと、1秒ごとの画面が取れない)
+    fast = False
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-skip_frame", "nokey", "-select_streams", "v:0", "-read_intervals", "0%120",
+                            "-show_entries", "frame=pts_time", "-of", "csv=p=0", path], capture_output=True, timeout=120, **NOWIN)
+        fast = len([x for x in r.stdout.decode(errors="ignore").split() if x.strip()]) >= 40
+    except Exception:  # noqa: BLE001
+        pass
+    pre_ = ["-skip_frame", "nokey"] if fast else ["-hwaccel", "auto"]
+    p = subprocess.Popen(["ffmpeg", "-v", "error", *pre_, "-i", path, "-an", "-sn",
+                          "-vf", f"fps=1,scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **NOWIN)
+    chunks = []
+    try:
+        while True:
+            b = p.stdout.read(W * H * 600)
+            if not b:
+                break
+            chunks.append(b)
+            if stop is not None and stop.is_set():
+                p.kill()
+                return None
+    finally:
+        p.stdout.close()
+        p.wait()
+    raw = b"".join(chunks)
+    n = len(raw) // (W * H)
+    if n < 10:
+        return None
+    a = np.frombuffer(raw[: n * W * H], np.uint8).reshape(n, W * H).astype(np.float32)
+    sd = a.std(1)
+    ok = sd >= 4.0
+    X = (a - a.mean(1, keepdims=True)) / np.where(ok, sd, 1.0)[:, None]
+    return X, ok
+
+
+def en_probes(en, cl):
+    """長いCMごとに、3秒おきの画面(小さな白黒画像)を取っておく。戻り値: {CM番号: [(英語版の時刻, 画像), …]}"""
+    out = {}
+    for k, (a, b) in enumerate(cl):
+        if b - a < SHORT_MIN_L:
+            continue
+        pr = []
+        for e in np.arange(a + 1.5, b - 1.0, 3.0):
+            x = _thumb(en, float(e))
+            if x is not None:
+                pr.append((float(e), x.reshape(-1)))
+        if len(pr) >= 5:
+            out[k] = pr
+    return out
+
+
+def video_scan_hits(en, jp, probes, th, max_anchor=8):
+    """録画の画面を1秒ごとに見て、英語版の長いCMの画面とよく似た所が、時間差そろって並んでいる場所を探す(音が合わない版用)。
+    戻り値: {CM番号: [{"t","e","l","z"}, …]}  t=録画の時刻、e=英語版の開始、l=長さ"""
+    X, ok = th
+    idx = np.where(ok)[0]
+    if len(idx) < 10:
+        return {}
+    J = X[idx]
+    jsec = idx.astype(np.float64)
+    res = {}
+    allc = []
+    for k, pr in probes.items():
+        P = np.stack([x for _e, x in pr])
+        S = P @ J.T / P.shape[1]
+        pairs = []
+        for i in range(S.shape[0]):
+            for jj in np.nonzero(S[i] >= 0.8)[0]:
+                pairs.append((jsec[jj] - pr[i][0], i, float(S[i, jj])))
+        if len(pairs) < 4:
+            continue
+        pairs.sort()
+        os_ = np.array([q[0] for q in pairs])
+        used = np.zeros(len(pairs), bool)
+        cl_ = []
+        for a_ in range(len(pairs)):
+            if used[a_]:
+                continue
+            b_ = int(np.searchsorted(os_, os_[a_] + 2.0))
+            grp = [q for q, u in zip(pairs[a_:b_], used[a_:b_]) if not u]
+            ids = {q[1] for q in grp}
+            if len(ids) >= 4:
+                es = [pr[i][0] for i in ids]
+                if max(es) - min(es) >= 9.0:
+                    cl_.append((len(ids), grp, min(es), max(es)))
+                    used[a_:b_] = True
+        cl_.sort(key=lambda c: -c[0])
+        for n_, grp, e0, e1 in cl_[:3]:
+            best = {}
+            for o, i, sm in grp:
+                if i not in best or sm > best[i][1]:
+                    best[i] = (o, sm)
+            o0 = float(np.median([v[0] for v in best.values()]))
+            allc.append((n_, k, o0, e0, e1, float(np.mean([v[1] for v in best.values()]))))
+    allc.sort(key=lambda c: -c[0])
+    for n_, k, o0, e0, e1, sm in allc[:max_anchor]:
+        pe = [e for e, _x in probes[k]][:: max(1, n_ // 3)][:3]
+
+        def score(o, pe=pe):
+            sc = []
+            for e in pe:
+                x, y = _thumb(en, e), _thumb(jp, e + o)
+                if x is not None and y is not None:
+                    sc.append(_pair_sim(x, y))
+            return float(np.mean(sc)) if sc else -1.0
+        bo = max((o0 + d_ for d_ in np.arange(-1.0, 1.01, 0.25)), key=score)
+        bo = max((bo + d_ for d_ in np.arange(-0.25, 0.251, 0.05)), key=score)
+        res.setdefault(k, []).append({"t": e0 - 1.5 + bo, "e": e0 - 1.5, "l": e1 - e0 + 3.0, "z": 12.0, "vid": True})
+    return res
+
+
+def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None, extra=None):
     """長いCMの短縮版・途中で切れた版を探す。pieces(CMを約10秒ずつに分けたもの)の各部分を録画から探した結果 phits のうち、
     画面も合うものを、録画と英語版の時間差(オフセット)が同じ部分ごとにまとめて区間にし、画面の合う範囲に両端をぴったり合わせる。
     区間が順番どおりに並び、合計2か所以上で合っていれば1つの短縮版とみなす。
@@ -1735,6 +1851,8 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
         if v is None or not (vid_good({"v": v, "z": h["z"]}) or sum(1 for f_ in vf if f_ >= 0.8) >= 2):
             continue
         hits.setdefault(k, []).append({"t": h["t"], "e": a, "l": b - a, "z": h["z"]})
+    for k, hl_ in (extra or {}).items():   # 映像だけで見つけた場所(音が合わない版)
+        hits.setdefault(k, []).extend(hl_)
     out = []
     ecache = {}
     for k, hl in hits.items():
@@ -2838,6 +2956,7 @@ class App(_TkBase):
         self.find_out = tk.StringVar()
         self.find_crf = tk.IntVar(value=18)
         self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
+        self.find_vscan = tk.BooleanVar(value=True)
         self.find_files, self.find_cms = [], []
         self._find_cms_src = ""  # 一覧の元になった英語版のファイル(替えたら一覧を消して、やり直す)
         self.en_var.trace_add("write", lambda *a: self._find_en_changed())
@@ -2904,6 +3023,9 @@ class App(_TkBase):
         self.find_codec_cb = ttk.Combobox(r4, textvariable=self.find_codec, state="readonly", width=20,
                                           values=("自動 (HEVC優先)", "H.264 (どの機器でも再生しやすい)"))
         self.find_codec_cb.pack(side="left")
+        vs = ttk.Checkbutton(r4, text="音が合わない短縮版も映像で探す(遅い)", variable=self.find_vscan)
+        vs.pack(side="left", padx=(18, 0))
+        Tooltip(vs, "日本語版の音が英語版と違っても、画面が同じなら短縮版・途中で切れた版として見つけます。録画1本あたり数分長くかかります。")
         r5 = ttk.Frame(f)
         self.find_btn = ttk.Button(r5, text="探してスタート", command=self.run_find)
         self.find_btn.pack(side="left", ipadx=14, ipady=4)
@@ -3026,6 +3148,7 @@ class App(_TkBase):
             crf = 18
         codec = "h264" if self.find_codec.get().startswith("H.264") else "auto"
         ast = self.jp_ast.get()
+        vscan = bool(self.find_vscan.get())
         cms_ts = list(self.find_cms) if self._find_cms_src == en_p else []  # 別の英語版の一覧は使わない
         self.find_btn.state(["disabled"])
         self._find_stop_ev.clear()
@@ -3088,14 +3211,21 @@ class App(_TkBase):
             res = {"ok": 0, "warn": 0, "ng": 0, "skip": 0}
             en_stem = safe(Path(en_p).stem)
             stopped = False
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
             pre = {}
+            prev = {}
+            probes = {}
+            if vscan:
+                try:
+                    probes = en_probes(en, cl)
+                except Exception:  # noqa: BLE001
+                    probes = {}
 
             def needs(p):
                 try:
                     e = rec["files"].get(p)
                     sx = Path(p).stat()
-                    return not (e and e.get("key") == [sx.st_size, int(sx.st_mtime)])
+                    return not (e and e.get("key") == [sx.st_size, int(sx.st_mtime), int(vscan)])
                 except OSError:
                     return False
             for i, jp_p in enumerate(files):
@@ -3119,7 +3249,7 @@ class App(_TkBase):
                 try:
                     try:
                         fst = Path(jp_p).stat()
-                        fkey = [fst.st_size, int(fst.st_mtime)]
+                        fkey = [fst.st_size, int(fst.st_mtime), int(vscan)]
                     except OSError:
                         fkey = None
                     ent = rec["files"].get(jp_p)
@@ -3138,8 +3268,12 @@ class App(_TkBase):
                         st("音を探しています…")
                         fut = pre.pop(jp_p, None)
                         jp = fut.result() if fut else LightMedia(jp_p, ast)
+                        if probes and jp_p not in prev:
+                            prev[jp_p] = pool.submit(scan_jp_thumbs, jp_p, stop)   # 映像の下調べ(1秒1コマ)も、音を探している間に進めておく
                         if i + 1 < n and files[i + 1] not in pre and needs(files[i + 1]):
                             pre[files[i + 1]] = pool.submit(LightMedia, files[i + 1], ast)  # 次の録画を、探している間に先に読み込んでおく
+                            if probes:
+                                prev[files[i + 1]] = pool.submit(scan_jp_thumbs, files[i + 1], stop)
                         dropped = []
                         hits = find_in_recording(cms, jp, prog, dropped=dropped)
                         jo = []
@@ -3195,7 +3329,17 @@ class App(_TkBase):
                             try:
                                 phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog, loose=True)
                                 plog = []
-                                sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog)
+                                extra = {}
+                                fv_ = prev.pop(jp_p, None)
+                                if fv_ is not None:
+                                    st("映像を調べています…")
+                                    th_ = fv_.result()
+                                    if stop.is_set():
+                                        raise _Stop()
+                                    if th_ is not None:
+                                        extra = video_scan_hits(en, jp, probes, th_)
+                                        dropped.append({"video_scan": {str(k_): [[round(h_["e"], 1), round(h_["t"], 1), round(h_["l"], 1)] for h_ in v_] for k_, v_ in extra.items()}})
+                                sv_ = find_short_versions(en, jp, cl, pcs, phits, vcache, keep, dropped, plog=plog, extra=extra)
                                 dropped.append({"pieces_found": sum(len(x) for x in phits), "log": plog[:60]})
                                 for e_ in sv_:
                                     # 短縮版と重なる「映像が合わず除外」の記録は、短縮版だったという説明がつくので消す
