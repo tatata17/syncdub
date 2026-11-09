@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.32"
+APP_VERSION = "2026.11.09.33"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 16     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 20     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1833,6 +1833,196 @@ def video_scan_hits(en, jp, probes, th, max_anchor=8, diag=None):
     return res
 
 
+def _thumbs_fps(path, fps, ss=0.0, dur=None):
+    """動画の ss 秒から dur 秒分(省略すると最後まで)を、1秒に fps コマの小さな白黒画像にして返す。
+    戻り値: (正規化した画像 (N,1728), 使えるか (N,))"""
+    W, H = 48, 36
+    cmd = ["ffmpeg", "-v", "error"]
+    if ss > 0:
+        cmd += ["-ss", f"{ss:.4f}"]
+    if dur is not None:
+        cmd += ["-t", f"{dur:.4f}"]
+    cmd += ["-i", path, "-an", "-sn", "-vf", f"fps={fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"]
+    r = subprocess.run(cmd, capture_output=True, **NOWIN)
+    n = len(r.stdout) // (W * H)
+    a = np.frombuffer(r.stdout[: n * W * H], np.uint8).reshape(n, W * H).astype(np.float32)
+    sd = a.std(1)
+    ok = sd >= 4.0
+    return (a - a.mean(1, keepdims=True)) / np.where(ok, sd, 1.0)[:, None], ok
+
+
+def fine_map_runs(en_path, jp_path, fps=8, jump_cost=0.35, min_sim=0.6, en_win=(0.0, None), jp_win=(0.0, None)):
+    """日本語版(jp_path)の画面を細かく、英語版(en_path)のどこに当たるか1コマずつ調べ、連続する区間にまとめる。
+    英語版を細かく編集し直した版(2〜4秒ごとに英語版の別の場所へ飛ぶもの)用。英語版では前に戻らない前提。
+    en_win / jp_win = (開始秒, 長さ) で範囲を絞れる。戻り値の時刻は、それぞれ範囲の先頭が0の相対時刻。
+    戻り値: [{"jp0","jp1","en0","en1","sim","good"}, …]"""
+    EX, eok = _thumbs_fps(en_path, fps, *en_win)
+    JX, jok = _thumbs_fps(jp_path, fps, *jp_win)
+    S = JX @ EX.T / EX.shape[1]
+    S[~jok, :] = 0.0
+    S[:, ~eok] = 0.0
+    J, E = S.shape
+    NEG = -1e9
+    dp = np.full((J, E), NEG, np.float32)
+    bk = np.zeros((J, E), np.int32)      # 前のコマの英語版位置
+    dp[0] = S[0]
+    for j in range(1, J):
+        prev = dp[j - 1]
+        cont = np.full(E, NEG, np.float32)
+        cont[1:] = prev[:-1]
+        pm = np.maximum.accumulate(prev)        # e より手前のどこかから飛んでくる
+        pa = np.zeros(E, np.int32)
+        am = np.zeros(E, np.int32)
+        best = 0
+        for e in range(E):
+            if prev[e] > prev[best]:
+                best = e
+            am[e] = best
+        jmp = np.full(E, NEG, np.float32)
+        jmp[1:] = pm[:-1] - jump_cost
+        stay = prev - 0.05                  # 英語版の同じコマに留まる(日本語版だけの場面や、範囲の外のコマ用)
+        best_prev = np.concatenate([[0], am[:-1]])
+        cand = np.stack([cont, jmp, stay])
+        pick = cand.argmax(0)
+        dp[j] = S[j] + cand.max(0)
+        bk[j] = np.where(pick == 0, np.arange(E) - 1, np.where(pick == 1, best_prev, np.arange(E)))
+    e = int(dp[-1].argmax())
+    path = [0] * J
+    for j in range(J - 1, -1, -1):
+        path[j] = e
+        e = int(bk[j][e]) if j > 0 else e
+    runs = []
+    for j in range(J):
+        e_ = path[j]
+        sm = float(S[j, e_])
+        stayed = j > 0 and e_ == path[j - 1]      # 英語版が進まないコマ=英語版に対応する場面がない
+        if stayed:
+            sm = min(sm, 0.0)
+        if runs and e_ == runs[-1]["e_last"] + 1 and (sm >= min_sim) == runs[-1]["good"]:
+            r = runs[-1]
+            r["j_last"], r["e_last"] = j, e_
+            r["sims"].append(sm)
+        else:
+            runs.append({"j0": j, "j_last": j, "e0": e_, "e_last": e_, "sims": [sm], "good": sm >= min_sim})
+    out = []
+    for r in runs:
+        out.append({"jp0": r["j0"] / fps, "jp1": (r["j_last"] + 1) / fps, "en0": r["e0"] / fps, "en1": (r["e_last"] + 1) / fps,
+                    "sim": float(np.mean(r["sims"])), "good": r["good"]})
+    # 前後の似かたの低い区間(CMの外の場面)は、先に外す。同じ時間差でつながっていても、外側のコマは取り込まない
+    # 前後の似かたの低い所の合計が0.6秒未満なら(暗転や音だけの出入り)残す。それ以上は、CMの外の場面として外す
+    for _ in range(2):
+        n_ = 0
+        while n_ < len(out) and not out[n_]["good"]:
+            n_ += 1
+        if n_ and (n_ >= len(out) or out[n_ - 1]["jp1"] - out[0]["jp0"] >= 0.6):
+            del out[:n_]
+        out.reverse()
+        for r in out:
+            r["jp0"], r["jp1"], r["en0"], r["en1"] = -r["jp1"], -r["jp0"], -r["en1"], -r["en0"]
+    # 時間差(英語版の時刻 − 日本語版の時刻)が同じ区間は、間に似かたの低いコマ(フラッシュなど)が挟まっていてもひとつにする
+    merged = []
+    for r in out:
+        if merged and abs((r["en0"] - r["jp0"]) - (merged[-1]["en0"] - merged[-1]["jp0"])) <= 0.15:
+            m_ = merged[-1]
+            n0, n1 = m_["jp1"] - m_["jp0"], r["jp1"] - r["jp0"]
+            m_["sim"] = (m_["sim"] * n0 + r["sim"] * n1) / (n0 + n1)
+            m_["jp1"], m_["en1"] = r["jp1"], r["en1"]
+            m_["good"] = m_["sim"] >= min_sim
+        else:
+            merged.append(dict(r))
+    # 短い(0.4秒未満)似かたの低い区間は、前の区間の続きとして吸収する(日本語の音声は途切れさせない)
+    res = []
+    for r in merged:
+        if res and not r["good"] and r["jp1"] - r["jp0"] < 0.4:
+            m_ = res[-1]
+            m_["jp1"] = r["jp1"]
+            m_["en1"] = m_["en0"] + (m_["jp1"] - m_["jp0"])
+        else:
+            res.append(r)
+    return res
+
+
+def refine_fine_cuts(en, jp, runs, fps=29.97):
+    """fine_map_runs の区間のつなぎ目を、1コマ単位に合わせ直す。前後の区間それぞれの対応(時間差)で画面を見比べ、
+    前の区間の画面が続く最後のコマと、次の区間の画面が始まる最初のコマの間を、つなぎ目にする。
+    en, jp は path と voff を持つもの(時刻は動画の先頭=0 の絶対時刻の runs を渡す)。"""
+    step = 1.0 / fps
+    for a, b in zip(runs, runs[1:]):
+        tb = a["jp1"]
+        oa, ob = a["en0"] - a["jp0"], b["en0"] - b["jp0"]
+        cache = {}
+
+        def sim(t, o):
+            key = (round(t, 4), round(o, 4))
+            if key not in cache:
+                x, y = _thumb(jp, t), _thumb(en, t + o)
+                cache[key] = -0.2 if (x is None or y is None) else _pair_sim(x, y)
+            return cache[key]
+        best, bt = -1e9, tb
+        for c in [tb + k * step for k in range(-8, 9)]:   # c より前は a の対応、c 以降は b の対応
+            sc = sum(sim(t, oa) for t in (c - 2 * step, c - step)) + sum(sim(t, ob) for t in (c, c + step))
+            if sc > best:
+                best, bt = sc, c
+        a["jp1"], a["en1"] = bt, bt + oa
+        b["jp0"], b["en0"] = bt, bt + ob
+    return runs
+
+
+def fine_version(en, jp, a_cm, b_cm, j0, j1, margin=6.0, diag=None):
+    """録画の j0〜j1 付近にある、英語版CM(a_cm〜b_cm)を細かく編集し直した版を調べる。
+    日本語版の画面を英語版へ1コマずつ当てて、合う範囲が全体の85%以上なら、その区間の並びを返す。
+    戻り値: None または {"runs":[[英開始,英終了,録画開始],…], "jp0","jp1","v"}"""
+    js = max(jp.a_origin, j0 - margin)
+    je = j1 + margin
+    runs = fine_map_runs(en.path, jp.path, en_win=(a_cm + en.voff, b_cm - a_cm), jp_win=(js + jp.voff, je - js))
+    for r in runs:   # 範囲の先頭が0の相対時刻 → 動画の先頭=0 の絶対時刻
+        r["en0"] += a_cm
+        r["en1"] += a_cm
+        r["jp0"] += js
+        r["jp1"] += js
+    # 英語版のCMの終わりより先(次のCMなど)に当たった所は、CMの外なので切り落とす(終わりの余裕は0.6秒)
+    lim = b_cm + 0.6
+    cut = []
+    for r in runs:
+        if r["en0"] >= lim - 0.2:
+            continue
+        if r["en1"] > lim:
+            r["jp1"] -= r["en1"] - lim
+            r["en1"] = lim
+        cut.append(r)
+    runs = cut
+    if diag is not None:
+        diag["win"] = [round(js, 1), round(je, 1)]
+        diag["raw"] = [[round(r["en0"], 1), round(r["en1"], 1), round(r["jp0"], 1), round(r["jp1"], 1), round(r["sim"], 2), int(r["good"])] for r in runs][:30]
+    while runs and not runs[0]["good"]:
+        runs.pop(0)
+    while runs and not runs[-1]["good"]:
+        runs.pop()
+    if len(runs) < 2:
+        if diag is not None:
+            diag["why"] = "runs<2"
+        return None
+    tot = runs[-1]["jp1"] - runs[0]["jp0"]
+    good = sum(r["jp1"] - r["jp0"] for r in runs if r["good"])
+    if tot < 8.0 or good < 0.85 * tot:
+        if diag is not None:
+            diag["why"] = "good %.1f/%.1f" % (good, tot)
+        return None
+    sim = sum(r["sim"] * (r["jp1"] - r["jp0"]) for r in runs if r["good"]) / good
+    if sim < 0.85:
+        if diag is not None:
+            diag["why"] = "sim %.2f" % sim
+        return None
+    runs = refine_fine_cuts(en, jp, runs)
+    runs = [r for r in runs if r["jp1"] - r["jp0"] >= 0.1]
+    if len(runs) < 2 or any(b["en0"] < a["en1"] - 0.05 for a, b in zip(runs, runs[1:])):
+        if diag is not None:
+            diag["why"] = "overlap"
+        return None   # 英語版の時刻が前に戻る/重なるものは対象外
+    return {"runs": [[round(r["en0"], 4), round(r["en1"], 4), round(r["jp0"], 4)] for r in runs],
+            "jp0": runs[0]["jp0"], "jp1": runs[-1]["jp1"], "v": round(sim, 2)}
+
+
 def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40, plog=None, extra=None):
     """長いCMの短縮版・途中で切れた版を探す。pieces(CMを約10秒ずつに分けたもの)の各部分を録画から探した結果 phits のうち、
     画面も合うものを、録画と英語版の時間差(オフセット)が同じ部分ごとにまとめて区間にし、画面の合う範囲に両端をぴったり合わせる。
@@ -1964,10 +2154,33 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             vm = round(vs / ws, 2) if ws >= 0.6 * tot else None
             z = max(r["z"] for r in ch)
             if vm is None or not vid_good({"v": vm, "z": z}):
+                if not ov:   # 細かく編集し直された版(2〜4秒ごとに英語版の別の場所へ飛ぶもの)かもしれない。1コマずつ当てて調べる
+                    fd_ = {}
+                    try:
+                        fv = fine_version(en, jp, a_cm, b_cm, j0, j1, diag=fd_)
+                    except Exception as ex_:  # noqa: BLE001
+                        fv = None
+                        fd_["why"] = "例外 %s" % ex_
+                    if fv is not None and not any(abs(o_["t"] - fv["jp0"]) < 3.0 and o_["k"] == k for o_ in out):
+                        out.append({"k": k, "t": fv["jp0"], "z": z, "ok": True, "L": fv["jp1"] - fv["jp0"], "zz": None, "np": None, "n": None,
+                                    "v": fv["v"], "vf": [], "short": True, "fine": True, "out_len": fv["jp1"] - fv["jp0"],
+                                    "runs": fv["runs"], "jp_span": [fv["jp0"], fv["jp1"]], "voff": jp.voff})
+                        continue
                 if dropped is not None:
-                    dropped.append({"k": k, "t": round(j0, 2), "z": round(z, 1), "v": vm, "short": True})
+                    dropped.append({"k": k, "t": round(j0, 2), "z": round(z, 1), "v": vm, "short": True,
+                                    "fine_diag": dict(fd_, span=[round(j0, 1), round(j1, 1)]) if not ov else "ov"})
                 continue
             short = tot < 0.95 * (b_cm - a_cm)
+            if short and not ov:   # 見つかった区間の前後にも、細かく編集された続きがあるか調べる(あれば、そちらのほうが長く正確)
+                try:
+                    fv = fine_version(en, jp, a_cm, b_cm, j0, j1)
+                except Exception:  # noqa: BLE001
+                    fv = None
+                if fv is not None and (fv["jp1"] - fv["jp0"]) > (j1 - j0) + 2.0:
+                    out.append({"k": k, "t": fv["jp0"], "z": z, "ok": True, "L": fv["jp1"] - fv["jp0"], "zz": None, "np": None, "n": None,
+                                "v": fv["v"], "vf": [], "short": True, "fine": True, "out_len": fv["jp1"] - fv["jp0"],
+                                "runs": fv["runs"], "jp_span": [fv["jp0"], fv["jp1"]], "voff": jp.voff})
+                    continue
             if ov:
                 # 一部の画面だけ合わないCM全体の一致(終わりが途中で切れた版など)は、画面の合う範囲だけの短縮版に置きかえる
                 if not (short and all((not e_.get("runs")) and e_.get("vf") and min(e_["vf"]) < 0.4 and vm >= e_["v"] + 0.1 for e_ in ov)):
@@ -3425,7 +3638,9 @@ class App(_TkBase):
                         proj = {"en_video": en_p, "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
                                 "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
                                 "segments": ([{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "fit": "stretch"} for r_ in d["runs"]]
-                                             if d.get("runs") else
+                                             if d.get("runs") and not d.get("fine") else
+                                             [{"en_start": r_[0], "en_end": r_[1], "jp_start": r_[2], "jp_end": (d["runs"][q_ + 1][2] if q_ + 1 < len(d["runs"]) else d["jp_span"][1]), "fit": "stretch"}
+                                              for q_, r_ in enumerate(d["runs"])] if d.get("fine") else
                                              [{"en_start": round(a, 4), "en_end": round(b, 4), "jp_start": round(d["t"], 4), "fit": "stretch"}]),
                                 "clip": ({"start": d["runs"][0][0], "end": d["runs"][-1][1], "crf": crf, "preset": "medium", "codec": codec}
                                          if d.get("runs") else
@@ -3437,6 +3652,18 @@ class App(_TkBase):
                             buf = io.StringIO()
                             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                                 main([str(pj)])
+                            if d.get("fine"):
+                                # 細かく編集し直された版は、日本語音声が連続しているので、区間ごとに切らず元の音をそのまま使う
+                                # (区間ごとに切ると、つなぎ目で数ミリ秒の音の欠けやずれが出る)
+                                tmp_o = out.with_name(out.stem + ".tmp.mkv")
+                                j0_, j1_ = d["jp_span"]
+                                cmd_ = ["ffmpeg", "-y", "-v", "error", "-i", str(out), "-ss", f"{j0_ + d.get('voff', 0.0):.6f}", "-t", f"{j1_ - j0_:.6f}",
+                                        "-i", jp_p, "-map", "0:v:0", "-map", f"1:a:{int(ast or 0)}", "-map", "0:a:1?", "-c:v", "copy",
+                                        "-c:a:0", "aac", "-b:a:0", "256k", "-c:a:1", "copy",
+                                        "-metadata:s:a:0", "language=jpn", "-metadata:s:a:0", "title=Japanese dub (synced)", "-disposition:a:0", "default",
+                                        "-metadata:s:a:1", "language=eng", "-disposition:a:1", "0", str(tmp_o)]
+                                subprocess.run(cmd_, check=True, capture_output=True, **NOWIN)
+                                os.replace(tmp_o, out)
                         finally:
                             shutil.rmtree(tmpd, ignore_errors=True)
                         nw += 1
