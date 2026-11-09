@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.27"
+APP_VERSION = "2026.11.09.28"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 11     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 12     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1584,7 +1584,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, l
 
 
 SHORT_MIN_L = 35.0   # この秒数以上の長いCMだけ、短縮版・途中で切れた版も探す
-EDGE_SIM = 0.5       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
+EDGE_SIM = 0.7       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
 
 
 def make_pieces(cl):
@@ -1797,6 +1797,14 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
             else:
                 chains.append([r])
         for ch in chains:
+            # 録画のうえで前の区間の終わりより手前から始まる(同じ所を2回使う)と、繰り返しに聞こえる。重ならないように直す
+            for r1, r2 in zip(ch, ch[1:]):
+                gap = (r2["x0"] + r2["o"]) - (r1["x1"] + r1["o"])
+                if gap < 0:
+                    if r2.get("vid"):
+                        r2["o"] -= gap          # 映像だけで見つけた側は時間差の誤差があり得るので、そちらを直す
+                    elif r1["x1"] + gap - r1["x0"] >= 2.0:
+                        r1["x1"] += gap
             tot = sum(r["x1"] - r["x0"] for r in ch)
             if tot < 8.0 or (sum(r["n"] for r in ch) < 2 and tot < 15.0):
                 continue
