@@ -499,7 +499,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.09.28"
+APP_VERSION = "2026.11.09.29"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -1469,7 +1469,7 @@ def round5(sec):
     return max(5, int(sec / 5.0 + 0.5) * 5)
 
 
-FIND_ALGO = 12     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
+FIND_ALGO = 13     # 探索の判定方式の世代(変えると、古い探索記録は使わずにやりなおす)
 ZZ_PASS = 14.0   # 窓(約10秒)ごとの照合で「一致」とみなす突出度。本物は16以上、誤検出は9以下だった
 ZZ_SOLO = 25.0   # 前半/後半の片方しか合わない短いCMは、その窓がこれ以上はっきりしているときだけ採用(誤検出は18以下、本物は39)
 ZZ_LAG = 0.15    # 窓の一致位置が全体の位置からずれてよい秒数
@@ -1584,7 +1584,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, l
 
 
 SHORT_MIN_L = 35.0   # この秒数以上の長いCMだけ、短縮版・途中で切れた版も探す
-EDGE_SIM = 0.7       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
+EDGE_SIM = 0.5       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
 
 
 def make_pieces(cl):
