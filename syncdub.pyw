@@ -37,7 +37,73 @@ except Exception:  # noqa: BLE001
 import argparse
 import json
 import re
-import subprocess
+import subprocess as _subprocess
+
+
+class Cancelled(BaseException):
+    """「中止」で ffmpeg を止めたときに投げる(普通の Exception では握りつぶされないように BaseException)。"""
+
+
+_LIVE = set()                      # 動いている ffmpeg など
+_LIVE_LOCK = threading.Lock()
+_CANCEL = threading.Event()        # 立っている間は、新しい外部プログラムを始めない
+
+
+def cancel_all():
+    """動いている外部プログラム(ffmpeg)を止める。止めた処理は Cancelled を投げる。"""
+    _CANCEL.set()
+    with _LIVE_LOCK:
+        for p in list(_LIVE):
+            try:
+                p.kill()
+            except OSError:
+                pass
+
+
+class _Sub:
+    """subprocess の代わり。run だけ、動いている間「止められる」ように登録する。"""
+
+    def __getattr__(self, n):
+        return getattr(_subprocess, n)
+
+    def run(self, cmd, input=None, capture_output=False, check=False, **kw):
+        if _CANCEL.is_set():
+            raise Cancelled()
+        if capture_output:
+            kw["stdout"] = kw["stderr"] = _subprocess.PIPE
+        if input is not None:
+            kw["stdin"] = _subprocess.PIPE
+        p = _subprocess.Popen(cmd, **kw)
+        with _LIVE_LOCK:
+            _LIVE.add(p)
+        try:
+            out, err = p.communicate(input)
+        except BaseException:
+            p.kill()
+            p.wait()
+            raise
+        finally:
+            with _LIVE_LOCK:
+                _LIVE.discard(p)
+        if _CANCEL.is_set() and p.returncode != 0:
+            raise Cancelled()
+        if check and p.returncode:
+            raise _subprocess.CalledProcessError(p.returncode, cmd, out, err)
+        return _subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
+subprocess = _Sub()
+
+
+def rm_retry(path, tries=8):
+    """書きかけのファイルを消す。止めた直後は使用中で消せないことがあるので、少し待って何度か試す。"""
+    for _ in range(tries):
+        try:
+            Path(path).unlink(missing_ok=True)
+            return True
+        except OSError:
+            time.sleep(0.3)
+    return False
 import sys
 from pathlib import Path
 
@@ -343,6 +409,47 @@ def drop_cut_gaps(segs, fps, thr=0.5):
 # ---------------------------------------------------------------- メイン
 
 
+def audio_lag(path, win=6.0, rng=3.0, sr=8000):
+    """書き出したファイルの日本語音声(1本目)と英語音声(2本目)を、BGM・効果音で突き合わせて、
+    全体が一定量ずれていないか調べる。戻り値: ずれ(秒; 負=日本語が早い)、または None(ずれなし・判定不能)"""
+    try:
+        raws = []
+        for i in (0, 1):
+            r = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-map", f"0:a:{i}", "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
+                               capture_output=True, check=True, **NOWIN).stdout
+            raws.append(np.frombuffer(r, dtype=np.int16).astype(np.float32))
+        j, e = raws
+        n = min(len(j), len(e))
+        W, R = int(win * sr), int(rng * sr)
+        if n < W + 2 * R:
+            return None
+        lags, ok0 = [], 0
+        for st in range(R, n - W - R + 1, W):
+            a = e[st:st + W]
+            b = j[st - R:st + W + R]
+            if a.std() < 30 or b.std() < 30:
+                continue
+            m = 1 << int(np.ceil(np.log2(len(a) + len(b))))
+            c = np.fft.irfft(np.fft.rfft(b, m) * np.conj(np.fft.rfft(a, m)), m)[:len(b) - len(a) + 1]
+            nrm = np.sqrt(np.convolve(b * b, np.ones(len(a), dtype=np.float32), "valid")[:len(c)] * float((a * a).sum()) + 1e-9)
+            c = c / nrm
+            i = int(np.argmax(c))
+            if c[i] >= 0.2 and c[R] < 0.5 * c[i]:
+                lags.append((i - R) / sr)
+            elif c[R] >= 0.2:
+                ok0 += 1
+        if len(lags) < 3:
+            return None
+        med = float(np.median(lags))
+        near = [x for x in lags if abs(x - med) < 0.03]
+        # 少なくとも3か所が同じずれを指し、かつ「ずれなしで合っている所」より多いときだけ採用する
+        if abs(med) < 0.06 or len(near) < 3 or len(near) < 2 * ok0 or len(near) < 0.5 * len(lags):
+            return None
+        return float(np.mean(near))
+    except Exception:
+        return None
+
+
 def main(argv=None):
     tmp = []  # 作業用の一時ファイルは、成功・失敗にかかわらず最後に必ず消す
     try:
@@ -499,7 +606,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.10.37"
+APP_VERSION = "2026.11.10.40"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -600,7 +707,8 @@ def parse_tc(text, fps):
 
 
 class Media:
-    def __init__(self, path, astream=0):
+    def __init__(self, path, astream=0, parts=None):
+        """parts: [(開始, 終了), …] を渡すと、その区間の音声だけを読み込む(slice で使えるのはその区間の中だけ)。"""
         self.path = path
         self.info = probe(path)
         self.cstart = fmt_start(self.info)
@@ -613,6 +721,24 @@ class Media:
         st = auds[self.astream].get("start_time")
         ast = float(st) if st not in (None, "N/A") else self.cstart
         self.a_origin = (ast - self.cstart) - self.voff  # 音声先頭の時刻(映像先頭=0基準)
+        self.chunks = None
+        if parts is not None:
+            self.chunks = []
+            for t0, t1 in parts:
+                ta = max(t0 - 0.1, self.a_origin)
+                tb = t1 + 0.1
+                if tb <= ta:
+                    continue
+                r = subprocess.run(
+                    ["ffmpeg", "-v", "error", "-ss", f"{ta + self.voff:.4f}", "-t", f"{tb - ta:.4f}", "-i", path,
+                     "-map", f"0:a:{self.astream}", "-vn", "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"],
+                    capture_output=True, check=True, **NOWIN).stdout
+                self.chunks.append((int(round((ta - self.a_origin) * SR)), np.frombuffer(r, dtype=np.int16).astype(np.float32) / 32768))
+            self.x = np.zeros(0, np.float32)
+            self.mn = self.mx = np.zeros(0, np.float32)
+            self.scale = 1.0
+            self.end = fmt_duration(self.info) - self.voff
+            return
         raw = subprocess.run(
             ["ffmpeg", "-v", "error", "-i", path, "-map", f"0:a:{self.astream}", "-vn",
              "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"],
@@ -629,6 +755,12 @@ class Media:
         i0 = int(round((t0 - self.a_origin) * SR))
         n = int(round((t1 - t0) * SR))
         out = np.zeros(max(n, 0), np.float32)
+        if self.chunks is not None:   # 区間だけ読み込んだ場合
+            for cs, cx in self.chunks:
+                a, b = max(i0, cs), min(i0 + n, cs + len(cx))
+                if b > a:
+                    out[a - i0: b - i0] = cx[a - cs: b - cs]
+            return out
         a, b = max(i0, 0), min(i0 + n, len(self.x))
         if b > a:
             out[a - i0: b - i0] = self.x[a:b]
@@ -825,6 +957,13 @@ class RangeSelect:
         self.tree.focus(children[new])
         self.tree.see(children[new])
         return "break"
+
+
+def vscroll(tree):
+    """表(Treeview)の右に縦のスクロールバーを付ける。tree.pack(side="left") の直後に呼ぶ。"""
+    sb = ttk.Scrollbar(tree.master, orient="vertical", command=tree.yview)
+    sb.pack(side="left", fill="y")
+    tree.configure(yscrollcommand=sb.set)
 
 
 def enable_multiselect(tree, on_delete=None):
@@ -1427,6 +1566,22 @@ def auto_align(en, jp, progress=lambda f, m: None):
 
 # ------------------------------------------------------------------ 指定 → 区間の計算
 
+def pick_gaps(blacks, sil):
+    """黒画面のうち、CMの切れ目とみなすものを選ぶ。
+    無音をともなう黒画面は切れ目。無音がなくても0.4秒以上の黒画面は切れ目とする。
+    ただし、ほとんどの切れ目に無音がある映像(切れ目を無音にして編集してある)では、
+    音が続いたままの短い(1秒未満の)黒画面は、CMの途中の場面転換なので切れ目にしない。"""
+    sg, ng = [], []
+    for b0, b1 in blacks:
+        if any(s0 < b1 + 0.3 and s1 > b0 - 0.3 for s0, s1 in sil):
+            sg.append((b0, b1))
+        elif b1 - b0 >= 0.4:
+            ng.append((b0, b1))
+    if len(sg) >= 3 and len(sg) >= 0.8 * (len(sg) + len(ng)):
+        ng = [g for g in ng if g[1] - g[0] >= 1.0]
+    return sorted(sg + ng)
+
+
 def split_commercials(path, min_len=4.0):
     """英語版の長い映像を、黒い画面+無音を目印にCM(など)1本ずつに切り分ける。[(開始, 終了)] を返す。"""
     r = subprocess.run(
@@ -1449,11 +1604,7 @@ def split_commercials(path, min_len=4.0):
     if m:
         h, mi, se = m[0]
         dur = int(h) * 3600 + int(mi) * 60 + float(se)
-    gaps = []
-    for b0, b1 in blacks:
-        has_sil = any(s0 < b1 + 0.3 and s1 > b0 - 0.3 for s0, s1 in sil)
-        if has_sil or b1 - b0 >= 0.4:
-            gaps.append((b0, b1))
+    gaps = pick_gaps(blacks, sil)
     out, t = [], 0.0
     for b0, b1 in gaps:
         if b0 - t >= min_len:
@@ -1504,7 +1655,7 @@ def _verify_hit(c, jx, i0, fs):
             "weak": (not ok) and n <= 2 and npass == 1 and zmax >= ZZ_PASS}
 
 
-def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, loose=False):
+def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, loose=False, skip=()):
     """cms: [(音声 float32(SR), ...)]。録画(jp, Media)の中から各CMの音と一致する場所を全部探す。
     まずCM全体の相関で候補を広めに拾い(thr)、そのあと窓ごとの照合(_verify_hit)で本物だけを残す。
     戻り値: [[{"t": 録画の時刻(秒), "z": 突出度, "ok": 全体がよく合うか, "zz": 窓の最大, "np": 合った窓, "n": 窓の数}, ...] (cms と同じ順)]"""
@@ -1521,7 +1672,7 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, l
     hop = N - Lmax
     f = np.fft.rfftfreq(N, 1 / fs)
     band = (f > 250) & (f < fs * 0.48)
-    Fc = [np.conj(np.fft.rfft(c - c.mean(), N)).astype(np.complex64) for c in cx]
+    Fc = [None if k in skip else np.conj(np.fft.rfft(c - c.mean(), N)).astype(np.complex64) for k, c in enumerate(cx)]
     res = [[] for _ in cx]
     nchunk = max(1, int(np.ceil(max(len(jx) - Lmax, 1) / hop)))
     for ci in range(nchunk):
@@ -1531,6 +1682,8 @@ def find_in_recording(cms, jp, progress=lambda f: None, thr=6.5, dropped=None, l
             break
         Fj = np.fft.rfft(seg - seg.mean(), N)
         for k, c in enumerate(cx):
+            if k in skip:
+                continue
             L = len(c)
             valid = len(seg) - L + 1
             if valid < 1:
@@ -1589,12 +1742,12 @@ SHORT_MIN_L = 35.0   # この秒数以上の長いCMだけ、短縮版・途中�
 EDGE_SIM = 0.5       # 端を伸ばすとき、1コマの画面が「同じ」とみなす似かた
 
 
-def make_pieces(cl):
+def make_pieces(cl, skip=()):
     """長いCMを約10秒ずつに分けた [(CMの番号, 開始, 終了), …]。短縮版・途中で切れた版を、部分ごとに探すため。"""
     out = []
     for k, (a, b) in enumerate(cl):
         L = b - a
-        if L < SHORT_MIN_L:
+        if L < SHORT_MIN_L or k in skip:
             continue
         n = max(3, int(round(L / 10.0)))
         for q in range(n):
@@ -1781,11 +1934,11 @@ def scan_jp_thumbs(path, stop=None):
     return X, ok, fast
 
 
-def en_probes(en, cl):
+def en_probes(en, cl, skip=()):
     """長いCMごとに、3秒おきの画面(小さな白黒画像)を取っておく。戻り値: {CM番号: [(英語版の時刻, 画像), …]}"""
     out = {}
     for k, (a, b) in enumerate(cl):
-        if b - a < SHORT_MIN_L:
+        if b - a < SHORT_MIN_L or k in skip:
             continue
         pr = []
         for e in np.arange(a + 1.5, b - 1.0, 3.0):
@@ -3012,6 +3165,7 @@ class App(_TkBase):
         for kind, bg in (("pt", "#e6f6ec"), ("cm", "#e6e8ec"), ("dim", "#efe8ff"), ("cut", "#ffecd2")):
             self.itree.tag_configure(kind, background=bg)
         self.itree.pack(side="left", fill="both", expand=True)
+        vscroll(self.itree)
         RangeSelect(self.itree)
         self.itree.bind("<<TreeviewSelect>>", self.on_item_select)
         self.itree.bind("<Double-1>", lambda e: self.edit_item())
@@ -3138,6 +3292,7 @@ class App(_TkBase):
             self.etree.column(c, width=w, anchor="w")
         self.etree.tag_configure("warn", background="#ffe9c7")
         self.etree.pack(side="left", fill="both", expand=True)
+        vscroll(self.etree)
         self.etree.bind("<<TreeviewSelect>>", self.on_easy_select)
         bt = ttk.Frame(r3)
         bt.pack(side="left", padx=8, anchor="n")
@@ -3200,6 +3355,7 @@ class App(_TkBase):
         self.clip_tree.tag_configure("warn", background="#ffe9c7")
         self.clip_tree.tag_configure("ng", background="#ffe0e0")
         self.clip_tree.pack(side="left", fill="both", expand=True)
+        vscroll(self.clip_tree)
         enable_multiselect(self.clip_tree)
         bt = ttk.Frame(r2)
         bt.pack(side="left", padx=8, anchor="n")
@@ -3243,9 +3399,12 @@ class App(_TkBase):
         self.find_crf = tk.IntVar(value=18)
         self.find_codec = tk.StringVar(value="自動 (HEVC優先)")
         self.find_vscan = tk.BooleanVar(value=True)
-        self.find_files, self.find_cms = [], []
-        self.find_en_extra = []   # まとめて探す、ほかの英語版
-        self._find_cms_src = ""  # 一覧の元になった英語版のファイル(替えたら一覧を消して、やり直す)
+        self.find_group = tk.BooleanVar(value=True)
+        self.find_files = []
+        self.find_en_extra = []   # 2本目以降の英語版(1本目は、ほかのタブと共通の en_var)
+        self.cm_map = {}          # 英語版のファイル → {"mt": 更新時刻, "cms": 切り分けたCMの一覧}
+        self._cm_load()           # 前回までに切り分けた一覧(アプリを閉じても残す)
+        self._cm_view = ""        # CMの一覧に出している英語版
         self.en_var.trace_add("write", lambda *a: self._find_en_changed())
         self._find_stop_ev = threading.Event()
         self.en_var.trace_add("write", lambda *a: (not self.find_out.get().strip() and self.en_var.get().strip()
@@ -3255,38 +3414,58 @@ class App(_TkBase):
                  text="英語版のCM(1本につながったものでもOK)と同じ音を、日本語のテレビ録画の中から探して、日本語音声つきで書き出します。\n"
                       "同じCMが何回流れていても全部書き出します。ファイル名は「30秒_英語版名_CM01(録画名).mkv」の形です(秒数は5秒きざみ)。\n"
                       "書き出しは映像を再エンコードします(CMの切れ目をフレーム単位で合わせるため)。").pack(fill="x", **pad)
-        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 → CMを切り分ける ")
+        c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 (複数まとめて探せます) → CMを切り分ける ")
         c1.pack(fill="x", **pad)
         self.find_en_frame = c1   # ここへのドロップは、英語版として受ける
         r1 = ttk.Frame(c1)
         r1.pack(fill="x", padx=8, pady=(8, 4))
-        self.find_en_ent = ttk.Entry(r1, textvariable=self.en_var)
-        self.find_en_ent.pack(side="left", fill="x", expand=True)
-        ttk.Button(r1, text="参照", command=self._clip_pick_en).pack(side="left", padx=6)
-        self.find_split_btn = ttk.Button(r1, text="CMを切り分ける", command=self.run_split)
-        self.find_split_btn.pack(side="left")
-        r1x = ttk.Frame(c1)
-        r1x.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(r1x, text="ほかの英語版\n(まとめて探す):").pack(side="left", anchor="n")
-        self.en2_tree = ttk.Treeview(r1x, columns=("f",), show="headings", height=2, selectmode="extended")
-        self.en2_tree.heading("f", text="追加した英語版 (CMは、スタート時に自動で切り分けます)")
+        self.en2_tree = ttk.Treeview(r1, columns=("f",), show="headings", height=3, selectmode="extended")
+        self.en2_tree.heading("f", text="英語版の映像 (複数OK。ここにドロップ、または追加)")
         self.en2_tree.column("f", anchor="w")
-        self.en2_tree.pack(side="left", fill="x", expand=True, padx=6)
-        bx = ttk.Frame(r1x)
-        bx.pack(side="left", anchor="n")
-        ttk.Button(bx, text="追加...", width=8, command=self._en2_add).pack(pady=1)
-        ttk.Button(bx, text="外す", width=8, command=self._en2_remove).pack(pady=1)
+        self.en2_tree.pack(side="left", fill="x", expand=True)
+        vscroll(self.en2_tree)
+        self.en2_tree.bind("<<TreeviewSelect>>", lambda e: self._en2_select())
+        enable_multiselect(self.en2_tree, lambda: self._en2_remove())
+        bx = ttk.Frame(r1)
+        bx.pack(side="left", padx=8, anchor="n")
+        ttk.Button(bx, text="追加...", width=14, command=self._en2_add).pack(pady=1)
+        ttk.Button(bx, text="外す", width=14, command=self._en2_remove).pack(pady=1)
+        self.find_split_btn = ttk.Button(bx, text="CMを切り分ける", width=14, command=self.run_split)
+        self.find_split_btn.pack(pady=1)
         r1b = ttk.Frame(c1)
         r1b.pack(fill="both", expand=True, padx=8, pady=(0, 6))
-        self.cm_tree = ttk.Treeview(r1b, columns=("n", "t", "len", "sec"), show="headings", height=4, selectmode="extended")
-        for c, h, w in (("n", "CM", 80), ("t", "英語版の時間", 300), ("len", "長さ", 160), ("sec", "名前に付く秒数", 200)):
+        self.cm_tree = ttk.Treeview(r1b, columns=("on", "n", "t", "len", "sec"), show="headings", height=6, selectmode="extended")
+        self.cm_tree.tag_configure("off", foreground="#aaa")
+        self.cm_tree.bind("<Button-1>", self._cm_click)
+        for k_ in ("<space>", "<Return>", "<KP_Enter>"):   # スペース / Enter で、選んでいるCMのチェックを切り替え
+            self.cm_tree.bind(k_, lambda e: (self._cm_toggle(), "break")[1])
+        for c, h, w in (("on", "探す", 50), ("n", "CM", 70), ("t", "英語版の時間", 190), ("len", "長さ", 90), ("sec", "名前に付く秒数", 120)):
             self.cm_tree.heading(c, text=h)
             self.cm_tree.column(c, width=w, anchor="center")
         self.cm_tree.pack(side="left", fill="both", expand=True)
-        enable_multiselect(self.cm_tree, lambda: self._cm_remove())
+        vscroll(self.cm_tree)
+        enable_multiselect(self.cm_tree, lambda: self._cm_toggle())
+        self.cm_thumb_frame = ttk.Frame(r1b)   # 選んだCMの代表的な画面(3枚)
+        self.cm_thumb_lbl = []
+        for _i in range(3):
+            fr_ = ttk.Frame(self.cm_thumb_frame)
+            fr_.pack(side="left", padx=(0, 6))
+            im_ = ttk.Label(fr_, text="", anchor="center")
+            im_.pack()
+            tx_ = ttk.Label(fr_, text="", foreground="#667")
+            tx_.pack()
+            self.cm_thumb_lbl.append((im_, tx_))
         b1 = ttk.Frame(r1b)
-        b1.pack(side="left", padx=8, anchor="n")
-        ttk.Button(b1, text="外す", width=10, command=self._cm_remove).pack(pady=2)
+        b1.pack(side="right", padx=8, anchor="n", before=self.cm_tree)
+        self.cm_thumb_frame.pack(side="right", padx=(8, 0), anchor="n", before=self.cm_tree)
+        ttk.Button(b1, text="外す/戻す", width=12, command=self._cm_toggle).pack(pady=2)
+        ttk.Button(b1, text="全部戻す", width=12, command=lambda: self._cm_all(True)).pack(pady=2)
+        ttk.Button(b1, text="全部外す", width=12, command=lambda: self._cm_all(False)).pack(pady=2)
+        ttk.Button(b1, text="一覧を保存...", width=12, command=self._cm_export).pack(pady=2)
+        ttk.Button(b1, text="一覧を読み込む...", width=12, command=self._cm_import).pack(pady=2)
+        self._cm_thumb_tok = 0
+        self._cm_thumb_cache = {}
+        self.cm_tree.bind("<<TreeviewSelect>>", lambda e: self._cm_thumbs_show(), add="+")
         self.cm_note = ttk.Label(c1, text=self.CM_NOTE0, foreground="#667")
         self.cm_note.pack(anchor="w", padx=10, pady=(0, 6))
 
@@ -3300,6 +3479,7 @@ class App(_TkBase):
         for tg, bg in (("ok", "#e6f6ec"), ("warn", "#ffe9c7"), ("ng", "#ffe0e0")):
             self.find_tree.tag_configure(tg, background=bg)
         self.find_tree.pack(side="left", fill="both", expand=True)
+        vscroll(self.find_tree)
         enable_multiselect(self.find_tree, lambda: self._find_remove())
         bt = ttk.Frame(r2)
         bt.pack(side="left", padx=8, anchor="n")
@@ -3324,6 +3504,9 @@ class App(_TkBase):
         self.find_codec_cb.pack(side="left")
         vs = ttk.Checkbutton(r4, text="音が合わない短縮版も映像で探す(遅い)", variable=self.find_vscan)
         vs.pack(side="left", padx=(18, 0))
+        gp = ttk.Checkbutton(r4, text="同じCMはCMごとのフォルダにまとめる", variable=self.find_group)
+        gp.pack(side="left", padx=(18, 0))
+        Tooltip(gp, "書き出し先の中に「30秒_英語版名_CM05」のようなフォルダを作って、同じCMが見つかった分(別の録画・短縮版・何回目か)を、その中に入れます。")
         Tooltip(vs, "日本語版の音が英語版と違っても、画面が同じなら短縮版・途中で切れた版として見つけます。録画1本あたり数分長くかかります。")
         r5 = ttk.Frame(f)
         self.find_btn = ttk.Button(r5, text="探してスタート", command=self.run_find)
@@ -3342,52 +3525,281 @@ class App(_TkBase):
         c1.pack(side="top", fill="x", **pad)
         c2.pack(side="top", fill="both", expand=True, **pad)
 
+    def _en_all(self):
+        """英語版の一覧(1本目は、ほかのタブと共通の欄)。"""
+        p = self.en_var.get().strip()
+        return ([p] if p else []) + [x for x in self.find_en_extra if x and x != p]
+
+    def _cms_of(self, p):
+        """切り分け済みのCM一覧。英語版のファイルが変わっていたら、古い一覧は使わない。"""
+        e = self.cm_map.get(p)
+        try:
+            if e and e["mt"] == int(Path(p).stat().st_mtime):
+                return e["cms"]
+        except OSError:
+            pass
+        return []
+
+    CM_FILE = Path(__file__).resolve().parent / "syncdub_CMリスト.json"
+
+    def _cm_load(self):
+        try:
+            d = json.loads(self.CM_FILE.read_text(encoding="utf-8"))
+            for p, e in d.items():
+                self.cm_map[p] = {"mt": int(e["mt"]), "cms": [(float(a), float(b)) for a, b in e["cms"]], "off": set(e.get("off", []))}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    def _cm_save(self):
+        try:
+            self.CM_FILE.write_text(json.dumps({p: {"mt": e["mt"], "cms": e["cms"], "off": sorted(e["off"])}
+                                                for p, e in self.cm_map.items()}, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _cm_store(self, p, cms, off=None):
+        """切り分けた一覧を覚える。off: 使わない(チェックを外した)CMの番号の集合。番号は、外しても振り直さない。"""
+        try:
+            self.cm_map[p] = {"mt": int(Path(p).stat().st_mtime), "cms": list(cms), "off": set(off or ())}
+        except OSError:
+            return
+        self._cm_save()
+
+    def _cm_off(self, p):
+        self._cms_of(p)
+        e = self.cm_map.get(p)
+        return set(e.get("off", ())) if e and self._cms_of(p) else set()
+
     def _en2_fill(self):
+        al = self._en_all()
+        if self._cm_view not in al:
+            self._cm_view = al[0] if al else ""
         self.en2_tree.delete(*self.en2_tree.get_children())
-        for i, x in enumerate(self.find_en_extra):
+        for i, x in enumerate(al):
             self.en2_tree.insert("", "end", iid=str(i), values=(x,))
+            if x == self._cm_view:
+                self.en2_tree.selection_set(str(i))
+        self._cm_fill()
+
+    def _en2_select(self):
+        al = self._en_all()
+        sel = [int(i) for i in self.en2_tree.selection()]
+        if sel and sel[0] < len(al) and al[sel[0]] != self._cm_view:
+            self._cm_view = al[sel[0]]
+            self._cm_fill()
+            self.cm_note.config(text=f"選んだ英語版のCMの一覧です。{self.CM_NOTE0}" if not self._cms_of(self._cm_view) else
+                                f"選んだ英語版のCMの一覧です({len(self._cms_of(self._cm_view))} 本)。探さないCMは ☑ を外します。", foreground="#667")
 
     def _en2_add(self):
-        for x in filedialog.askopenfilenames(title="まとめて探す、ほかの英語版を選択 (複数選べます)"):
-            if x not in self.find_en_extra and x != self.en_var.get().strip():
-                self.find_en_extra.append(x)
+        for x in filedialog.askopenfilenames(title="英語版の映像を選択 (複数選べます)"):
+            self._en2_put(x)
         self._en2_fill()
+
+    def _en2_put(self, x):
+        if x in self._en_all():
+            return
+        if not self.en_var.get().strip():
+            self.en_var.set(x)
+        else:
+            self.find_en_extra.append(x)
 
     def _en2_remove(self):
         sel = {int(i) for i in self.en2_tree.selection()}
-        self.find_en_extra = [x for i, x in enumerate(self.find_en_extra) if i not in sel]
+        keep = [x for i, x in enumerate(self._en_all()) if i not in sel]
+        self.en_var.set(keep[0] if keep else "")
+        self.find_en_extra = keep[1:]
         self._en2_fill()
 
     def _find_cancel(self):
         self._find_stop_ev.set()
         self.find_stop.state(["disabled"])
-        self.find_msg.config(text="中止しています…(いま書き出し中のファイルが終わったら止まります)", fg="#8a5a00")
+        self.find_msg.config(text="中止しています…(ffmpegを止めて、書きかけのファイルを消しています)", fg="#8a5a00")
+        threading.Thread(target=cancel_all, daemon=True).start()
 
     def _cm_fill(self):
+        sel0, foc0, y0 = self.cm_tree.selection(), self.cm_tree.focus(), self.cm_tree.yview()[0]   # 作り直しても、選択・位置・スクロールを保つ
         self.cm_tree.delete(*self.cm_tree.get_children())
-        for i, (a, b) in enumerate(self.find_cms):
-            self.cm_tree.insert("", "end", iid=str(i), values=(f"CM{i + 1:02d}", f"{self.short(a)} 〜 {self.short(b)}",
-                                                                f"{b - a:.1f} 秒", f"{round5(b - a)} 秒"))
+        off = self._cm_off(self._cm_view)
+        for i, (a, b) in enumerate(self._cms_of(self._cm_view)):
+            self.cm_tree.insert("", "end", iid=str(i), tags=("off",) if i in off else (),
+                                values=("☐" if i in off else "☑", f"CM{i + 1:02d}", f"{self.short(a)} 〜 {self.short(b)}",
+                                        f"{b - a:.1f} 秒", f"{round5(b - a)} 秒"))
+        keep_ = [i for i in sel0 if self.cm_tree.exists(i)]
+        if keep_:
+            self.cm_tree.selection_set(keep_)
+        if foc0 and self.cm_tree.exists(foc0):
+            self.cm_tree.focus(foc0)
+        self.cm_tree.yview_moveto(y0)
 
-    CM_NOTE0 = "「CMを切り分ける」を押すと、ここに一覧が出ます(押さずにスタートしても、自動で切り分けます)。間違って分けた所は選んで「外す」で消せます。"
+    CM_THUMB_W = 130
+
+    def _cm_thumbs_show(self):
+        """選んだCMの画面を3枚並べる: 頭から3秒後(固定)と、そのあと終わりまで均等に。"""
+        sel = [int(i) for i in self.cm_tree.selection()]
+        p, cms = self._cm_view, self._cms_of(self._cm_view)
+        self._cm_thumb_tok += 1
+        tok = self._cm_thumb_tok
+        if not sel or not p or sel[0] >= len(cms):
+            for im_, tx_ in self.cm_thumb_lbl:
+                im_.config(image="", text="")
+                im_._img = None
+                tx_.config(text="")
+            return
+        a, b = cms[sel[0]]
+        L = b - a
+        t0 = min(3.0, max(0.0, L * 0.25))
+        t1 = max(t0, L - 0.5)
+        ts = [a + t0 + (t1 - t0) * i / 2 for i in range(3)]
+        for im_, tx_ in self.cm_thumb_lbl:
+            im_.config(image="", text="…")
+            im_._img = None
+        W = self.CM_THUMB_W
+
+        def work():
+            try:
+                voff = video_start_offset(probe(p))
+            except Exception:  # noqa: BLE001
+                voff = 0.0
+            for i, t in enumerate(ts):
+                if tok != self._cm_thumb_tok:
+                    return
+                key = (p, round(t, 2), W)
+                png = self._cm_thumb_cache.get(key)
+                if png is None:
+                    try:
+                        r = _subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0.0, t + voff):.3f}", "-i", p, "-frames:v", "1",
+                                             "-vf", f"scale={W}:-2", "-f", "image2pipe", "-c:v", "png", "-"],
+                                            capture_output=True, **NOWIN)
+                        png = r.stdout or b""
+                    except Exception:  # noqa: BLE001
+                        png = b""
+                    if png:
+                        if len(self._cm_thumb_cache) > 300:
+                            self._cm_thumb_cache.clear()
+                        self._cm_thumb_cache[key] = png
+
+                def show(i=i, t=t, png=png):
+                    if tok != self._cm_thumb_tok:
+                        return
+                    im_, tx_ = self.cm_thumb_lbl[i]
+                    try:
+                        img = tk.PhotoImage(data=base64.b64encode(png)) if png else None
+                    except tk.TclError:
+                        img = None
+                    im_._img = img
+                    im_.config(image=img if img else "", text="" if img else "(画面を取れませんでした)")
+                    tx_.config(text=f"{self.short(t)} (+{t - a:.1f}秒)")
+                self.q.put(show)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cm_click(self, ev):
+        """「使う」の列をクリックしたら、その行のチェックを切り替える。"""
+        if self.cm_tree.identify_region(ev.x, ev.y) == "cell" and self.cm_tree.identify_column(ev.x) == "#1":
+            row = self.cm_tree.identify_row(ev.y)
+            if row:
+                self._cm_toggle([int(row)])
+                return "break"
+
+    def _cm_toggle(self, idx=None):
+        """選んだCMのチェックを切り替える(1つでもチェックがあれば全部外し、全部外れていれば全部入れる)。"""
+        if idx is None:
+            idx = [int(i) for i in self.cm_tree.selection()]
+        p = self._cm_view
+        if not idx or not p:
+            return
+        off = self._cm_off(p)
+        if all(i in off for i in idx):
+            off -= set(idx)
+        else:
+            off |= set(idx)
+        self._cm_store(p, self._cms_of(p), off)
+        self._cm_fill()
+        self._cm_note_count()
+
+    def _cm_all(self, on):
+        p = self._cm_view
+        if p and self._cms_of(p):
+            self._cm_store(p, self._cms_of(p), set() if on else set(range(len(self._cms_of(p)))))
+            self._cm_fill()
+            self._cm_note_count()
+
+    def _cm_note_count(self):
+        n = len(self._cms_of(self._cm_view))
+        if n:
+            u = n - len(self._cm_off(self._cm_view))
+            self.cm_note.config(text=f"{n} 本に分けました。探すのは ☑ の {u} 本です(番号は変わりません)。違う所は ☑ をクリックして外せます。", foreground="#1f6f43")
+
+    @staticmethod
+    def _parse_t(x):
+        x = x.strip()
+        if ":" in x:
+            v = 0.0
+            for q in x.split(":"):
+                v = v * 60 + float(q)
+            return v
+        return float(x)
+
+    def _cm_export(self):
+        p, cms = self._cm_view, self._cms_of(self._cm_view)
+        if not p or not cms:
+            messagebox.showinfo("CMの一覧", "書き出せるCMの一覧がありません。先に「CMを切り分ける」を押してください。")
+            return
+        f = filedialog.asksaveasfilename(title="CMの一覧を保存", defaultextension=".txt", initialfile=f"{Path(p).stem}_CMリスト.txt",
+                                         filetypes=[("テキスト", "*.txt")])
+        if not f:
+            return
+        off = self._cm_off(p)
+        lines = ["# syncdub CMリスト (タブ区切り: 番号 / 開始秒 / 終了秒 / 使う=1・使わない=0)", f"# 英語版: {Path(p).name}"]
+        lines += [f"{i + 1}\t{a:.3f}\t{b:.3f}\t{0 if i in off else 1}" for i, (a, b) in enumerate(cms)]
+        Path(f).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.cm_note.config(text=f"一覧を保存しました: {f}", foreground="#1f6f43")
+
+    def _cm_import(self):
+        p = self._cm_view
+        if not p:
+            messagebox.showinfo("CMの一覧", "先に英語版の映像を追加して、選んでください。")
+            return
+        f = filedialog.askopenfilename(title="CMの一覧を読み込む", filetypes=[("テキスト", "*.txt *.tsv *.csv"), ("すべて", "*.*")])
+        if not f:
+            return
+        cms, off = [], set()
+        try:
+            for ln in Path(f).read_text(encoding="utf-8-sig").splitlines():
+                ln = ln.strip()
+                if not ln or ln.startswith("#"):
+                    continue
+                c = [x for x in re.split(r"[\t,]", ln)]
+                a, b = self._parse_t(c[1]), self._parse_t(c[2])
+                if b <= a:
+                    raise ValueError(f"終わりが開始より前です: {ln}")
+                if len(c) > 3 and c[3].strip() in ("0", "×", "☐"):
+                    off.add(len(cms))
+                cms.append((a, b))
+        except Exception as ex:  # noqa: BLE001
+            messagebox.showwarning("CMの一覧", f"読み込めませんでした: {ex}")
+            return
+        if not cms:
+            messagebox.showwarning("CMの一覧", "CMが1本も読み込めませんでした。")
+            return
+        self._cm_store(p, cms, off)
+        self._cm_fill()
+        self._cm_note_count()
+
+    CM_NOTE0 = "「CMを切り分ける」を押すと一覧が出ます(押さずにスタートしても自動で切り分けます)。探さないCMは ☑ を外します。"
 
     def _find_en_changed(self):
-        if self.find_cms and self.en_var.get().strip() != self._find_cms_src:
-            self.find_cms = []
-            self._cm_fill()
-            self.cm_note.config(text="英語版が替わったので、CMの一覧を消しました。スタートすると、切り分けから自動でやり直します。", foreground="#8a5a00")
-
-    def _cm_remove(self):
-        sel = {int(i) for i in self.cm_tree.selection()}
-        if sel:
-            self.find_cms = [c for i, c in enumerate(self.find_cms) if i not in sel]
-            self._cm_fill()
+        try:
+            self._en2_fill()
+        except (AttributeError, tk.TclError):   # 画面を作っている途中は何もしない
+            pass
 
     def run_split(self):
-        en_p = self.en_var.get().strip()
+        al = self._en_all()
+        en_p = self._cm_view if self._cm_view in al else (al[0] if al else "")
         if not en_p or not Path(en_p).exists():
-            messagebox.showinfo("英語版の映像", "英語版の映像を選んでください。")
+            messagebox.showinfo("英語版の映像", "英語版の映像を追加して、切り分けたいものを選んでください。")
             return
+        self._cm_view = en_p
         self.find_split_btn.state(["disabled"])
         self.cm_note.config(text="CMを探しています…", foreground="#333")
 
@@ -3400,12 +3812,12 @@ class App(_TkBase):
                 return
 
             def done():
-                self.find_cms = cms
-                self._find_cms_src = en_p
+                self._cm_store(en_p, cms)
+                self._cm_view = en_p
                 self._cm_fill()
                 self.find_split_btn.state(["!disabled"])
                 if cms:
-                    self.cm_note.config(text=f"{len(cms)} 本に分けました。違う所があれば選んで「外す」。", foreground="#1f6f43")
+                    self._cm_note_count()
                 else:
                     self.cm_note.config(text="黒い画面で区切られた部分が見つかりませんでした。映像全体を1本として探します。", foreground="#8a5a00")
             self.q.put(done)
@@ -3448,8 +3860,9 @@ class App(_TkBase):
             self.find_tree.item(iid, tags=(tag,) if tag else ())
 
     def run_find(self):
-        en_p, files = self.en_var.get().strip(), list(self.find_files)
-        if not en_p or not Path(en_p).exists():
+        en_all = [x for x in self._en_all() if Path(x).exists()]
+        en_p, files = (en_all[0] if en_all else ""), list(self.find_files)
+        if not en_p:
             messagebox.showinfo("英語版の映像", "英語版の映像を選んでください。")
             return
         if not files:
@@ -3464,12 +3877,12 @@ class App(_TkBase):
         codec = "h264" if self.find_codec.get().startswith("H.264") else "auto"
         ast = self.jp_ast.get()
         vscan = bool(self.find_vscan.get())
-        cms_ts = list(self.find_cms) if self._find_cms_src == en_p else []  # 別の英語版の一覧は使わない
-        extras = []   # ほかの英語版(まとめて探す)。1本目と同じものは外す
-        for x_ in self.find_en_extra:
-            if x_ and x_ != en_p and x_ not in extras and Path(x_).exists():
-                extras.append(x_)
+        group = bool(self.find_group.get())
+        extras = en_all[1:]   # 2本目以降の英語版
+        cms_by = {x: self._cms_of(x) for x in en_all}   # 「CMを切り分ける」で出した一覧
+        off_by = {x: self._cm_off(x) for x in en_all}   # チェックを外した(探さない)CM
         self.find_btn.state(["disabled"])
+        _CANCEL.clear()
         self._find_stop_ev.clear()
         self.find_stop.state(["!disabled"])
         self.find_open.pack_forget()
@@ -3480,12 +3893,23 @@ class App(_TkBase):
         def safe(t):
             return re.sub(r'[\\/:*?"<>|]', "_", t)
 
-        def work():
+        def work_():
             outd.mkdir(parents=True, exist_ok=True)
 
-            def setup_en(p, cl_pre, primary):
-                en = Media(p, 0)
+            def setup_en(p, cl_pre, primary, skip=()):
                 cl = cl_pre
+                if not cl:  # 前回の探索記録に、同じ英語版の切り分け結果が残っていれば、それを使う(切り分けの時間を省く)
+                    try:
+                        st0 = Path(p).stat()
+                        old0 = json.loads((outd / f"syncdub_探索記録_{safe(Path(p).stem)}.json").read_text(encoding="utf-8"))
+                        sg0 = old0.get("sig")
+                        if sg0 and sg0[1] == st0.st_size and sg0[2] == int(st0.st_mtime) and sg0[3]:
+                            cl = [(float(x[0]), float(x[1])) for x in sg0[3]]
+                            skip = ()
+                    except Exception:  # noqa: BLE001
+                        pass
+                # チェックを外したCMがあるときは、☑ のCMの区間だけ音声を読む(全部 ☑ のときは、頭から終わりまで全部読む)
+                en = Media(p, 0, parts=[c_ for k_, c_ in enumerate(cl) if k_ not in skip]) if (cl and skip) else Media(p, 0)
                 if not cl:  # 「CMを切り分ける」を押していなければ、ここで自動で切り分ける
                     self.q.put(lambda: self.find_msg.config(text=f"英語版のCMを切り分けています…({Path(p).name})", fg="#333"))
                     try:
@@ -3493,13 +3917,12 @@ class App(_TkBase):
                     except Exception:  # noqa: BLE001
                         cl = []
                     if cl:
-                        if primary:
-                            def show(c=list(cl)):
-                                self.find_cms = c
-                                self._find_cms_src = p
-                                self._cm_fill()
+                        def show(c=list(cl)):
+                            self._cm_store(p, c)
+                            self._cm_fill()
+                            if p == self._cm_view:
                                 self.cm_note.config(text=f"{len(c)} 本に分けました(スタート時に自動で)。", foreground="#1f6f43")
-                            self.q.put(show)
+                        self.q.put(show)
                     else:
                         cl = [(0.0, en.end)]
                 cms_ = [en.slice(a_, b_) for a_, b_ in cl]
@@ -3516,17 +3939,17 @@ class App(_TkBase):
                 probes = {}
                 if vscan:
                     try:
-                        probes = en_probes(en, cl)
+                        probes = en_probes(en, cl, skip)
                     except Exception:  # noqa: BLE001
                         probes = {}
                 return {"en_p": p, "en": en, "cl": cl, "cms": cms_, "rec": rec, "rec_p": rec_p, "found": [0] * len(cl),
-                        "en_stem": safe(Path(p).stem), "probes": probes}
+                        "en_stem": safe(Path(p).stem), "probes": probes, "skip": set(skip) if cl_pre else set()}
 
             ctxs, skipped_en = [], []
             for ei_, p_ in enumerate([en_p] + extras):
                 self.q.put(lambda p_=p_: self.find_msg.config(text=f"英語版を読み込んでいます…({Path(p_).name})", fg="#333"))
                 try:
-                    ctxs.append(setup_en(p_, cms_ts if ei_ == 0 else [], ei_ == 0))
+                    ctxs.append(setup_en(p_, cms_by.get(p_, []), ei_ == 0, off_by.get(p_, set())))
                 except Exception as ex:  # noqa: BLE001
                     if ei_ == 0:
                         self.q.put(lambda ex=ex: (self.find_msg.config(text=f"⚠ 英語版を読み込めませんでした: {ex}", fg="#b33"),
@@ -3570,6 +3993,7 @@ class App(_TkBase):
                 jp_loaded = {}   # 録画の読み込みは、英語版が何本あっても1回だけ
                 for ei, cx in enumerate(ctxs):
                     en, cl, cms, rec, found, en_stem, probes = cx["en"], cx["cl"], cx["cms"], cx["rec"], cx["found"], cx["en_stem"], cx["probes"]
+                    skip = cx["skip"]
                     ii = i * M + ei
                     lab = f"[{en_stem}] " if M > 1 else ""
                     t_rec = time.time()
@@ -3593,7 +4017,10 @@ class App(_TkBase):
                         except OSError:
                             fkey = None
                         ent = rec["files"].get(jp_p)
+                        if ent and not set(ent.get("skip", ())) <= skip:   # 前回は探さなかったCMを、今回は探す → 調べ直す
+                            ent = None
                         if ent and ent.get("key") == fkey and ent.get("done"):
+                            ent["keep"] = [d for d in ent["keep"] if d["k"] not in skip]
                             st(f"前回調べ済み ({len(ent['keep'])} 件)", "ok" if ent["keep"] else "")
                             for d in ent["keep"]:
                                 if d.get("v") is not None and d["v"] < VID_MIN:
@@ -3603,7 +4030,7 @@ class App(_TkBase):
                                     found[d["k"]] += 1
                             continue
                         if ent and ent.get("key") == fkey:
-                            keep = ent["keep"]
+                            keep = [d for d in ent["keep"] if d["k"] not in skip]
                         else:
                             st("音を探しています…")
                             fut = pre.pop(jp_p, None)
@@ -3616,7 +4043,7 @@ class App(_TkBase):
                                 if probes:
                                     prev[files[i + 1]] = pool.submit(scan_jp_thumbs, files[i + 1], stop)
                             dropped = []
-                            hits = find_in_recording(cms, jp, prog, dropped=dropped)
+                            hits = find_in_recording(cms, jp, prog, dropped=dropped, skip=skip)
                             jo = []
                             for k, hl in enumerate(hits):
                                 L = cl[k][1] - cl[k][0]
@@ -3665,7 +4092,7 @@ class App(_TkBase):
                                 else:
                                     keep.append(d)
                             # 長いCMの短縮版・途中で切れた版(部分ごとに探して、順番に並んでいるものをまとめる)
-                            pcs = make_pieces(cl)
+                            pcs = make_pieces(cl, skip)
                             if pcs:
                                 try:
                                     phits = find_in_recording([en.slice(a_, b_) for _k, a_, b_ in pcs], jp, prog, loose=True)
@@ -3698,7 +4125,7 @@ class App(_TkBase):
                                     dropped.append({"short_error": repr(ex_)})
                             keep.sort(key=lambda d: d["t"])
                             jp = None
-                            rec["files"][jp_p] = {"key": fkey, "keep": keep, "dropped": sorted([x for x in dropped if "z" in x], key=lambda x: -x["z"])[:40] + [x for x in dropped if "z" not in x], "done": False}
+                            rec["files"][jp_p] = {"key": fkey, "skip": sorted(skip), "keep": keep, "dropped": sorted([x for x in dropped if "z" in x], key=lambda x: -x["z"])[:40] + [x for x in dropped if "z" not in x], "done": False}
                             save_rec(cx)
                         if not keep:
                             rec["files"][jp_p]["done"] = True
@@ -3706,11 +4133,19 @@ class App(_TkBase):
                             st("見つかりませんでした" + el(), "")
                             continue
                         nth = {}
-                        nw = nwarn = nsk = nrej = 0
-                        try:
-                            existing = {re.sub(r"【[^】]*】", "", f.name) for f in outd.iterdir()}
-                        except OSError:
-                            existing = set()
+                        nw = nwarn = nsk = nrej = nfix = 0
+                        ex_cache = {}
+
+                        def existing_in(dp):   # 書き出し済みの名前(【…】は無視)。まとめ先のフォルダと、保存先の直下(以前の書き出し)の両方を見る
+                            if dp not in ex_cache:
+                                names = set()
+                                for dd in {dp, outd}:
+                                    try:
+                                        names |= {re.sub(r"【[^】]*】", "", f.name) for f in dd.iterdir()}
+                                    except OSError:
+                                        pass
+                                ex_cache[dp] = names
+                            return ex_cache[dp]
                         for j, d in enumerate(keep):
                             if stop.is_set():
                                 raise _Stop()
@@ -3735,12 +4170,14 @@ class App(_TkBase):
                             base = f"{round5(d.get('out_len', b - a))}秒_{en_stem}_CM{k + 1:02d}{tail}" + ("【短縮版】" if d.get("short") else "")
                             name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
                                 + f"({safe(Path(jp_p).stem)}).mkv"
-                            out = outd / name
+                            outd_k = outd / f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}" if group else outd
+                            out = outd_k / name
                             found[k] += 1
-                            if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing:
+                            if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing_in(outd_k):
                                 res["skip"] += 1
                                 nsk += 1
                                 continue
+                            outd_k.mkdir(parents=True, exist_ok=True)
                             st(f"書き出しています… ({j + 1}/{len(keep)})")
                             self.q.put(lambda ii=ii, j=j, m=len(keep): self.find_bar.config(value=(ii + 0.5 + 0.5 * j / m) / nn * 100))
                             proj = {"en_video": cx["en_p"], "jp_media": jp_p, "jp_audio_stream": ast, "output": str(out),
@@ -3760,6 +4197,24 @@ class App(_TkBase):
                                 buf = io.StringIO()
                                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                                     main([str(pj)])
+                                if not d.get("fine"):
+                                    # 音の一括ずれの自動補正: 日本語・英語の音(BGM・効果音)を突き合わせて、全体が一定量ずれていたら
+                                    # その分だけ日本語側の位置を動かして書き出し直す (録画側の音声の時刻が途中で飛んでいる場合など)
+                                    lag_ = audio_lag(str(out))
+                                    if lag_ is not None:
+                                        orig_ = json.loads(pj.read_text(encoding="utf-8"))
+                                        for sg_ in proj["segments"]:
+                                            sg_["jp_start"] = round(sg_["jp_start"] + lag_, 4)
+                                        pj.write_text(json.dumps(proj, ensure_ascii=False), encoding="utf-8")
+                                        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                                            main([str(pj)])
+                                        lag2_ = audio_lag(str(out))
+                                        if lag2_ is not None and abs(lag2_) > abs(lag_) * 0.5:  # 直らなかったので元に戻す
+                                            pj.write_text(json.dumps(orig_, ensure_ascii=False), encoding="utf-8")
+                                            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                                                main([str(pj)])
+                                        else:
+                                            nfix += 1
                                 if d.get("fine"):
                                     # 細かく編集し直された版は、日本語音声が連続しているので、区間ごとに切らず元の音をそのまま使う
                                     # (区間ごとに切ると、つなぎ目で数ミリ秒の音の欠けやずれが出る)
@@ -3772,6 +4227,14 @@ class App(_TkBase):
                                             "-metadata:s:a:1", "language=eng", "-disposition:a:1", "0", str(tmp_o)]
                                     subprocess.run(cmd_, check=True, capture_output=True, **NOWIN)
                                     os.replace(tmp_o, out)
+                            except BaseException:   # 中止・失敗したときは、書きかけのファイルを消す
+                                for f_ in (out, out.with_name(out.stem + ".tmp.mkv")):
+                                    rm_retry(f_)
+                                try:
+                                    outd_k.rmdir()   # 空になったCMごとのフォルダも片づける(中身があれば消えない)
+                                except OSError:
+                                    pass
+                                raise
                             finally:
                                 shutil.rmtree(tmpd, ignore_errors=True)
                             nw += 1
@@ -3787,9 +4250,11 @@ class App(_TkBase):
                             msg += f" (うち要確認 {nwarn} 件: 一部だけ一致 / 別のCMとも似ている / 映像が少し違う)"
                         if nrej:
                             msg += f" ・映像が合わず除外 {nrej} 件"
+                        if nfix:
+                            msg += f" ・音のずれを自動で直したもの {nfix} 件"
                         st(msg + el(), "warn" if nwarn else "ok")
-                    except _Stop:
-                        st("中止しました (次回は続きから)", "warn")
+                    except (_Stop, Cancelled):
+                        st("中止しました (書きかけのファイルは消しました。次回は続きから)", "warn")
                         stopped = True
                         break
                     except subprocess.CalledProcessError as ex:
@@ -3809,6 +4274,7 @@ class App(_TkBase):
             pool.shutdown(wait=False, cancel_futures=True)
 
             def fin():
+                _CANCEL.clear()
                 self.find_btn.state(["!disabled"])
                 self.find_stop.state(["disabled"])
                 bits = [f"書き出し {res['ok'] + res['warn']} 本"]
@@ -3827,7 +4293,7 @@ class App(_TkBase):
                     bits.append(f"同じ名前があって飛ばした {res['skip']} 本")
                 if not stopped:
                     for c_ in ctxs:
-                        miss = [f"CM{k + 1:02d}" for k, c in enumerate(c_["found"]) if c == 0]
+                        miss = [f"CM{k + 1:02d}" for k, c in enumerate(c_["found"]) if c == 0 and k not in c_["skip"]]
                         if miss and len(c_["cl"]) > 1:
                             bits.append((f"[{c_['en_stem']}] " if len(ctxs) > 1 else "") + "どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
                 if skipped_en:
@@ -3839,6 +4305,17 @@ class App(_TkBase):
                     self.find_open.pack(side="left", padx=8)
                 self.say("探索完了")
             self.q.put(fin)
+        def work():
+            try:
+                work_()
+            except Cancelled:   # 準備(英語版の読み込みなど)の途中で止めたとき
+                def stopped_():
+                    _CANCEL.clear()
+                    self.find_btn.state(["!disabled"])
+                    self.find_stop.state(["disabled"])
+                    self.find_msg.config(text="中止しました (次回は続きから)", fg="#8a5a00")
+                self.q.put(stopped_)
+
         threading.Thread(target=work, daemon=True).start()
 
     def _tab_changed(self, _e=None):
@@ -4051,7 +4528,7 @@ class App(_TkBase):
         if self.en_var.get().strip() and self.jp_var.get().strip():
             self._auto_after_load = False  # 自動検出は「自動で合わせる」ボタンを押したときだけ
             self.load_media()
-        else:
+        elif self.nb.select() not in (str(self.findt), str(self.clipt)):   # 「録画から探す」「切り出し」では、この案内は無関係
             self.say("もう一方のファイルも選んでください")
 
     def _busy(self, flag):
@@ -4212,7 +4689,7 @@ class App(_TkBase):
         if not DND_FILES:
             self.say("ドラッグ&ドロップを使うには: pip install tkinterdnd2 (なくても動作します)")
             return
-        targets = {self: None, self.clip_en_ent: "clipen", self.find_en_ent: "clipen", self.find_en_frame: "findens", self.en2_tree: "findens", self.cm_tree: "findens", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
+        targets = {self: None, self.clip_en_ent: "clipen", self.find_en_frame: "findens", self.en2_tree: "findens", self.cm_tree: "findens", self.en_ent: "en", self.tr["en"]: "en", self.pv["en"]: "en",
                    self.jp_ent: "jp", self.tr["jp"]: "jp", self.pv["jp"]: "jp"}
         for k, z in self.zone.items():
             for w in (z["frame"], z["title"], z["name"]):
@@ -4230,13 +4707,10 @@ class App(_TkBase):
             if not self.clip_out.get():
                 self.clip_out.set(str(Path(files[0]).parent))
             return
-        if k == "findens":  # 録画から探すタブの、英語版の欄: 1本目が空なら1本目に、すでにあれば「ほかの英語版」に追加
-            fl = [f for f in files if Path(f).is_file() and not f.lower().endswith(".json")]
-            if fl and not self.en_var.get().strip():
-                self.en_var.set(fl.pop(0))
-            for x in fl:
-                if x not in self.find_en_extra and x != self.en_var.get().strip():
-                    self.find_en_extra.append(x)
+        if k == "findens":  # 録画から探すタブの、英語版の欄: 英語版の一覧に追加(複数OK)
+            for x in files:
+                if Path(x).is_file() and not x.lower().endswith(".json"):
+                    self._en2_put(x)
             self._en2_fill()
             return
         if self.nb.select() == str(self.findt):  # 録画から探すタブ: ファイルもフォルダも日本語の録画として追加
