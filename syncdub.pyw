@@ -606,7 +606,7 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.10.40"
+APP_VERSION = "2026.11.10.41"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
 KEEP_BACKUPS = 5
@@ -3412,7 +3412,7 @@ class App(_TkBase):
         pad = {"padx": 12, "pady": 5}
         tk.Label(f, justify="left", anchor="w", fg="#333", wraplength=1050, font=("", 10),
                  text="英語版のCM(1本につながったものでもOK)と同じ音を、日本語のテレビ録画の中から探して、日本語音声つきで書き出します。\n"
-                      "同じCMが何回流れていても全部書き出します。ファイル名は「30秒_英語版名_CM01(録画名).mkv」の形です(秒数は5秒きざみ)。\n"
+                      "同じCMが何回流れていても全部書き出します。ファイル名は「CM01_30秒_英語版名(録画名).mkv」の形です(秒数は5秒きざみ)。\n"
                       "書き出しは映像を再エンコードします(CMの切れ目をフレーム単位で合わせるため)。").pack(fill="x", **pad)
         c1 = ttk.LabelFrame(f, text=" ① 英語版の映像 (複数まとめて探せます) → CMを切り分ける ")
         c1.pack(fill="x", **pad)
@@ -3622,7 +3622,7 @@ class App(_TkBase):
         off = self._cm_off(self._cm_view)
         for i, (a, b) in enumerate(self._cms_of(self._cm_view)):
             self.cm_tree.insert("", "end", iid=str(i), tags=("off",) if i in off else (),
-                                values=("☐" if i in off else "☑", f"CM{i + 1:02d}", f"{self.short(a)} 〜 {self.short(b)}",
+                                values=("☐" if i in off else "☑", f"CM{i + 1:0{max(2, len(str(len(self._cms_of(self._cm_view)))))}d}", f"{self.short(a)} 〜 {self.short(b)}",
                                         f"{b - a:.1f} 秒", f"{round5(b - a)} 秒"))
         keep_ = [i for i in sel0 if self.cm_tree.exists(i)]
         if keep_:
@@ -3994,6 +3994,7 @@ class App(_TkBase):
                 for ei, cx in enumerate(ctxs):
                     en, cl, cms, rec, found, en_stem, probes = cx["en"], cx["cl"], cx["cms"], cx["rec"], cx["found"], cx["en_stem"], cx["probes"]
                     skip = cx["skip"]
+                    cw = max(2, len(str(len(cl))))   # CM番号の桁数(100本以上なら3桁にして、並べたとき順番どおりになるように)
                     ii = i * M + ei
                     lab = f"[{en_stem}] " if M > 1 else ""
                     t_rec = time.time()
@@ -4164,13 +4165,13 @@ class App(_TkBase):
                                 why.append("映像が少し違う")
                             if v is not None and v < VID_MIN:  # 音は合っても映像が合わない=BGMや声が同じだけの別のCM。書き出さず記録だけ残す
                                 tt = int(d["t"])
-                                rejected.append(f"{lab}CM{k + 1:02d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
+                                rejected.append(f"{lab}CM{k + 1:0{cw}d}\t{Path(jp_p).name}\t{tt // 3600}:{tt % 3600 // 60:02d}:{tt % 60:02d}\t映像{v:.2f}\t音{d['z']:.1f}")
                                 nrej += 1
                                 continue
-                            base = f"{round5(d.get('out_len', b - a))}秒_{en_stem}_CM{k + 1:02d}{tail}" + ("【短縮版】" if d.get("short") else "")
+                            base = f"CM{k + 1:0{cw}d}_{round5(d.get('out_len', b - a))}秒_{en_stem}{tail}" + ("【短縮版】" if d.get("short") else "")
                             name = base + ("【要確認】" if why else "") + (f"【映像{v:.2f}】" if v is not None else "") \
                                 + f"({safe(Path(jp_p).stem)}).mkv"
-                            outd_k = outd / f"{round5(b - a)}秒_{en_stem}_CM{k + 1:02d}" if group else outd
+                            outd_k = outd / f"CM{k + 1:0{cw}d}_{round5(b - a)}秒_{en_stem}" if group else outd
                             out = outd_k / name
                             found[k] += 1
                             if re.sub(r"【[^】]*】", "", base) + f"({safe(Path(jp_p).stem)}).mkv" in existing_in(outd_k):
@@ -4293,7 +4294,7 @@ class App(_TkBase):
                     bits.append(f"同じ名前があって飛ばした {res['skip']} 本")
                 if not stopped:
                     for c_ in ctxs:
-                        miss = [f"CM{k + 1:02d}" for k, c in enumerate(c_["found"]) if c == 0 and k not in c_["skip"]]
+                        miss = [f"CM{k + 1:0{max(2, len(str(len(c_['cl']))))}d}" for k, c in enumerate(c_["found"]) if c == 0 and k not in c_["skip"]]
                         if miss and len(c_["cl"]) > 1:
                             bits.append((f"[{c_['en_stem']}] " if len(ctxs) > 1 else "") + "どの録画にも見つからなかったCM: " + "、".join(miss[:20]) + ("…" if len(miss) > 20 else ""))
                 if skipped_en:
