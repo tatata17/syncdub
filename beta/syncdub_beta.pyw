@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 8       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 9       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3484,9 +3484,11 @@ def items_from_segs(segs, en_end=None):
             items.append({"k": "pt", "en": s["en_end"], "jp": je, "note": ""})
         if prev:
             pen, pje = prev
-            if s["en_start"] - pen > 0.05:
+            # ごく小さな食い違い(0.005秒以上)も、そのまま「間」や「飛ばす所」として残す。
+            # (残さないと、前の区間を少し伸び縮みさせてつじつまを合わせることになり、区間の中で音が少しずつずれる)
+            if s["en_start"] - pen > 0.005:
                 items.append({"k": "cut", "en0": pen, "en1": s["en_start"], "audio": "silence"})
-            if s["jp_start"] - pje > 0.05:
+            if s["jp_start"] - pje > 0.005:
                 items.append({"k": "cm", "jp0": pje, "jp1": s["jp_start"]})
         prev = (s["en_end"], je)
     if tail:
