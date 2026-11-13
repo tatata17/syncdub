@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 5       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 6       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1063,6 +1063,80 @@ def _best_peak(a0, b, fs):
         if z > best[1]:
             best = (k, float(z))
     return best
+
+
+def _refine_offsets(segs, esl, jsl, fs, rms_thr):
+    """区間の中で、音の合う位置を3秒おきに測り直し、途中で時間差が少しだけ変わる所(0.03秒以上)があれば、そこで区間を分ける。
+    区間全体が同じだけずれているときは、その分だけ直す。伸縮のある区間や、測れる所が少ない区間は変えない。"""
+    WL, RAD = 5.0, 0.35
+    out = []
+    for sg in segs:
+        d = sg["en_end"] - sg["en_start"]
+        if sg.get("jp_end") is not None or d < 30.0:
+            out.append(sg)
+            continue
+        o0 = sg["jp_start"] - sg["en_start"]
+        smp, zs = [], []
+        for t in np.arange(sg["en_start"], sg["en_end"] - WL, 3.0):
+            a = esl(t, WL)
+            if float(np.sqrt((a ** 2).mean())) < rms_thr:
+                continue
+            b = jsl(t + o0 - RAD, WL + 2 * RAD)
+            if np.abs(b).max() < 1e-6:
+                continue
+            k_, z_ = _best_peak(a - a.mean(), b, fs)
+            lag = -RAD + k_ / fs
+            if z_ >= 6.0 and abs(lag) < RAD - 0.03:
+                smp.append((float(t), o0 + lag))
+                zs.append(z_)
+        gs = [g for g in _offset_groups(smp, zs, WL, merge=False) if g["n"] >= 4 and abs(g["b"]) < 1e-9]
+        # となりと同じ時間差(0.03秒未満の違い)のまとまりは、ひとつにする
+        mg = []
+        for g in gs:
+            if mg and abs(g["a"] - mg[-1]["a"]) < 0.03:
+                mg[-1] = dict(mg[-1], t_last=g["t_last"], n=mg[-1]["n"] + g["n"])
+            else:
+                mg.append(dict(g))
+        if not mg or all(abs(g["a"] - o0) < 0.03 for g in mg):
+            out.append(sg)
+            continue
+
+        def ncc(t, o):
+            a = esl(t, 1.0)
+            b = jsl(t + o - 0.01, 1.02)
+            a = a - a.mean()
+            na = float(np.linalg.norm(a))
+            if na < rms_thr * np.sqrt(len(a)):
+                return None
+            cc = np.correlate(b, a, "valid")
+            e2 = np.convolve(b ** 2, np.ones(len(a)), "valid")
+            return float((cc / (na * np.sqrt(np.maximum(e2, 1e-12)))).max())
+        bnd = [sg["en_start"]]
+        for g1, g2 in zip(mg, mg[1:]):
+            ts = np.arange(g1["t_last"], max(g1["t_last"] + 0.25, g2["t_first"] + WL - 1.0), 0.25)
+            pf = np.array([0.0 if (c1 := ncc(t, g1["a"])) is None or (c2 := ncc(t, g2["a"])) is None else c1 - c2 for t in ts])
+            if not len(pf) or np.abs(pf).max() < 0.05:
+                x = (g1["t_last"] + g2["t_first"] + WL) / 2
+            else:
+                k = int(np.argmax([pf[:i].sum() - pf[i:].sum() for i in range(len(pf) + 1)]))
+                x = float(ts[k] if k < len(ts) else ts[-1] + 0.25)
+            bnd.append(min(max(x, bnd[-1] + 1.0), sg["en_end"] - 1.0))
+        bnd.append(sg["en_end"])
+        prev_je = None
+        for q, (g, x0, x1) in enumerate(zip(mg, bnd, bnd[1:])):
+            js = x0 + g["a"]
+            if prev_je is not None and js < prev_je:      # 日本語が重なる(英語版のほうが少し長い) → その分、英語側に間をあける
+                x0, js = x0 + (prev_je - js), prev_je
+            if x1 - x0 < 0.5:
+                continue
+            ns = dict(sg, en_start=round(float(x0), 4), en_end=round(float(x1), 4), jp_start=round(float(js), 4))
+            if q > 0:
+                ns.pop("trim_s", None)
+            if q < len(mg) - 1:
+                ns.pop("trim_e", None)
+            out.append(ns)
+            prev_je = js + (x1 - x0)
+    segs[:] = out
 
 
 def _splice_at_quiet(segs, jsl, jthr, reach=2.0):
@@ -1767,7 +1841,7 @@ def _fit_offsets(samples):
     return None
 
 
-def _offset_groups(smp, zs, WL):
+def _offset_groups(smp, zs, WL, merge=True):
     """音で測った [(英語版の時刻, 時間差)] を、時間差がそろっている(またはゆっくり動く)ひと続きごとに分ける。
     1つだけ外れた値は捨て、2つ続けて新しい値になったら、そこから別のまとまりにする。
     戻り値: [{"t_first","t_last","a","b","n","z"}]  時間差 = a + b×時刻"""
@@ -1795,7 +1869,7 @@ def _offset_groups(smp, zs, WL):
     # 少しずつ動いているだけ(速さがわずかに違う)なら、ひと続きに戻す
     mg = []
     for g in groups:
-        if mg:
+        if mg and merge:
             a, b, r = line(mg[-1] + g)
             if r <= 0.06 and abs(b) < 0.03:
                 mg[-1] = mg[-1] + g
@@ -1862,7 +1936,7 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
     S[~eok, :] = 0.0
     S[:, ~jok] = 0.0
     if ctx is not None:
-        ctx.update({"S": S, "F": F, "eok": eok, "jok": jok, "trim": (esl, jsl, rms_thr, jthr)})
+        ctx.update({"S": S, "F": F, "eok": eok, "jok": jok, "trim": (esl, jsl, rms_thr, jthr), "fs": fs})
 
     # ---- 2) ありそうな時間差(コマ数)を集める
     votes = {}
@@ -2309,6 +2383,8 @@ def combined_align(en, jp, progress=lambda f, m: None):
     out = keep
     for s in out:
         s["note"] = "自動(音+映像)"
+    # 区間の中で時間差が少しだけ変わる所(0.1秒ほどのずれ)を測り直して、そこで分ける
+    _refine_offsets(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
     _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3])

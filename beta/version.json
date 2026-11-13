@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 5, "file": "beta/syncdub_beta.pyw", "sha256": "0c806bb600cc6756ebfca7d61544cdaa644d9e6bd9f4a68950836ca98d96f8d1", "notes": "区間のつなぎ目を、日本語が静かな所へずらす(曲の途中で音が途切れないように)"}
+{"version": "2026.11.10.41", "beta": 6, "file": "beta/syncdub_beta.pyw", "sha256": "6d8dcc93820f6f2ca0dfdd185c46d38b58278af81c1e54fbac93a3edac0fbcec", "notes": "区間の中で少しだけずれる所(0.1秒ほど)を測り直して分ける(映像でも合わせる のとき)"}
