@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 7       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 8       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1153,6 +1153,90 @@ def _refine_offsets(segs, esl, jsl, fs, rms_thr):
             if q > 0:
                 ns.pop("trim_s", None)
             if q < len(mg) - 1:
+                ns.pop("trim_e", None)
+            out.append(ns)
+            prev_je = js + (x1 - x0)
+    segs[:] = out
+
+
+def _refine_edges(segs, esl, jsl, fs, rms_thr):
+    """区間の頭と終わりの短い部分(題名の曲など、数秒だけ)が、区間の本体と少しだけ(0.03〜0.3秒)ずれているとき、そこを分ける。
+    頭・終わりの3秒を1秒ずらして2回測り、2回とも同じだけずれていて、一致がはっきりしているときだけ直す。"""
+    WL, RAD = 3.0, 0.35
+
+    def lag_at(t, o):
+        a = esl(t, WL)
+        if float(np.sqrt((a ** 2).mean())) < rms_thr:
+            return None
+        b = jsl(t + o - RAD, WL + 2 * RAD)
+        if np.abs(b).max() < 1e-6:
+            return None
+        k_, z_ = _best_peak(a - a.mean(), b, fs)
+        lag = -RAD + k_ / fs
+        return lag if z_ >= 8.0 and abs(lag) < RAD - 0.03 else None
+
+    def ncc(t, o):
+        a = esl(t, 1.0)
+        b = jsl(t + o - 0.01, 1.02)
+        a = a - a.mean()
+        na = float(np.linalg.norm(a))
+        if na < rms_thr * np.sqrt(len(a)):
+            return None
+        cc = np.correlate(b, a, "valid")
+        e2 = np.convolve(b ** 2, np.ones(len(a)), "valid")
+        return float((cc / (na * np.sqrt(np.maximum(e2, 1e-12)))).max())
+
+    def edge(sg, head):
+        o = sg["jp_start"] - sg["en_start"]
+        ts = (sg["en_start"], sg["en_start"] + 1.0) if head else (sg["en_end"] - WL, sg["en_end"] - WL - 1.0)
+        ls = [lag_at(t, o) for t in ts]
+        if None in ls or abs(ls[0] - ls[1]) > 0.03 or not 0.03 <= abs(sum(ls) / 2) <= 0.3:
+            return None
+        oe = o + sum(ls) / 2
+        # 本体に切り替わる所: 端から12秒までを0.25秒おきに見て、どちらの時間差に合うかで決める
+        grid = np.arange(0.0, min(12.0, sg["en_end"] - sg["en_start"] - 4.0), 0.25)
+        pf = []
+        for u in grid:
+            t = sg["en_start"] + u if head else sg["en_end"] - 1.0 - u
+            c1, c2 = ncc(t, oe), ncc(t, o)
+            pf.append(0.0 if c1 is None or c2 is None else c1 - c2)
+        pf = np.array(pf)
+        if not len(pf) or pf[:4].sum() < 0.2:      # 端の1秒で、はっきり端の時間差のほうが合っていること
+            return None
+        k = int(np.argmax([pf[:i].sum() - pf[i:].sum() for i in range(len(pf) + 1)]))
+        if k < 4 or k >= len(grid):               # 1秒未満、または12秒以上 → 端だけのずれではない
+            return None
+        return oe, float(grid[k])
+
+    out = []
+    for sg in segs:
+        if sg.get("jp_end") is not None or sg["en_end"] - sg["en_start"] < 10.0:
+            out.append(sg)
+            continue
+        o = sg["jp_start"] - sg["en_start"]
+        parts = [(sg["en_start"], sg["en_end"], o)]
+        h = edge(sg, True)
+        if h:
+            parts = [(sg["en_start"], sg["en_start"] + h[1], h[0]), (sg["en_start"] + h[1], sg["en_end"], o)]
+        t_ = edge(sg, False)
+        if t_ and sg["en_end"] - t_[1] - parts[-1][0] > 4.0:
+            x0, x1, oo = parts[-1]
+            parts[-1:] = [(x0, sg["en_end"] - t_[1], oo), (sg["en_end"] - t_[1], x1, t_[0])]
+        if len(parts) == 1:
+            out.append(sg)
+            continue
+        prev_je = None
+        if out:
+            pv = out[-1]
+            prev_je = pv["jp_end"] if pv.get("jp_end") is not None else pv["jp_start"] + (pv["en_end"] - pv["en_start"])
+        for q, (x0, x1, oo) in enumerate(parts):
+            js = x0 + oo
+            if prev_je is not None and js < prev_je and prev_je - js < 0.5:   # 日本語が少し重なる → その分、英語側に間をあける
+                x0, js = x0 + (prev_je - js), prev_je
+            ns = dict(sg, en_start=round(float(x0), 4), en_end=round(float(x1), 4), jp_start=round(float(js), 4), jp_end=None)
+            if q > 0:
+                ns.pop("trim_s", None)
+            if q < len(parts) - 1:
                 ns.pop("trim_e", None)
             out.append(ns)
             prev_je = js + (x1 - x0)
@@ -2405,6 +2489,7 @@ def combined_align(en, jp, progress=lambda f, m: None):
         s["note"] = "自動(音+映像)"
     # 区間の中で時間差が少しだけ変わる所(0.1秒ほどのずれ)を測り直して、そこで分ける
     _refine_offsets(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
+    _refine_edges(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
     _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3])

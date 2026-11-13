@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 7, "file": "beta/syncdub_beta.pyw", "sha256": "c0b652d68fc88c49ada6045024186940be0b706ee02f6447e1b95a594ed75334", "notes": "伸縮つきの区間でも、小さなずれを測り直して分ける"}
+{"version": "2026.11.10.41", "beta": 8, "file": "beta/syncdub_beta.pyw", "sha256": "0153526b74c366300861b064c55b781754350e12168a47b6622c95f0b8875e0b", "notes": "区間の頭・終わりの数秒だけがずれている所(題名の曲など)を分けて合わせる"}
