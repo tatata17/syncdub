@@ -35,6 +35,7 @@ except Exception:  # noqa: BLE001
     DND_FILES, _TkBase = None, tk.Tk
 
 import argparse
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -623,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 2       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 3       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -662,6 +663,12 @@ def _http(url, accept=None, timeout=12):
         return r.read().decode("utf-8")
 
 
+def _http_bytes(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "syncdub-updater"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
 def vkey(v):
     return tuple(int(x) for x in re.findall(r"\d+", v))
 
@@ -697,7 +704,13 @@ def ver_label(info=None):
 
 def download_update_source(info, ref):
     base = TEST_BASE or f"https://raw.githubusercontent.com/{REPO}/{ref}"
-    code = _http(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
+    raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
+    if info.get("sha256"):     # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる
+        got = hashlib.sha256(raw).hexdigest()
+        if got != str(info["sha256"]).lower():
+            raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。"
+                             "公開直後の可能性があります。少し待って再試行してください")
+    code = raw.decode("utf-8")
     m = re.search(r'^APP_VERSION = "([^"]+)"', code, re.M)
     if BETA_REVIEW:
         mb = re.search(r"^BETA_BUILD = (\d+)", code, re.M)
@@ -3746,7 +3759,7 @@ def output_check(path, sr=8000):
                                 capture_output=True, **NOWIN)
             if r.returncode != 0 or len(r.stdout) < 2 * sr:
                 return None, ["出力に音声が2本(日本語・英語)入っていないため、比べられませんでした。"]
-            raws.append(np.frombuffer(r.stdout, dtype=np.int16).astype(np.float64))
+            raws.append(np.frombuffer(r.stdout, dtype=np.int16))   # 長い動画でもメモリを食わないよう、16ビットのまま持つ(計算する所だけ変換)
     except Exception as ex:  # noqa: BLE001
         return None, [f"出力を読めませんでした: {ex}"]
     j, e = raws
@@ -3757,8 +3770,14 @@ def output_check(path, sr=8000):
     # 1) 片方だけ音がある所
     h = sr // 4
     k = n // h
-    rj = np.sqrt((j[: k * h].reshape(k, h) ** 2).mean(1))
-    re_ = np.sqrt((e[: k * h].reshape(k, h) ** 2).mean(1))
+    def block_rms(x):     # 0.25秒ごとの音量。少しずつ(約2分ぶん)変換して計算する
+        out = np.empty(k, np.float32)
+        step = 4096
+        for q in range(0, k, step):
+            c = x[q * h: min(q + step, k) * h].astype(np.float32).reshape(-1, h)
+            out[q: q + len(c)] = np.sqrt((c ** 2).mean(1))
+        return out
+    rj, re_ = block_rms(j), block_rms(e)
     pj = float(np.percentile(rj[rj > 1], 75)) if (rj > 1).any() else 0.0
     pe = float(np.percentile(re_[re_ > 1], 75)) if (re_ > 1).any() else 0.0
     if pj <= 0 or pe <= 0:
@@ -3783,9 +3802,9 @@ def output_check(path, sr=8000):
     W, R = 6 * sr, 3 * sr
     lags = []
     for s0 in range(0, n - W, W):
-        a = e[s0: s0 + W]
+        a = e[s0: s0 + W].astype(np.float64)
         b0, b1 = max(0, s0 - R), min(n, s0 + W + R)
-        b = j[b0:b1]
+        b = j[b0:b1].astype(np.float64)
         if a.std() < 0.05 * pe or b.std() < 0.05 * pj:
             continue
         a = a - a.mean()
