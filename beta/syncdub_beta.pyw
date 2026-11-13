@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 6       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 7       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1067,38 +1067,58 @@ def _best_peak(a0, b, fs):
 
 def _refine_offsets(segs, esl, jsl, fs, rms_thr):
     """区間の中で、音の合う位置を3秒おきに測り直し、途中で時間差が少しだけ変わる所(0.03秒以上)があれば、そこで区間を分ける。
-    区間全体が同じだけずれているときは、その分だけ直す。伸縮のある区間や、測れる所が少ない区間は変えない。"""
-    WL, RAD = 5.0, 0.35
+    区間全体が同じだけずれているときは、その分だけ直す。伸縮つきの区間も、「一定の時間差がいくつか続く形」のほうが
+    よく合うなら、その形に直す。測れる所が少ない区間や、時間差が速く動き続ける区間は変えない。"""
+    WL, RAD, TOL = 5.0, 0.35, 0.03
     out = []
     for sg in segs:
         d = sg["en_end"] - sg["en_start"]
-        if sg.get("jp_end") is not None or d < 30.0:
+        if d < 30.0:
             out.append(sg)
             continue
-        o0 = sg["jp_start"] - sg["en_start"]
-        smp, zs = [], []
+        o_s = sg["jp_start"] - sg["en_start"]
+        o_e = o_s if sg.get("jp_end") is None else sg["jp_end"] - sg["en_end"]
+
+        def o_now(t, sg=sg, o_s=o_s, o_e=o_e, d=d):     # いまの区間が、時刻 t に当てている時間差
+            return o_s + (o_e - o_s) * (t - sg["en_start"]) / d
+        smp = []
         for t in np.arange(sg["en_start"], sg["en_end"] - WL, 3.0):
             a = esl(t, WL)
             if float(np.sqrt((a ** 2).mean())) < rms_thr:
                 continue
-            b = jsl(t + o0 - RAD, WL + 2 * RAD)
+            oc = o_now(t + WL / 2)
+            b = jsl(t + oc - RAD, WL + 2 * RAD)
             if np.abs(b).max() < 1e-6:
                 continue
             k_, z_ = _best_peak(a - a.mean(), b, fs)
             lag = -RAD + k_ / fs
             if z_ >= 6.0 and abs(lag) < RAD - 0.03:
-                smp.append((float(t), o0 + lag))
-                zs.append(z_)
-        gs = [g for g in _offset_groups(smp, zs, WL, merge=False) if g["n"] >= 4 and abs(g["b"]) < 1e-9]
-        # となりと同じ時間差(0.03秒未満の違い)のまとまりは、ひとつにする
-        mg = []
-        for g in gs:
-            if mg and abs(g["a"] - mg[-1]["a"]) < 0.03:
-                mg[-1] = dict(mg[-1], t_last=g["t_last"], n=mg[-1]["n"] + g["n"])
+                smp.append((float(t), oc + lag))
+        # 時間差がそろっているまとまりに分ける(1つだけ外れた値は捨て、2つ続けて新しい値になったら別のまとまり)
+        groups, cur, pend = [], None, []
+        for i, (t, o) in enumerate(smp):
+            if cur is not None and abs(o - float(np.median([smp[k][1] for k in cur]))) <= TOL:
+                cur.append(i)
+                pend = []
             else:
-                mg.append(dict(g))
-        if not mg or all(abs(g["a"] - o0) < 0.03 for g in mg):
-            out.append(sg)
+                pend.append(i)
+                if len(pend) >= 2 and abs(smp[pend[-1]][1] - smp[pend[-2]][1]) <= TOL:
+                    cur = pend[-2:]
+                    groups.append(cur)
+                    pend = []
+        big = [g for g in groups if len(g) >= 4]
+        if not big or sum(len(g) for g in big) < 0.7 * len(smp):
+            out.append(sg)                              # 測れる所が少ない・時間差が動き続けている → そのまま
+            continue
+        mg = []
+        for g in big:
+            a_ = float(np.median([smp[k][1] for k in g]))
+            if mg and abs(a_ - mg[-1]["a"]) < TOL:
+                mg[-1]["t_last"], mg[-1]["n"] = smp[g[-1]][0], mg[-1]["n"] + len(g)
+            else:
+                mg.append({"a": a_, "t_first": smp[g[0]][0], "t_last": smp[g[-1]][0], "n": len(g)})
+        if all(abs(g["a"] - o_now(t_)) < TOL for g in mg for t_ in (g["t_first"], g["t_last"] + WL)):
+            out.append(sg)                              # いまのままで合っている
             continue
 
         def ncc(t, o):
@@ -1129,7 +1149,7 @@ def _refine_offsets(segs, esl, jsl, fs, rms_thr):
                 x0, js = x0 + (prev_je - js), prev_je
             if x1 - x0 < 0.5:
                 continue
-            ns = dict(sg, en_start=round(float(x0), 4), en_end=round(float(x1), 4), jp_start=round(float(js), 4))
+            ns = dict(sg, en_start=round(float(x0), 4), en_end=round(float(x1), 4), jp_start=round(float(js), 4), jp_end=None)
             if q > 0:
                 ns.pop("trim_s", None)
             if q < len(mg) - 1:

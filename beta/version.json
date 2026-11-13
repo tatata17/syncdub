@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 6, "file": "beta/syncdub_beta.pyw", "sha256": "6d8dcc93820f6f2ca0dfdd185c46d38b58278af81c1e54fbac93a3edac0fbcec", "notes": "区間の中で少しだけずれる所(0.1秒ほど)を測り直して分ける(映像でも合わせる のとき)"}
+{"version": "2026.11.10.41", "beta": 7, "file": "beta/syncdub_beta.pyw", "sha256": "c0b652d68fc88c49ada6045024186940be0b706ee02f6447e1b95a594ed75334", "notes": "伸縮つきの区間でも、小さなずれを測り直して分ける"}
