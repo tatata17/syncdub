@@ -623,7 +623,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 1       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 2       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -632,6 +632,9 @@ TEST_BASE = os.environ.get("SYNCDUB_TEST_BASE")  # 試験用: ローカルサー
 SR = 8000          # 波形・解析用のサンプルレート
 PYR = 64           # 波形ピラミッドの縮約率
 NOWIN = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+# ファイルを選ぶ画面で見せる種類(指定しないと、環境によっては .m2ts などが一覧に出ないことがある)
+MEDIA_TYPES = [("動画・音声", "*.m2ts *.ts *.mts *.m2t *.mp4 *.mkv *.mov *.avi *.wmv *.mpg *.mpeg *.m4v *.flv *.webm *.vob "
+                              "*.wav *.mp3 *.aac *.m4a *.ac3 *.flac *.mka *.ogg *.opus *.wma"), ("すべてのファイル", "*.*")]
 # 区間ごとの色(薄い色=帯、濃い色=文字や境界線)。英語側・日本語側で同じ区間は同じ色になる
 PASTEL = ["#ffd9d9", "#d9e8ff", "#dcf3d2", "#fff1c9", "#e8dcff", "#ffdcee", "#d3f2f1", "#ece9cf"]
 DARK = ["#c0392b", "#2f6fd0", "#2e8b3d", "#b8860b", "#7b4fd0", "#c2307a", "#1f8f8c", "#7a7a2a"]
@@ -4691,7 +4694,7 @@ class App(_TkBase):
                                 f"選んだ英語版のCMの一覧です({len(self._cms_of(self._cm_view))} 本)。探さないCMは ☑ を外します。", foreground="#667")
 
     def _en2_add(self):
-        for x in filedialog.askopenfilenames(title="英語版の映像を選択 (複数選べます)"):
+        for x in filedialog.askopenfilenames(title="英語版の映像を選択 (複数選べます)", filetypes=MEDIA_TYPES):
             self._en2_put(x)
         self._en2_fill()
 
@@ -4946,7 +4949,7 @@ class App(_TkBase):
                     self.find_tree.insert("", "end", iid=str(len(self.find_files) - 1), values=(Path(x).name, "待機中"))
 
     def _find_add(self):
-        self._find_add_files(list(filedialog.askopenfilenames(title="日本語の録画を選択 (複数選べます)")))
+        self._find_add_files(list(filedialog.askopenfilenames(title="日本語の録画を選択 (複数選べます)", filetypes=MEDIA_TYPES)))
 
     def _find_add_dir(self):
         d = filedialog.askdirectory(title="録画が入っているフォルダを選択 (中のフォルダも探します)")
@@ -5462,7 +5465,7 @@ class App(_TkBase):
             pass
 
     def _clip_pick_en(self):
-        p = filedialog.askopenfilename(title="英語版の映像を選択")
+        p = filedialog.askopenfilename(title="英語版の映像を選択", filetypes=MEDIA_TYPES)
         if p:
             self.clip_en.set(p)
             if not self.clip_out.get():
@@ -5480,7 +5483,7 @@ class App(_TkBase):
                 self.clip_tree.insert("", "end", iid=str(len(self.clip_files) - 1), values=(Path(p).name, "待機中"))
 
     def _clip_add(self):
-        self._clip_add_files(list(filedialog.askopenfilenames(title="日本語のファイルを選択 (複数選べます)")))
+        self._clip_add_files(list(filedialog.askopenfilenames(title="日本語のファイルを選択 (複数選べます)", filetypes=MEDIA_TYPES)))
 
     def _clip_drop(self, ev):
         self._clip_add_files(list(self.tk.splitlist(ev.data)))
@@ -5643,7 +5646,7 @@ class App(_TkBase):
                 z["name"].config(text=z["sub"] + "\nここにドロップ / クリックして選択", fg="#667")
 
     def _pick(self, k):
-        p = filedialog.askopenfilename(title="英語版の映像を選択" if k == "en" else "日本語の録画を選択")
+        p = filedialog.askopenfilename(title="英語版の映像を選択" if k == "en" else "日本語の録画を選択", filetypes=MEDIA_TYPES)
         if p:
             (self.en_var if k == "en" else self.jp_var).set(p)
             self._maybe_load()
@@ -5984,7 +5987,7 @@ class App(_TkBase):
         self.after(60, self._poll)
 
     def _browse(self, var):
-        p = filedialog.askopenfilename(title="ファイルを選択")
+        p = filedialog.askopenfilename(title="ファイルを選択", filetypes=MEDIA_TYPES)
         if p:
             var.set(p)
 
