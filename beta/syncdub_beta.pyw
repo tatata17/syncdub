@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 3       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 4       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -706,11 +706,13 @@ def download_update_source(info, ref):
     base = TEST_BASE or f"https://raw.githubusercontent.com/{REPO}/{ref}"
     raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
     if info.get("sha256"):     # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる
-        got = hashlib.sha256(raw).hexdigest()
+        # 改行を LF にそろえてから比べる(tools/release.py と同じ計算。改行コードの違いだけで更新が止まらないように)
+        got = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
         if got != str(info["sha256"]).lower():
-            raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。"
-                             "公開直後の可能性があります。少し待って再試行してください")
-    code = raw.decode("utf-8")
+            raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。\n"
+                             "公開直後なら、数分待つと直ります。しばらく待っても同じときは、待っても直りません。"
+                             "配布ページから新しいファイルを入れ直してください")
+    code = raw.decode("utf-8").replace("\r\n", "\n")   # 保存のときに改行が二重にならないように、LF にそろえておく
     m = re.search(r'^APP_VERSION = "([^"]+)"', code, re.M)
     if BETA_REVIEW:
         mb = re.search(r"^BETA_BUILD = (\d+)", code, re.M)

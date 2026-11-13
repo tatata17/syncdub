@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 3, "file": "beta/syncdub_beta.pyw", "sha256": "a9b007616d9ba6abfa64e113689a775af9ac51bf7ede174759bfd15f2915c355", "notes": "自動チェックを長い動画でも軽く / 更新時にファイルの照合(SHA-256)を追加"}
+{"version": "2026.11.10.41", "beta": 4, "file": "beta/syncdub_beta.pyw", "sha256": "2de5c235b9011469a0360701bdc723b0ad816f27e2fac77a115cda56cc5a98fc", "notes": "更新時の照合を、改行コードの違いで止まらないように"}
