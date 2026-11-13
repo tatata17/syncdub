@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 4, "file": "beta/syncdub_beta.pyw", "sha256": "2de5c235b9011469a0360701bdc723b0ad816f27e2fac77a115cda56cc5a98fc", "notes": "更新時の照合を、改行コードの違いで止まらないように"}
+{"version": "2026.11.10.41", "beta": 5, "file": "beta/syncdub_beta.pyw", "sha256": "0c806bb600cc6756ebfca7d61544cdaa644d9e6bd9f4a68950836ca98d96f8d1", "notes": "区間のつなぎ目を、日本語が静かな所へずらす(曲の途中で音が途切れないように)"}
