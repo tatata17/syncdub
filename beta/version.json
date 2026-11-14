@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 15, "file": "beta/syncdub_beta.pyw", "sha256": "11d9b5c387cbf56923b1ee0273874d278719e14d6c23d8d5e5052d34bc211e94", "notes": "区間の中で時間差が切り替わる位置を、広い範囲から探す(繰り返しのある音で早く決めてしまうのを防ぐ)"}
+{"version": "2026.11.10.41", "beta": 16, "file": "beta/syncdub_beta.pyw", "sha256": "1db5aac4c6490d4c6ac68c85d207e2d6a32133cff2e5481603d05bbcf0e729ea", "notes": "英語版だけ少し長い所の「間」を、近くの英語が無音の所(場面の変わり目)へ移す"}

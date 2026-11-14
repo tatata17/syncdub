@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 15       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 16       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1257,7 +1257,7 @@ def _refine_edges(segs, esl, jsl, fs, rms_thr):
     segs[:] = out
 
 
-def _splice_at_quiet(segs, jsl, jthr, reach=2.0):
+def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
     """となり合う区間のつなぎ目が、日本語の音の鳴っている最中にあるとき、近く(前後 reach 秒)の日本語が静かな所へずらす。
     英語版だけ少し長い(短い)所では、日本語を少し飛ばす(間をあける)ことになる。その切れ目が曲の途中にあると
     音がプツッと切れて聞こえるので、無音の所に持っていく。大きく離れた区間(CMをまたぐ所)は対象にしない。"""
@@ -1265,14 +1265,37 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0):
         return float(np.sqrt((jsl(t - 0.1, 0.2) ** 2).mean()))
     quiet = 0.5 * jthr
     for p, s in zip(segs, segs[1:]):
-        if p.get("jp_end") is not None or s.get("jp_end") is not None:
-            continue                                  # 伸縮のある区間は動かさない
-        pe = p["jp_start"] + (p["en_end"] - p["en_start"])
+        if s.get("jp_end") is not None:
+            continue                                  # 後ろが伸縮のある区間なら動かさない
+        p_str = p.get("jp_end") is not None           # 前が伸縮つき: 英語の無音へ移す処理だけ行う
+        rp = (p["jp_end"] - p["jp_start"]) / (p["en_end"] - p["en_start"]) if p_str else 1.0
+        pe = p["jp_end"] if p_str else p["jp_start"] + (p["en_end"] - p["en_start"])
         g_en, g_jp = s["en_start"] - p["en_end"], s["jp_start"] - pe
         if not (-0.01 <= g_en <= 3.0 and -0.01 <= g_jp <= 3.0) or (g_en < 0.02 and g_jp < 0.02):
             continue
         if max(jq(pe), jq(s["jp_start"])) < quiet:
             continue                                  # もう静かな所で切れている
+        # 英語版だけが少し長い所(日本語はつながっている)は、近く(前後6秒)に「英語がその長さぶん無音」の所があれば、そこが本当の場所。
+        # (英語版は場面の変わり目の無音が長く、日本語の録画は短い、という形が多い) 見つかれば、間をそこへ移す
+        if esl is not None and en_thr is not None and g_en >= 0.05 and abs(g_jp) < 0.02:
+            lo6 = -min(6.0, p["en_end"] - p["en_start"] - 1.0)
+            hi6 = min(6.0, s["en_end"] - s["en_start"] - 1.0)
+            cand = []
+            for dd in np.arange(lo6, hi6 + 1e-6, 0.05):
+                x = p["en_end"] + dd
+                if all(float(np.sqrt((esl(x + u, 0.1) ** 2).mean())) < en_thr for u in np.arange(0.0, max(g_en - 0.1, 0.0) + 1e-6, 0.05)):
+                    cand.append((jq(pe + dd * rp), abs(dd), float(dd)))
+            if cand:
+                qs = [c for c in cand if c[0] < quiet]
+                dd = min(qs, key=lambda c: c[1])[2] if qs else min(cand)[2]
+                p["en_end"] = round(p["en_end"] + dd, 4)
+                if p_str:
+                    p["jp_end"] = round(p["jp_end"] + dd * rp, 4)
+                s["en_start"] = round(s["en_start"] + dd, 4)
+                s["jp_start"] = round(pe + dd * rp + g_jp, 4)
+                continue
+        if p_str:
+            continue
         lo = -min(reach, p["en_end"] - p["en_start"] - 1.0)
         hi = min(reach, s["en_end"] - s["en_start"] - 1.0)
         best = None
@@ -1909,7 +1932,7 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 sg_["flag"] = "・".join(x for x in (sg_["flag"], f"似た場所が他にもあります(英語版 {where})") if x)
 
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr)
-    _splice_at_quiet(segs, jsl, jthr)
+    _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
 
     unused = []
     prev_end = jo
@@ -2359,7 +2382,7 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
                 if p["jp_end"] is not None:
                     p["jp_end"] = round(p["jp_end"] - cut, 4)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.1)
-    _splice_at_quiet(segs, jsl, jthr)
+    _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
     unused = []
     prev_end = jo
     for s in segs:
@@ -2538,7 +2561,7 @@ def combined_align(en, jp, progress=lambda f, m: None):
     _refine_edges(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
-    _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3])
+    _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3], esl=ctx["trim"][0], en_thr=ctx["trim"][2])
     jo, j_end = jp.a_origin, jp.end
     unused, prev_end = [], jo
     for s in out:
