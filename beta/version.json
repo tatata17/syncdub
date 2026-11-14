@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 11, "file": "beta/syncdub_beta.pyw", "sha256": "29dec8f693cb97356ad389c62228cb939d5d85a6925297ccfbe9bf251bbd0bf5", "notes": "自動チェック: ひと続きの区間の中で1か所だけ外れた測定は、ずれとして報告しない"}
+{"version": "2026.11.10.41", "beta": 12, "file": "beta/syncdub_beta.pyw", "sha256": "4fe9457404ccdee1c1f63416f05720c9585d1d8cf4210900b93d0180c5e683a9", "notes": "音の最中のつなぎ目に無音を入れず、手前の数秒をわずかに伸び縮みさせて吸収 / 自動チェックで一瞬の途切れを拾う"}

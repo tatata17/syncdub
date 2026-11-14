@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 11       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 12       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1274,6 +1274,37 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0):
         p["en_end"] = round(p["en_end"] + best, 4)
         s["en_start"] = round(s["en_start"] + best, 4)
         s["jp_start"] = round(s["jp_start"] + best, 4)
+    # 静かな所が近くになく、音の鳴っている最中に小さな食い違い(0.12秒以下)が残ったつなぎ目は、
+    # 無音を入れたり音を飛ばしたりせず、手前の数秒をごくわずかに伸び縮みさせて吸収する(プツッという途切れを作らない)
+    out = []
+    for q, sg in enumerate(segs):
+        nx = segs[q + 1] if q + 1 < len(segs) else None
+        if nx is None or sg.get("jp_end") is not None or nx.get("jp_end") is not None:
+            out.append(sg)
+            continue
+        d = sg["en_end"] - sg["en_start"]
+        pe = sg["jp_start"] + d
+        g_en, g_jp = nx["en_start"] - sg["en_end"], nx["jp_start"] - pe
+        if not (-0.002 <= g_en <= 0.12 and -0.002 <= g_jp <= 0.12) or abs(g_en - g_jp) < 0.005:
+            out.append(sg)
+            continue
+        if max(jq(pe), jq(nx["jp_start"])) < quiet:
+            out.append(sg)                               # 静かな所で切れているので、そのままで聞こえない
+            continue
+        T = min(max(3.0, abs(g_en - g_jp) / 0.01), d - 1.0)    # 伸び縮みは1%まで(最低3秒かけてならす)
+        if T < 0.5:
+            out.append(sg)
+            continue
+        x = round(sg["en_end"] - T, 4)
+        br = dict(sg, en_start=x, en_end=nx["en_start"], jp_start=round(pe - T, 4), jp_end=nx["jp_start"])
+        br.pop("trim_s", None)
+        br.pop("trim_e", None)
+        te = sg.pop("trim_e", None)
+        sg["en_end"] = x
+        out += [sg, br]
+        if te:
+            br["trim_e"] = te
+    segs[:] = out
 
 
 def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
@@ -4021,6 +4052,29 @@ def output_check(path, sr=8000, cuts=()):
     quiet_j = runs((rj < 0.03 * pj) & (re_ >= 0.15 * pe), 2.0)
     for a, b in quiet_j:
         issues.append(f"{_mmss(a)}〜{_mmss(b)} ({b - a:.1f}秒): 英語は音があるのに、日本語が無音です")
+    # 1.5) 一瞬の途切れ: 日本語が鳴っている最中に、0.02〜2秒だけ完全な無音になる所(つなぎ目に無音が入った跡)
+    hb = sr // 100
+    kb = n // hb
+    mxj = np.abs(j[: kb * hb].reshape(kb, hb)).max(1)
+    i = 0
+    while i < kb:
+        if mxj[i] > 12:
+            i += 1
+            continue
+        i0 = i
+        while i < kb and mxj[i] <= 12:
+            i += 1
+        ln = (i - i0) * hb / sr
+        if not 0.02 <= ln < 2.0:
+            continue
+        a_, b_ = i0 * hb, i * hb
+        w = int(0.2 * sr)
+
+        def rms(x, p0, p1):
+            x = x[max(p0, 0): min(p1, n)].astype(np.float32)
+            return float(np.sqrt((x ** 2).mean())) if len(x) else 0.0
+        if (rms(j, a_ - w, a_) >= 0.15 * pj and rms(j, b_, b_ + w) >= 0.15 * pj and rms(e, a_, b_) >= 0.1 * pe):
+            issues.append(f"{_mmss(a_ / sr)} あたり ({ln:.2f}秒): 日本語の音が、鳴っている最中に一瞬途切れています")
     # 2) ずれ: 6秒ごとに、日本語を前後3秒動かしていちばん合う位置を見る(BGM・効果音が同じ所でだけ分かる)
     W, R = 6 * sr, 3 * sr
     lags = []
