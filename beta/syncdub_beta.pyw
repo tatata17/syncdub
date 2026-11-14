@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 14       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 15       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1140,8 +1140,15 @@ def _refine_offsets(segs, esl, jsl, fs, rms_thr):
             return float((cc / (na * np.sqrt(np.maximum(e2, 1e-12)))).max())
         bnd = [sg["en_start"]]
         for g1, g2 in zip(mg, mg[1:]):
-            ts = np.arange(g1["t_last"], max(g1["t_last"] + 0.25, g2["t_first"] + WL - 1.0), 0.25)
-            pf = np.array([0.0 if (c1 := ncc(t, g1["a"])) is None or (c2 := ncc(t, g2["a"])) is None else c1 - c2 for t in ts])
+            # 切り替わる所は、測れた範囲の少し外(手前3秒〜先8秒)まで広げて探す。3秒おきの測定は、繰り返しのある音では
+            # 端の1〜2個がとなりの時間差に引っぱられることがあり、その内側だけで探すと切り替わる所を早く(遅く)決めてしまう
+            ts = np.arange(max(sg["en_start"] + 1.0, g1["t_last"] - 3.0),
+                           min(sg["en_end"] - 2.0, max(g1["t_last"] + 0.25, g2["t_first"] + WL + 8.0)), 0.25)
+            pf = []
+            for t in ts:
+                c1, c2 = ncc(t, g1["a"]), ncc(t, g2["a"])
+                pf.append(0.0 if c1 is None or c2 is None or max(c1, c2) < 0.15 else c1 - c2)   # どちらにも合わない所は判断に使わない
+            pf = np.array(pf)
             if not len(pf) or np.abs(pf).max() < 0.05:
                 x = (g1["t_last"] + g2["t_first"] + WL) / 2
             else:
