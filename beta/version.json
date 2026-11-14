@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 16, "file": "beta/syncdub_beta.pyw", "sha256": "1db5aac4c6490d4c6ac68c85d207e2d6a32133cff2e5481603d05bbcf0e729ea", "notes": "英語版だけ少し長い所の「間」を、近くの英語が無音の所(場面の変わり目)へ移す"}
+{"version": "2026.11.10.41", "beta": 17, "file": "beta/syncdub_beta.pyw", "sha256": "4162c4f92182528d24614ac264ca4debbf7b71d749c22409d31c29e88fade2a4", "notes": "英語版だけ長い所の間を移す範囲を前後10秒に広げ、日本語が少し重なる形のつなぎ目にも対応"}

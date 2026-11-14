@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 16       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 17       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1271,15 +1271,20 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
         rp = (p["jp_end"] - p["jp_start"]) / (p["en_end"] - p["en_start"]) if p_str else 1.0
         pe = p["jp_end"] if p_str else p["jp_start"] + (p["en_end"] - p["en_start"])
         g_en, g_jp = s["en_start"] - p["en_end"], s["jp_start"] - pe
+        if -0.12 <= g_jp < -0.002 and s["en_end"] - s["en_start"] > 1.0 - g_jp:
+            # 日本語が少し重なっている(同じ所を2度使う形) → 後ろの区間の頭をその分だけ遅らせて、日本語がひと続きになるようにする
+            s["en_start"] = round(s["en_start"] - g_jp, 4)
+            s["jp_start"] = round(pe, 4)
+            g_en, g_jp = s["en_start"] - p["en_end"], 0.0
         if not (-0.01 <= g_en <= 3.0 and -0.01 <= g_jp <= 3.0) or (g_en < 0.02 and g_jp < 0.02):
             continue
         if max(jq(pe), jq(s["jp_start"])) < quiet:
             continue                                  # もう静かな所で切れている
-        # 英語版だけが少し長い所(日本語はつながっている)は、近く(前後6秒)に「英語がその長さぶん無音」の所があれば、そこが本当の場所。
+        # 英語版だけが少し長い所(日本語はつながっている)は、近く(前後10秒)に「英語がその長さぶん無音」の所があれば、そこが本当の場所。
         # (英語版は場面の変わり目の無音が長く、日本語の録画は短い、という形が多い) 見つかれば、間をそこへ移す
         if esl is not None and en_thr is not None and g_en >= 0.05 and abs(g_jp) < 0.02:
-            lo6 = -min(6.0, p["en_end"] - p["en_start"] - 1.0)
-            hi6 = min(6.0, s["en_end"] - s["en_start"] - 1.0)
+            lo6 = -min(10.0, p["en_end"] - p["en_start"] - 1.0)
+            hi6 = min(10.0, s["en_end"] - s["en_start"] - 1.0)
             cand = []
             for dd in np.arange(lo6, hi6 + 1e-6, 0.05):
                 x = p["en_end"] + dd
