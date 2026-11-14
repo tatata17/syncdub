@@ -68,7 +68,7 @@ class _Sub:
     def __getattr__(self, n):
         return getattr(_subprocess, n)
 
-    def run(self, cmd, input=None, capture_output=False, check=False, **kw):
+    def run(self, cmd, input=None, capture_output=False, check=False, timeout=None, **kw):
         if _CANCEL.is_set():
             raise Cancelled()
         if capture_output:
@@ -79,7 +79,7 @@ class _Sub:
         with _LIVE_LOCK:
             _LIVE.add(p)
         try:
-            out, err = p.communicate(input)
+            out, err = p.communicate(input, timeout=timeout)   # 時間切れ(TimeoutExpired)のときも、下で止めてから投げ直す
         except BaseException:
             p.kill()
             p.wait()
@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 19       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 20       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -6339,9 +6339,41 @@ class App(_TkBase):
     def _beta_check(self, out, log=""):
         name = Path(out).name
         self.say("書き出した動画を自動チェックしています…(ベータ版)")
-        self.easy_done.config(text=f"✔ 完成しました: {name}　／　自動チェック中…(1分ほど)", fg="#1f6f43")
-        self.rbar.config(mode="indeterminate")
-        self.rbar.start(12)
+        # かかる時間は、動画の大きさ(読み込む量)でほぼ決まる。前回までにかかった実績(1GBあたりの秒数)から目安を出す。
+        # 実績がまだないとき(初回)は、目安を出さずに経過時間だけを見せる
+        try:
+            gb = max(os.path.getsize(out) / 1e9, 0.01)
+        except OSError:
+            gb = 0.0
+        rate = self._setting("check_sec_per_gb", None)
+        est = rate * gb if rate and gb else None
+        t0 = time.time()
+        state = {"on": True}
+
+        def mmss(v):
+            v = int(round(v))
+            return f"{v // 60}分{v % 60:02d}秒" if v >= 60 else f"{v}秒"
+
+        def tick():
+            if not state["on"]:
+                return
+            el = time.time() - t0
+            if est is None:
+                tail = "(初回なので、かかる時間を測っています)"
+            elif el <= est:
+                tail = f"(目安 約{mmss(est)})"
+            else:
+                tail = f"(目安の約{mmss(est)}を過ぎました。もう少しかかります)"
+            self.easy_done.config(text=f"✔ 完成しました: {name}　／　自動チェック中… {mmss(el)} 経過 {tail}", fg="#1f6f43")
+            if est:
+                self.rbar.config(value=min(99.0, 100.0 * el / est))
+            self.after(1000, tick)
+        if est:
+            self.rbar.config(mode="determinate", maximum=100, value=0)
+        else:
+            self.rbar.config(mode="indeterminate")
+            self.rbar.start(12)
+        tick()
         cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
         segs_now = [dict(x) for x in self.segs]
@@ -6362,6 +6394,10 @@ class App(_TkBase):
         def done(issues, notes, virt=None):
             self._beta_virtual = virt
             self._beta_last = {"out": out, "issues": issues, "notes": notes, "segs": segs_now}
+            state["on"] = False
+            if gb and issues is not None:      # 今回かかった時間を覚えておく(前回までの実績と半分ずつ混ぜる)
+                new = (time.time() - t0) / gb
+                self._save_settings(check_sec_per_gb=round(new if not rate else 0.5 * rate + 0.5 * new, 1))
             self.rbar.stop()
             self.rbar.config(mode="determinate", value=0)
             res = ("自動チェックはできませんでした" if issues is None
@@ -6509,12 +6545,23 @@ class App(_TkBase):
         except (OSError, ValueError):
             return default
 
-    def _save_auto(self):
+    def _save_settings(self, **kw):
+        """設定ファイルに、指定した項目だけを書き足す(ほかの項目は残す)。"""
+        f = Path(__file__).resolve().parent / "syncdub_settings.json"
         try:
-            (Path(__file__).resolve().parent / "syncdub_settings.json").write_text(
-                json.dumps({"auto_update": self.auto_upd.get()}), encoding="utf-8")
+            cur = json.loads(f.read_text(encoding="utf-8"))
+            if not isinstance(cur, dict):
+                cur = {}
+        except (OSError, ValueError):
+            cur = {}
+        cur.update(kw)
+        try:
+            f.write_text(json.dumps(cur), encoding="utf-8")
         except OSError:
             pass
+
+    def _save_auto(self):
+        self._save_settings(auto_update=self.auto_upd.get())
 
     def check_update(self, manual):
         def work():
