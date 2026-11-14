@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 10, "file": "beta/syncdub_beta.pyw", "sha256": "86c17abd9bb40b02b6e1c460316fec0efb9daf1d079a6e299b83ac9cd77e4e3d", "notes": "自動チェック: 繰り返しのある音や、1か所だけの測定の外れを、ずれとして報告しない"}
+{"version": "2026.11.10.41", "beta": 10, "file": "beta/syncdub_beta.pyw", "sha256": "86c17abd9bb40b02b6e1c460316fec0efb9daf1d079a6e299b83ac9cd77e4e3d", "notes": "自動チェック: ひと続きの区間の中で1か所だけ外れた測定は、ずれとして報告しない"}
