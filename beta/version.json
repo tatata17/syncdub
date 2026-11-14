@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 13, "file": "beta/syncdub_beta.pyw", "sha256": "20bd132030b720bf8e97e8a3ba73455e39aae82e39ea2f0d8c41accfa9b9f223", "notes": "つなぎの数秒の区間を、要確認に数えない"}
+{"version": "2026.11.10.41", "beta": 14, "file": "beta/syncdub_beta.pyw", "sha256": "44a344d9df3f04eb046519501ea6cd813fa8069c3c94ffd3a6964b214b70f633", "notes": "わずかな伸び縮みの区間の境目で、プツッと鳴らないように(波形がそのままつながる方法に変更)"}

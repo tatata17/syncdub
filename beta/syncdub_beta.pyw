@@ -312,7 +312,14 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                     # 余白ぶんを切り捨てる (これをしないと、区間の境目で「ぶつぶつ」と音が途切れる)
                     a0 = min(0.1, max(js, 0.0))
                     a1 = 0.1
-                    chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS", atempo_chain(r),
+                    if abs(r - 1) <= 0.03:
+                        # 速さの違いがわずか(3%以内)なら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
+                        # atempo は音の高さを保つかわりに波形をつなぎ直すので、前後の区間と波形がぴったりつながらず、
+                        # 境目で「プツッ」と鳴ることがある。この方法なら波形がそのままつながる(音の高さは最大3%変わる)
+                        stretch = f"asetrate={sr * r:.6f},aresample={sr}"
+                    else:
+                        stretch = atempo_chain(r)
+                    chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS", stretch,
                              f"atrim={a0 / r:.6f}:{a0 / r + D:.6f}", "asetpts=PTS-STARTPTS"]
                 else:
                     chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
@@ -624,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 13       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 14       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
