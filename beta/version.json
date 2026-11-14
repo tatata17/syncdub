@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 12, "file": "beta/syncdub_beta.pyw", "sha256": "4fe9457404ccdee1c1f63416f05720c9585d1d8cf4210900b93d0180c5e683a9", "notes": "音の最中のつなぎ目に無音を入れず、手前の数秒をわずかに伸び縮みさせて吸収 / 自動チェックで一瞬の途切れを拾う"}
+{"version": "2026.11.10.41", "beta": 13, "file": "beta/syncdub_beta.pyw", "sha256": "20bd132030b720bf8e97e8a3ba73455e39aae82e39ea2f0d8c41accfa9b9f223", "notes": "つなぎの数秒の区間を、要確認に数えない"}

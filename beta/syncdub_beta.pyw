@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 12       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 13       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1297,6 +1297,7 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0):
             continue
         x = round(sg["en_end"] - T, 4)
         br = dict(sg, en_start=x, en_end=nx["en_start"], jp_start=round(pe - T, 4), jp_end=nx["jp_start"])
+        br["flag"] = ""          # つなぎの数秒は、前の区間の続き。要確認には数えない
         br.pop("trim_s", None)
         br.pop("trim_e", None)
         te = sg.pop("trim_e", None)
