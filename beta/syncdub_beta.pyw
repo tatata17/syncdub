@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 9       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 10       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4035,9 +4035,24 @@ def output_check(path, sr=8000):
         c = cc / en_
         i = int(np.argmax(c))
         i0 = s0 - b0
-        lags.append((s0 / sr, (i - i0) / sr, float(c[i]), float(c[i0]) if 0 <= i0 < len(c) else 0.0))
+        # 「ずれなし」の近く(前後0.04秒)でいちばん合う値。震える音や細かく刻む音では、合う位置の候補が等間隔に並び、
+        # 測定がとなりの山を選ぶことがある。ずれなしの山も同じくらい高ければ、ずれとは見なさない
+        w0 = int(0.04 * sr)
+        near0 = float(c[max(i0 - w0, 0): i0 + w0 + 1].max()) if 0 <= i0 < len(c) else 0.0
+        lags.append((s0 / sr, (i - i0) / sr, float(c[i]), near0))
     good = [x for x in lags if x[2] >= 0.25]
-    bad = [x for x in good if abs(x[1]) > 0.1 and x[3] < 0.6 * x[2]]
+    bad = [x for x in good if abs(x[1]) > 0.1 and x[3] < 0.7 * x[2]]
+    amb = [x for x in good if abs(x[1]) > 0.1 and x[3] >= 0.7 * x[2]]
+    # 1か所だけ外れていて、すぐ前とすぐ後(30秒以内)がどちらも合っている弱い一致(0.4未満)は、測定の外れとして扱う
+    iso = []
+    for x in list(bad):
+        k = good.index(x)
+        pv = good[k - 1] if k > 0 else None
+        nx = good[k + 1] if k + 1 < len(good) else None
+        if (x[2] < 0.4 and pv and nx and x[0] - pv[0] <= 30.0 and nx[0] - x[0] <= 30.0
+                and abs(pv[1]) <= 0.05 and abs(nx[1]) <= 0.05):
+            bad.remove(x)
+            iso.append(x)
     cur = None
     for t, lg, c, c0 in bad + [(None, None, None, None)]:
         if cur and t is not None and abs(t - cur[1] - 6.0) < 0.01 and abs(lg - cur[2]) <= 0.05:
@@ -4047,7 +4062,12 @@ def output_check(path, sr=8000):
             issues.append(f"{_mmss(cur[0])}〜{_mmss(cur[1] + 6)}: 日本語の音が {abs(cur[2]):.2f}秒 {'遅れて' if cur[2] > 0 else '早く'}入っているようです (一致 {cur[3]:.2f})")
         cur = [t, t, lg, c] if t is not None else None
     if good:
-        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1)
+        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1) + len(amb)
+        if iso:
+            notes.append("1か所だけ外れた測定(前後は合っているので、ずれとは数えていません): "
+                         + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in iso[:20]))
+        if amb:
+            notes.append("繰り返しのある音で測定があいまいな所(ずれとは数えていません): " + " ".join(_mmss(x[0]) for x in amb[:20]))
         notes.append(f"ずれを測れた所 {len(good)} か所のうち、合っていた所 {ok_n} か所 (測れなかった所 {len(lags) - len(good)} か所)")
         notes.append("測れた所のずれ(秒): " + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in good[:80]))
     else:

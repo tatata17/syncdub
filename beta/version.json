@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 9, "file": "beta/syncdub_beta.pyw", "sha256": "8dfd9474f080ad8a5a8add82b281bb206ec20fb9707097cc33ac7bf33bdc53a1", "notes": "小さなずれを分けた区間が、合成のときに伸び縮みに置き換わらないように"}
+{"version": "2026.11.10.41", "beta": 10, "file": "beta/syncdub_beta.pyw", "sha256": "86c17abd9bb40b02b6e1c460316fec0efb9daf1d079a6e299b83ac9cd77e4e3d", "notes": "自動チェック: 繰り返しのある音や、1か所だけの測定の外れを、ずれとして報告しない"}
