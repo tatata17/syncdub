@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 18       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 19       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4068,10 +4068,15 @@ def output_check(path, sr=8000, cuts=()):
             raws.append(np.frombuffer(r.stdout, dtype=np.int16))   # 長い動画でもメモリを食わないよう、16ビットのまま持つ(計算する所だけ変換)
     except Exception as ex:  # noqa: BLE001
         return None, [f"出力を読めませんでした: {ex}"]
-    j, e = raws
+    return check_tracks(raws[0], raws[1], sr, cuts)
+
+
+def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
+    """output_check の中身。日本語と英語の音(16ビットの配列)を比べる。stats に辞書を渡すと、数字の結果も入れる。"""
+    j, e = j_all, e_all
     n = min(len(j), len(e))
     j, e = j[:n], e[:n]
-    notes = [f"出力の長さ {_mmss(n / sr)} / 日本語と英語の音声の長さの差 {abs(len(raws[0]) - len(raws[1])) / sr:.2f}秒"]
+    notes = [f"出力の長さ {_mmss(n / sr)} / 日本語と英語の音声の長さの差 {abs(len(j_all) - len(e_all)) / sr:.2f}秒"]
     issues = []
     # 1) 片方だけ音がある所
     h = sr // 4
@@ -4183,7 +4188,165 @@ def output_check(path, sr=8000, cuts=()):
         notes.append("測れた所のずれ(秒): " + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in good[:80]))
     else:
         notes.append("ずれは測れませんでした(日本語と英語で、同じBGM・効果音がはっきり重なる所がない)")
+    if stats is not None:
+        skip = {id(x) for x in amb} | {id(x) for x in iso}
+        real = [x for x in good if id(x) not in skip]
+        stats.update({"n_meas": len(good), "n_ok": sum(1 for x in real if abs(x[1]) <= 0.1) + len(amb) + len(iso),
+                      "max_abs": round(max((abs(x[1]) for x in real), default=0.0), 3),
+                      "lags": [[round(x[0], 1), round(x[1], 3)] for x in real[:300]]})
     return issues, notes
+
+
+# ------------------------------------------------------------------ 成功した結果の記録と、回帰チェック(ベータ版)
+RECORD_DIR = "syncdub_記録"     # ベータ版と同じフォルダの中に作る(番組名が入るので、リポジトリには入れない)
+
+
+def virtual_tracks(en, jp, segs, sr=None):
+    """合成せずに、「この区間リストで合成したら日本語の音声はこうなる」という音を作る(回帰チェック用)。
+    戻り値: (日本語, 英語) どちらも16ビット相当の配列。時刻0 = 英語版の映像の先頭。
+    区間の境目のフェードは再現しない(位置と長さだけを見る)。"""
+    sr = sr or SR
+    n = int(round(en.end * sr))
+    e = np.zeros(n, np.float32)
+    i0 = int(round(en.a_origin * sr))
+    a, b = max(i0, 0), min(i0 + len(en.x), n)
+    if b > a:
+        e[a:b] = en.x[a - i0: b - i0]
+    j = np.zeros(n, np.float32)
+    jo = int(round(jp.a_origin * sr))
+    for sg in segs:
+        if sg.get("jp_start") is None:
+            continue
+        d0, d1 = int(round(sg["en_start"] * sr)), min(int(round(sg["en_end"] * sr)), n)
+        if d1 <= d0:
+            continue
+        s0 = sg["jp_start"] * sr - jo
+        s1 = (sg["jp_end"] * sr - jo) if sg.get("jp_end") is not None else s0 + (d1 - d0)
+        pos = np.linspace(s0, s1, d1 - d0, endpoint=False)
+        ok = (pos >= 0) & (pos < len(jp.x) - 1)
+        if sg.get("jp_end") is None:
+            idx = np.round(pos[ok]).astype(np.int64)
+            j[d0:d1][ok] = jp.x[idx]
+        else:
+            j[d0:d1][ok] = np.interp(pos[ok], np.arange(len(jp.x)), jp.x)
+    return (j * 32768).astype(np.int16), (e * 32768).astype(np.int16)
+
+
+def segs_to_rows(segs):
+    return [[round(float(s["en_start"]), 3), round(float(s["en_end"]), 3), round(float(s["jp_start"]), 3),
+             None if s.get("jp_end") is None else round(float(s["jp_end"]), 3)] for s in segs if s.get("jp_start") is not None]
+
+
+def measure_segs(en, jp, segs):
+    """区間リストを、合成せずに測る。戻り値: {"issues": [...], "stats": {...}}"""
+    j, e = virtual_tracks(en, jp, segs)
+    cuts = sorted({round(float(v), 3) for x in segs for v in (x["en_start"], x["en_end"])})
+    stats = {}
+    issues, _notes = check_tracks(j, e, SR, cuts, stats)
+    return {"issues": issues if issues is not None else ["(測れませんでした)"], "stats": stats}
+
+
+def align_for_record(en, jp, mode, progress=lambda f, m: None):
+    """記録と同じ合わせ方で自動合わせをして、合成に使う区間リストまで作る(画面の「自動で合わせる」と同じ流れ)。"""
+    segs, info = (combined_align if mode == "音+映像" else auto_align)(en, jp, progress)
+    if not info.get("ok") or not segs:
+        raise RuntimeError(info.get("msg") or "自動で合わせられませんでした")
+    items = items_from_segs(segs, float(en.end))
+    built, _extra, _warns = build_from_items(items, (min(0.0, en.a_origin), en.end), (min(0.0, jp.a_origin), jp.end))
+    return [s for s in built if s.get("jp_start") is not None]
+
+
+def diff_rows(old, new, tol=0.02):
+    """区間リストの違いを、読める文にする。同じなら空のリスト。"""
+    out = []
+    if len(old) != len(new):
+        out.append(f"  区間の数が {len(old)} → {len(new)} に変わりました")
+        fmt = lambda r: f"{r[0]:.2f}〜{r[1]:.2f}→{r[2]:.2f}" + ("" if r[3] is None else f"〜{r[3]:.2f}")  # noqa: E731
+        ko = {(round(r[0], 1), round(r[2], 1)) for r in old}
+        kn = {(round(r[0], 1), round(r[2], 1)) for r in new}
+        gone = [fmt(r) for r in old if (round(r[0], 1), round(r[2], 1)) not in kn]
+        came = [fmt(r) for r in new if (round(r[0], 1), round(r[2], 1)) not in ko]
+        if gone:
+            out.append("  なくなった区間: " + " / ".join(gone[:8]))
+        if came:
+            out.append("  新しい区間: " + " / ".join(came[:8]))
+        return out
+    names = ("英語の開始", "英語の終了", "日本語の開始", "日本語の終了")
+    for k, (a, b) in enumerate(zip(old, new)):
+        ch = []
+        for q in range(4):
+            if (a[q] is None) != (b[q] is None):
+                ch.append("伸縮なし→あり" if a[q] is None else "伸縮あり→なし")
+            elif a[q] is not None and abs(a[q] - b[q]) > tol:
+                ch.append(f"{names[q]} {a[q]:.2f}→{b[q]:.2f} ({b[q] - a[q]:+.2f})")
+        if ch:
+            out.append(f"  区間{k + 1} (英語 {a[0]:.1f}秒〜): " + "、".join(ch))
+    return out
+
+
+def compare_record(rec, progress=lambda f, m: None):
+    """記録1件を、今の版でやり直して比べる。戻り値: (判定, [詳細の行])"""
+    if not (os.path.exists(rec["en"]) and os.path.exists(rec["jp"])):
+        return "素材が見つからない", [f"  英語版: {rec['en']}", f"  日本語: {rec['jp']}"]
+    en = Media(rec["en"])
+    jp = Media(rec["jp"], int(rec.get("jp_ast", 0)))
+    segs = align_for_record(en, jp, rec.get("mode", "音"), progress)
+    rows = segs_to_rows(segs)
+    now = measure_segs(en, jp, segs)
+    old = rec.get("virtual") or {"issues": [], "stats": {}}
+    lines = diff_rows(rec["segs"], rows)
+    so, sn = old.get("stats", {}), now["stats"]
+
+    def score(m_, st):
+        return (len(m_["issues"]), -(st.get("n_ok", 0) - 0), round(st.get("max_abs", 0.0), 2))
+    worse = (len(now["issues"]) > len(old["issues"]) or sn.get("n_ok", 0) < so.get("n_ok", 0) - 1
+             or sn.get("max_abs", 0.0) > so.get("max_abs", 0.0) + 0.03)
+    better = not worse and score(now, sn) < score(old, so)
+    ms = (f"  測定: おかしそうな所 {len(old['issues'])}→{len(now['issues'])} 件 / 合っていた所 "
+          f"{so.get('n_ok', '?')}/{so.get('n_meas', '?')}→{sn.get('n_ok', '?')}/{sn.get('n_meas', '?')} / "
+          f"いちばん大きいずれ {so.get('max_abs', 0.0):.2f}→{sn.get('max_abs', 0.0):.2f}秒")
+    if not lines and not worse and len(now["issues"]) == len(old["issues"]):
+        return "変化なし", [ms]
+    lines.append(ms)
+    for x in now["issues"][:10]:
+        if x not in old["issues"]:
+            lines.append("  新しく出た: " + x)
+    verdict = "変化あり・測定が悪くなった(要確認)" if worse else ("変化あり・測定は良くなった" if better else "変化あり・測定は同じ")
+    return verdict, lines + [("  今の区間: " + json.dumps(rows, ensure_ascii=False))]
+
+
+def load_records(base):
+    recs = []
+    d = Path(base) / RECORD_DIR
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+            r["_file"] = str(f)
+            recs.append(r)
+        except Exception:  # noqa: BLE001
+            pass
+    return recs
+
+
+def run_regress(base, say=print, progress=lambda f, m: None):
+    """記録を全部やり直して比べ、報告文を返す。"""
+    recs = load_records(base)
+    L = [f"syncdub 回帰チェック  {ver_label()}  {datetime.now():%Y-%m-%d %H:%M}  記録 {len(recs)} 件", ""]
+    tally = {}
+    for k, r in enumerate(recs):
+        say(f"({k + 1}/{len(recs)}) {r.get('name', '?')} …")
+        try:
+            v, lines = compare_record(r, lambda f, m, k=k: progress((k + f) / max(len(recs), 1), m))
+        except Exception as ex:  # noqa: BLE001
+            v, lines = "エラー", [f"  {ex}"]
+        tally[v] = tally.get(v, 0) + 1
+        L.append(f"■ {r.get('name', '?')} [{r.get('mode', '音')} / 記録した版 v{r.get('version', '?')} ベータ{r.get('beta', '?')}] → {v}")
+        L += lines
+        if r.get("memo"):
+            L.append(f"  記録のメモ: {r['memo']}")
+        L.append("")
+    L.insert(1, "まとめ: " + (" / ".join(f"{k} {v}件" for k, v in tally.items()) if tally else "記録がありません"))
+    return "\n".join(L)
 
 
 def preview_map(segs, x):
@@ -4683,6 +4846,10 @@ class App(_TkBase):
         m.add_command(label="更新前の版に戻す", command=self.rollback)
         m.add_separator()
         m.add_checkbutton(label="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto)
+        if BETA_REVIEW:
+            m.add_separator()
+            m.add_command(label="記録と比べる (回帰チェック)", command=self._regress_window)
+            m.add_command(label="記録のフォルダを開く", command=self._open_records)
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
@@ -4791,6 +4958,9 @@ class App(_TkBase):
         self.easy_done.pack(side="left", padx=10)
         self.open_btn = ttk.Button(r5, text="フォルダを開く", command=self.open_folder)
         self.beta_btn = ttk.Button(r5, text="自動チェックの結果", command=self._beta_show)   # ベータ版だけ。合成のあとに出す
+        self.rec_btn = ttk.Button(r5, text="成功として記録", command=self._record_success)      # ベータ版だけ
+        Tooltip(self.rec_btn, "見て・聞いて問題なかったら押します。この素材・この合わせ方・この結果を記録しておき、\n"
+                              "あとで新しいベータ版が同じ結果を出すか比べられるようにします(更新・設定 →「記録と比べる」)。")
 
     # ---------- 切り出し (一致部分だけ) ----------
     def _build_clip(self):
@@ -6174,14 +6344,24 @@ class App(_TkBase):
         self.rbar.start(12)
         cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
+        segs_now = [dict(x) for x in self.segs]
+        med = dict(self.media)
+        self._beta_virtual = None
+
         def work():
             try:
                 issues, notes = output_check(out, cuts=cuts)
             except Exception as ex:  # noqa: BLE001
                 issues, notes = None, [f"チェック中にエラー: {ex}"]
-            self.q.put(lambda: done(issues, notes))
+            try:      # 記録用: 合成せずに測った数字も取っておく(回帰チェックは、この数字と比べる)
+                virt = measure_segs(med["en"], med["jp"], segs_now) if all(med.values()) else None
+            except Exception:  # noqa: BLE001
+                virt = None
+            self.q.put(lambda: done(issues, notes, virt))
 
-        def done(issues, notes):
+        def done(issues, notes, virt=None):
+            self._beta_virtual = virt
+            self._beta_last = {"out": out, "issues": issues, "notes": notes, "segs": segs_now}
             self.rbar.stop()
             self.rbar.config(mode="determinate", value=0)
             res = ("自動チェックはできませんでした" if issues is None
@@ -6191,6 +6371,8 @@ class App(_TkBase):
             self._beta_rep = rep
             if not self.beta_btn.winfo_ismapped():
                 self.beta_btn.pack(side="left", padx=4)
+            if virt is not None and not self.rec_btn.winfo_ismapped():
+                self.rec_btn.pack(side="left", padx=4)
             if issues:
                 self.say(f"合成完了 (自動チェック: おかしそうな所 {len(issues)} 件)")
                 self._beta_show(rep, f"書き出した動画に、おかしそうな所が {len(issues)} 件ありました。\n"
@@ -6224,6 +6406,91 @@ class App(_TkBase):
         ttk.Button(bf, text="コピー", command=copy).pack(side="left")
         note.pack(side="left", padx=8)
         ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
+
+    # ---- ベータ版: 成功した結果の記録と、回帰チェック
+    def _record_success(self):
+        last = getattr(self, "_beta_last", None)
+        virt = getattr(self, "_beta_virtual", None)
+        if not last or virt is None:
+            return
+        from tkinter import simpledialog
+        memo = simpledialog.askstring("成功として記録", "成功と判断した理由のメモ (例: 通して聞いた。OPと暗転の所も問題なし)", parent=self)
+        if memo is None:
+            return
+        jp_p = Path(self.jp_var.get())
+        mode = getattr(self, "_align_mode", "音")
+        rec = {"name": jp_p.stem, "en": str(Path(self.en_var.get()).resolve()), "jp": str(jp_p.resolve()),
+               "jp_ast": int(self.jp_ast.get()), "mode": mode, "hand_edited": bool(self.auto_flags is None and self.items),
+               "version": APP_VERSION, "beta": BETA_BUILD, "date": f"{datetime.now():%Y-%m-%d %H:%M}", "memo": memo.strip(),
+               "segs": segs_to_rows(last["segs"]), "unused": [[round(a, 2), round(b, 2)] for a, b in getattr(self, "_align_unused", [])],
+               "output_check": {"issues": last["issues"], "notes": last["notes"]}, "virtual": virt}
+        d = Path(__file__).resolve().parent / RECORD_DIR
+        try:
+            d.mkdir(exist_ok=True)
+            f = d / (re.sub(r'[\\/:*?"<>|]', "_", jp_p.stem) + (".json" if mode == "音" else "_映像.json"))
+            f.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError as ex:
+            messagebox.showerror("記録できません", str(ex))
+            return
+        note = "\n(手で直した結果です。回帰チェックでは、自動合わせの結果と比べるので「変化あり」と出ます)" if rec["hand_edited"] else ""
+        messagebox.showinfo("記録しました", f"{f.name} に記録しました。{note}\n\n"
+                            "新しいベータ版にしたあと、「更新・設定」→「記録と比べる」で、同じ結果になるか確かめられます。")
+
+    def _open_records(self):
+        d = Path(__file__).resolve().parent / RECORD_DIR
+        d.mkdir(exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(d))  # noqa: S606
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(d)])
+        except OSError:
+            pass
+
+    def _regress_window(self):
+        base = Path(__file__).resolve().parent
+        recs = load_records(base)
+        if not recs:
+            messagebox.showinfo("記録と比べる", "まだ記録がありません。\n\nかんたんタブで合成して、結果に問題がなければ「成功として記録」を押してください。")
+            return
+        if not messagebox.askokcancel("記録と比べる", f"記録 {len(recs)} 件を、今の版でやり直して比べます(合成はしません)。\n"
+                                      "1件あたり数分〜10分ほどかかります。始めますか?"):
+            return
+        w = tk.Toplevel(self)
+        w.title("記録と比べる (回帰チェック)")
+        w.geometry("820x560")
+        head = ttk.Label(w, text="比べています…")
+        head.pack(anchor="w", padx=10, pady=(10, 2))
+        bar = ttk.Progressbar(w, maximum=1000)
+        bar.pack(fill="x", padx=10)
+        bf = ttk.Frame(w)
+        bf.pack(side="bottom", fill="x", padx=10, pady=8)
+        fr = ttk.Frame(w)
+        fr.pack(fill="both", expand=True, padx=10, pady=(6, 0))
+        tx = tk.Text(fr, wrap="word", font=("Consolas", 9))
+        sb = ttk.Scrollbar(fr, orient="vertical", command=tx.yview)
+        tx.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tx.pack(side="left", fill="both", expand=True)
+        note = ttk.Label(bf, text="")
+
+        def copy():
+            self.clipboard_clear()
+            self.clipboard_append(tx.get("1.0", "end-1c"))
+            note.config(text="コピーしました")
+        ttk.Button(bf, text="コピー", command=copy).pack(side="left")
+        note.pack(side="left", padx=8)
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
+
+        def ui(fn):
+            self.q.put(lambda: fn() if w.winfo_exists() else None)
+
+        def work():
+            rep = run_regress(base, say=lambda t: ui(lambda: head.config(text="比べています… " + t)),
+                              progress=lambda f, m_: ui(lambda: bar.config(value=int(1000 * f))))
+            ui(lambda: (head.config(text="終わりました。結果を Claude に貼るときは「コピー」を押してください。"),
+                        bar.config(value=1000), tx.insert("1.0", rep)))
+        threading.Thread(target=work, daemon=True).start()
 
     def open_folder(self):
         d = str(Path(self.out_path.get()).resolve().parent)
@@ -6970,6 +7237,7 @@ class App(_TkBase):
         self.rbar.start(12)
         self.open_btn.pack_forget()
         self.beta_btn.pack_forget()
+        self.rec_btn.pack_forget()
         self.easy_done.config(text="合成しています…(動画の長さによって数分かかります)", fg="#333")
         self.say("合成中…")
         self.logw(f"--- 合成開始: {out.name}")

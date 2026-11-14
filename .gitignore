@@ -3,3 +3,7 @@ syncdub_settings.json
 *.bak
 *.new
 __pycache__/
+syncdub_記録/
+syncdub_beta_backups/
+syncdub_backups/
+__pycache__/

@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>syncdub ベータ版の使い方</title>
+<meta name="description" content="syncdub のベータ版(試験版)の使い方。正式版とのちがい、自動チェック、成功の記録と回帰チェックの手順。">
+<meta name="robots" content="noindex">
+<script>try{var t=localStorage.getItem("theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
+<style>
+/* ===== 共通デザイン(3つの使い方ページで同じものを使います) ===== */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1d2430; --muted:#5d6877; --line:#dde2ea;
+  --accent:#0f7b8a; --accent-ink:#ffffff; --accent-soft:#e3f3f5; --warn:#fff4dc; --warn-line:#ecd29a;
+  --code:#eef1f5; --warn-ink:#8a4a10; --shadow:0 1px 2px rgba(20,30,50,.06),0 6px 20px rgba(20,30,50,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#9aa6b6; --line:#2a3443;
+    --accent:#4cc3d3; --accent-ink:#06222a; --accent-soft:#12303a; --warn:#2c2616; --warn-line:#6d5a22;
+    --code:#202a37; --warn-ink:#e9a46f; --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --panel:#171e28; --ink:#e6ebf2; --muted:#9aa6b6; --line:#2a3443;
+  --accent:#4cc3d3; --accent-ink:#06222a; --accent-soft:#12303a; --warn:#2c2616; --warn-line:#6d5a22;
+  --code:#202a37; --warn-ink:#e9a46f; --shadow:none;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:72px}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.85 "Yu Gothic UI","Hiragino Sans","Noto Sans JP","Meiryo",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+a{color:var(--accent);text-underline-offset:3px}
+p{margin:10px 0}
+ul,ol{padding-left:1.4em;margin:8px 0}
+li{margin:4px 0}
+code,kbd{font:.9em/1.4 "Cascadia Mono",Consolas,monospace;background:var(--code);border:1px solid var(--line);padding:.08em .4em;border-radius:5px;overflow-wrap:anywhere}
+kbd{border-bottom-width:2px}
+pre{background:var(--code);border:1px solid var(--line);padding:14px 16px;border-radius:10px;overflow:auto;line-height:1.6;font:14px/1.6 "Cascadia Mono",Consolas,monospace}
+pre code{background:none;border:none;padding:0}
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:2px;border-radius:6px}
+
+/* ヘッダー */
+header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--panel) 92%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1120px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
+.logo{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-ink);font:700 13px/1 "Cascadia Mono",Consolas,monospace;flex:none}
+.brand{font-weight:700;letter-spacing:.02em;white-space:nowrap}
+.brand small{font-weight:400;color:var(--muted);margin-left:8px}
+.spacer{flex:1}
+.btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);
+  padding:8px 16px;border-radius:999px;font-weight:700;text-decoration:none;cursor:pointer;font-size:15px;line-height:1.4}
+.btn:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent;color:var(--accent)}
+.icon-btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;height:38px;padding:0 14px;cursor:pointer;font:inherit;font-size:14px;white-space:nowrap}
+.icon-btn:hover{border-color:var(--accent);color:var(--accent)}
+.toc-btn{display:none;border:1px solid var(--accent);background:transparent;color:var(--accent);border-radius:10px;height:38px;padding:0 14px;font:inherit;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap}
+
+/* レイアウトと目次 */
+.layout{max-width:1120px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:220px minmax(0,1fr);gap:40px}
+nav.toc{position:sticky;top:72px;align-self:start;max-height:calc(100vh - 90px);overflow:auto;padding:28px 0}
+nav.toc ol{list-style:none;margin:0;padding:0;border-left:2px solid var(--line)}
+nav.toc li{margin:0}
+nav.toc a{display:block;padding:5px 12px;margin-left:-2px;border-left:2px solid transparent;color:var(--muted);text-decoration:none;font-size:14.5px;line-height:1.5}
+nav.toc a:hover{color:var(--ink)}
+nav.toc a.on{color:var(--accent);border-left-color:var(--accent);font-weight:700}
+nav.toc .tn{display:inline-block;min-width:1.9em;color:var(--muted);font:12.5px/1 "Cascadia Mono",Consolas,monospace}
+main{padding:28px 0 80px;min-width:0}
+
+/* ヒーロー(いちばん上の紹介) */
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px 28px 24px;box-shadow:var(--shadow);margin-top:0}
+.hero h1{margin:0 0 6px;font-size:clamp(26px,4.5vw,36px);line-height:1.3}
+.hero>p:not(.note){margin:.4em 0;color:var(--muted)}
+.feat{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:18px 0 0;padding:0;list-style:none}
+.feat li{background:var(--accent-soft);border-radius:12px;padding:10px 14px;font-size:15px;line-height:1.6;margin:0}
+.hero .row{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:18px;align-items:center}
+.hero .note{margin-bottom:0}
+.ver{font-size:14px;color:var(--muted)}
+.quick{background:var(--accent-soft);border-radius:12px;padding:12px 18px;margin:16px 0 0}
+.quick>b{display:block;font-size:17px}
+.quick ol{margin:4px 0 0}
+
+/* 章 */
+section{margin-top:44px}
+h2{font-size:24px;margin:0 0 14px;line-height:1.4;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h2 .n{display:inline-block;min-width:1.9em;height:1.9em;line-height:1.9em;text-align:center;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-size:.7em;margin-right:10px;vertical-align:.12em}
+h3{font-size:18px;margin:26px 0 8px}
+
+/* 注意書き: note=ヒント・補足 / warn=注意 */
+.note,.warn{border-radius:12px;padding:12px 16px;margin:16px 0;font-size:15px;border:1px solid var(--line)}
+.note{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.warn{background:var(--warn);border-color:var(--warn-line)}
+.lb{display:block;margin-bottom:2px}
+.note>.lb{color:var(--accent)}
+.warn>.lb{color:var(--warn-ink)}
+.muted{color:var(--muted)}
+p.muted{font-size:14px}
+
+/* 表(スマホでは1行=1枚のカードになります) */
+.table-wrap{overflow-x:auto;margin:12px 0;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+tr:last-child td{border-bottom:none}
+th{background:var(--accent-soft);white-space:nowrap}
+td:first-child{min-width:8.5em}
+
+/* 手順 */
+.steps{counter-reset:s;list-style:none;padding:0;margin:12px 0}
+.steps>li{counter-increment:s;position:relative;padding:4px 0 10px 44px;margin:0}
+.steps>li::before{content:counter(s);position:absolute;left:0;top:3px;width:30px;height:30px;line-height:30px;text-align:center;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-weight:700}
+.steps>li>strong:first-child{display:block}
+
+/* 小さなカード */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;box-shadow:var(--shadow)}
+.card h4{margin:0 0 4px;font-size:15px;color:var(--accent)}
+.card p{margin:0;font-size:14.5px;line-height:1.7}
+
+/* 画面のイメージ図(説明用の図) */
+.mock{margin:18px 0 6px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);font-size:13px;line-height:1.5}
+.mock .bar{background:var(--code);padding:6px 12px;border-bottom:1px solid var(--line);color:var(--muted)}
+.mock .muted{color:var(--muted)}
+.mock .b{display:inline-block;border:1px solid var(--line);border-radius:5px;padding:0 9px;background:var(--panel);margin:2px 2px 2px 0;white-space:nowrap}
+.mock .b.go{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+.mock fieldset{border:1px solid var(--line);border-radius:8px;margin:0;padding:4px 10px 8px;min-width:0}
+.mock legend{padding:0 6px;font-weight:700;color:var(--accent)}
+.mock .list{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.mock .list div{border-bottom:1px solid var(--line)}
+.mock .list div:last-child{border-bottom:none}
+.mock .list div:first-child{background:var(--code);font-weight:700}
+.mock .list div.sel{background:var(--accent-soft)}
+.mock .tabs span{display:inline-block;padding:2px 10px;border:1px solid var(--line);border-bottom:none;border-radius:6px 6px 0 0;margin-right:4px;color:var(--muted)}
+.mock .tabs span.on{background:var(--accent-soft);color:var(--ink);font-weight:700}
+.mock-cap{color:var(--muted);font-size:13.5px;margin:4px 0 14px}
+
+/* 更新履歴(日付ごと。新しい日だけ開いておき、古い日は折りたたみ) */
+.day,.fold{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:12px 0;box-shadow:var(--shadow)}
+.day>summary,.fold>summary{cursor:pointer;list-style:none}
+.day>summary::-webkit-details-marker,.fold>summary::-webkit-details-marker{display:none}
+.day>summary::before,.fold>summary::before{content:"▸";display:inline-block;width:1.2em;color:var(--muted)}
+.day[open]>summary::before,.fold[open]>summary::before{content:"▾"}
+.fold>summary{font-weight:700}
+.day .d{font-weight:700;font-size:17px}
+.day .vr{color:var(--muted);font-size:13.5px;margin-left:8px}
+.day .new{font-size:12px;color:var(--accent-ink);background:var(--accent);border-radius:999px;padding:1px 9px;margin-left:8px;font-weight:700}
+.day ul{margin:8px 0 2px}
+.day .tag{font-size:12px;color:var(--accent);background:var(--accent-soft);border-radius:999px;padding:0 8px;margin-right:6px;white-space:nowrap}
+
+footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var(--muted);font-size:14px}
+
+@media (max-width:820px){
+  .logo{display:none}
+  .layout{grid-template-columns:1fr;gap:0}
+  .toc-btn{display:inline-flex;align-items:center}
+  .top-in{gap:8px;padding:8px 12px}
+  .btn.ghost{padding:6px 12px;font-size:14px}
+  nav.toc{display:none;position:fixed;top:58px;left:10px;right:10px;max-height:72vh;overflow:auto;padding:10px;z-index:30;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+  nav.toc.open{display:block}
+  nav.toc ol{border:none}
+  nav.toc a{border:none;border-radius:8px;margin:0;padding:9px 12px;font-size:16px}
+  nav.toc a.on{background:var(--accent-soft)}
+  .brand{font-size:15px;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .brand small{display:none}
+  .icon-btn{padding:0 10px;font-size:13px}
+  .hero{padding:20px 18px}
+}
+/* スマホでは、表を「1行=1枚のカード」に並べ替える(横に狭くならないように) */
+@media (max-width:640px){
+  .table-wrap{border:none;background:none;overflow:visible}
+  .table-wrap table,.table-wrap tbody,.table-wrap tr,.table-wrap td{display:block;width:100%}
+  .table-wrap tr:first-child{display:none}
+  .table-wrap tr{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:0 0 10px;padding:8px 12px;box-shadow:var(--shadow)}
+  .table-wrap td{border:none;padding:3px 0}
+  .table-wrap td:first-child{font-weight:700;padding-top:2px}
+  .table-wrap td[data-label]:not(:first-child)::before{content:attr(data-label);display:block;font-size:12px;color:var(--muted);letter-spacing:.04em}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+
+/* ===== このページだけの部品 ===== */
+.mock.pad{padding:10px;background:var(--bg);font-size:12px}
+.mock .tr{position:relative;height:46px;margin:4px 0;border:1px solid var(--line);background:var(--panel);border-radius:4px;overflow:hidden}
+.mock .seg{position:absolute;top:0;bottom:0;font-weight:700;padding:2px 4px;font-size:12px}
+.mock .lbl{position:absolute;right:6px;top:2px;color:var(--muted)}
+.mock .p{position:absolute;top:0;bottom:0;width:3px;background:#1a9e57}
+.mock .wave{position:absolute;left:0;right:0;top:50%;height:2px;background:var(--accent);opacity:.6}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-top:8px}
+.legend i{display:inline-block;width:14px;height:14px;vertical-align:-2px;border-radius:3px;margin-right:4px}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <button class="toc-btn" id="tocBtn" type="button" aria-expanded="false" aria-controls="toc">目次</button>
+    <span class="logo" aria-hidden="true">sd</span>
+    <div class="brand">syncdub<small>ベータ版の使い方</small></div>
+    <div class="spacer"></div>
+    <a class="btn ghost" href="./">正式版の使い方</a>
+    <a class="btn ghost" href="https://github.com/tatata17/syncdub">GitHub</a>
+    <button class="icon-btn" id="theme" type="button" aria-label="ライト/ダークを切り替え" title="ライト/ダークを切り替え">暗い表示</button>
+  </div>
+</header>
+
+<div class="layout">
+<nav class="toc" id="toc" aria-label="目次">
+  <ol>
+    <li><a href="#about"><span class="tn"></span>はじめに</a></li>
+    <li><a href="#install"><span class="tn">01</span>必要なものと導入</a></li>
+    <li><a href="#diff"><span class="tn">02</span>正式版とのちがい</a></li>
+    <li><a href="#flow"><span class="tn">03</span>おすすめの手順</a></li>
+    <li><a href="#check"><span class="tn">04</span>自動チェックの見かた</a></li>
+    <li><a href="#report"><span class="tn">05</span>おかしい所を見つけたら</a></li>
+    <li><a href="#regress"><span class="tn">06</span>成功の記録と回帰チェック</a></li>
+    <li><a href="#update"><span class="tn">07</span>更新のしかた</a></li>
+    <li><a href="#trouble"><span class="tn">08</span>困ったとき</a></li>
+    <li><a href="#files"><span class="tn">09</span>ファイルの場所</a></li>
+    <li><a href="#history"><span class="tn">10</span>更新履歴</a></li>
+  </ol>
+</nav>
+
+<main>
+<section class="hero" id="about">
+  <h1>syncdub ベータ版の使い方</h1>
+  <p>ベータ版は、正式版に入れる前の機能を先に試すための<b>試験版</b>です。直したばかりの所が多く、不具合が残っていることがあります。ふつうに使う方は、<a href="./">正式版</a>を使ってください。</p>
+  <ul class="feat">
+    <li>正式版とは<b>別のファイル</b>(<code>syncdub_beta.pyw</code>)で、更新も別です。正式版と並べて置けます</li>
+    <li>合成のあとに、出来上がった動画を<b>自動でチェック</b>します</li>
+    <li>うまくいった結果を<b>記録</b>しておき、新しい版でも同じ結果になるか比べられます</li>
+  </ul>
+  <div class="row">
+    <a class="btn" id="dl" href="https://github.com/tatata17/syncdub/raw/main/beta/syncdub_beta.pyw">⬇ syncdub_beta.pyw をダウンロード</a>
+    <span class="ver" id="ver"></span>
+  </div>
+  <div class="warn"><b class="lb">注意</b>ベータ版で作った動画は、必ず見て・聞いて確かめてください。自動チェックは目安で、すべての不具合を見つけられるわけではありません。</div>
+</section>
+
+<section id="install">
+ <h2><span class="n">01</span>必要なものと導入</h2>
+ <ul>
+  <li>必要なもの(Python と ffmpeg の「full」版)は、正式版と同じです。入れかたは<a href="./#install">正式版の使い方の「必要なものと導入」</a>を見てください。</li>
+  <li>上のボタンから <code>syncdub_beta.pyw</code> を保存して、ダブルクリックで起動します。</li>
+  <li>タイトルに「【ベータ版】」、右上に「v〇〇 ベータ12」のように番号が出ていれば、ベータ版です。</li>
+ </ul>
+ <div class="note"><b class="lb">ヒント</b>ベータ版は、専用のフォルダに置くのがおすすめです。同じフォルダに、バックアップや記録のフォルダができます。正式版の <code>syncdub.pyw</code> と同じフォルダに置いてもかまいません(お互いを上書きしません)。</div>
+</section>
+
+<section id="diff">
+ <h2><span class="n">02</span>正式版とのちがい</h2>
+ <p>画面と基本の使い方は正式版と同じです。ベータ版にだけ、次のものがあります。</p>
+ <div class="table-wrap"><table>
+  <tr><th>機能</th><th>場所</th><th>はたらき</th></tr>
+  <tr><td>映像でも合わせる</td><td>「かんたん」タブ →「詳細設定」</td><td>音で合わせたあと、画面の似かたでも合わせて、場所ごとに確かなほうを使います。時間はかかりますが、音だけでは合わない動画に強くなります。</td></tr>
+  <tr><td>小さなずれの直し</td><td>(自動)</td><td>「映像でも合わせる」のとき、区間の中の0.1秒ほどのずれを測り直します。音の途中に無音が入らないよう、つなぎ目を静かな所や場面の変わり目へ移します。</td></tr>
+  <tr><td>保存先の名前</td><td>「かんたん」タブ</td><td>出来上がりの名前を、日本語の録画の名前に合わせます。</td></tr>
+  <tr><td>自動チェック</td><td>「かんたん」タブの合成のあと</td><td>出来上がった動画の日本語音声と英語音声を比べて、おかしそうな所を知らせます。</td></tr>
+  <tr><td>成功として記録</td><td>自動チェックのあとに出るボタン</td><td>うまくいった素材・合わせ方・結果を記録します。</td></tr>
+  <tr><td>記録と比べる</td><td>右上の「更新・設定」メニュー</td><td>記録した素材を今の版でやり直して、結果が変わっていないか比べます(回帰チェック)。</td></tr>
+  <tr><td>確認ウインドウ</td><td>「録画から探す」が終わったあと</td><td>書き出したCMを1本ずつ見比べて、判定を残せます。</td></tr>
+ </table></div>
+</section>
+
+<section id="flow">
+ <h2><span class="n">03</span>おすすめの手順</h2>
+ <p>「かんたん」タブで1本を合わせるときの流れです。</p>
+ <ol>
+  <li>英語版の映像と、日本語の録画を入れます。</li>
+  <li>「詳細設定」を開いて、<b>「映像でも合わせる」</b>にチェックを入れます。</li>
+  <li>「自動で合わせる」を押します。長い動画は10分以上かかることがあります。</li>
+  <li>結果の表を見ます。「要確認」の行は、行を選んで先頭を聞き比べます。</li>
+  <li>「合成スタート」を押します。終わると、そのまま自動チェックが始まります(バーが動いているあいだはチェック中です)。</li>
+  <li>「自動チェック: 問題は見つかりませんでした」と出たら、出来上がった動画を通して見ます。</li>
+  <li>問題がなければ、<b>「成功として記録」</b>を押して、メモを1行書きます。</li>
+ </ol>
+ <div class="note"><b class="lb">ヒント</b>特に確かめたいのは、音の出入りがある所です。番組の始まりの曲の終わり、CMの前後、場面が暗くなる所、題名が出る所、番組の終わり。</div>
+ <div class="warn"><b class="lb">注意</b>前に作った動画をプレーヤーで開いたままだと、同じ名前で上書きできません。合成の前に閉じてください。</div>
+</section>
+
+<section id="check">
+ <h2><span class="n">04</span>自動チェックの見かた</h2>
+ <p>おかしそうな所があると、報告文の入ったウインドウが開きます。あとから見たいときは「自動チェックの結果」ボタンを押します。時刻は、出来上がった動画の時刻です。</p>
+ <div class="table-wrap"><table>
+  <tr><th>報告</th><th>意味</th><th>よくある原因</th></tr>
+  <tr><td>英語は無音なのに、日本語の音が入っています</td><td>英語版が無音・暗転の所に、日本語の録画の音が残っています。</td><td>CMの前後の短い曲や、次の番組の音が入った。</td></tr>
+  <tr><td>英語は音があるのに、日本語が無音です</td><td>2秒以上、日本語の音が抜けています。</td><td>その場面が日本語の録画に見つからなかった。日本語版にない場面のこともあります。</td></tr>
+  <tr><td>日本語の音が、鳴っている最中に一瞬途切れています</td><td>音の途中に、短い無音が入っています。</td><td>英語版だけ少し長い所の「間」が、曲や台詞の途中に入った。</td></tr>
+  <tr><td>日本語の音が 〇秒 遅れて(早く)入っているようです</td><td>その6秒間、音の位置がずれているようです。</td><td>区間の時間差が合っていない。</td></tr>
+ </table></div>
+ <div class="note"><b class="lb">補足の行について</b>報告文の( )の行は補足です。「ずれを測れた所」は、日本語と英語で同じ曲や効果音が重なっていて、位置を比べられた所の数です。台詞だけの場面は測れません。「1か所だけ外れた測定」「繰り返しのある音で測定があいまいな所」は、測定の外れと見なしたもので、不具合には数えていません。</div>
+ <div class="warn"><b class="lb">注意</b>自動チェックに出ない不具合もあります(声だけの場面のずれ、「プツッ」という短い雑音など)。逆に、日本語版だけに台詞がある所などは、問題がなくても報告に出ることがあります。</div>
+</section>
+
+<section id="report">
+ <h2><span class="n">05</span>おかしい所を見つけたら</h2>
+ <ol>
+  <li>「自動チェックの結果」を開いて、「コピー」を押します。版の番号、合わせ方、区間の一覧まで入っているので、そのまま貼れば状況が伝わります。</li>
+  <li>耳で気づいた所は、「何分何秒あたりで、どう聞こえるか」を書き添えます。</li>
+  <li>その前後20秒ほどを切り出した動画があると、原因を調べやすくなります。出来上がった動画(日本語と英語の音が両方入っています)から切り出すのが基本です。</li>
+ </ol>
+ <p>切り出しの例です。コマンドプロンプトで、動画のあるフォルダに移ってから実行します(10分25秒から20秒間を切り出す例)。</p>
+ <p><code>ffmpeg -ss 10:25 -t 20 -i "出来上がり.mkv" -map 0 -vf scale=-2:360 -c:v libx264 -crf 30 -c:a copy "切り出し.mkv"</code></p>
+ <div class="note"><b class="lb">ヒント</b>日本語の録画の同じ場面も切り出して一緒に送ると、「元の録画ではどうなっているか」まで確かめられます。上の例の入力を日本語の録画に変えて、時刻をその録画での時刻にしてください。</div>
+</section>
+
+<section id="regress">
+ <h2><span class="n">06</span>成功の記録と回帰チェック</h2>
+ <p>ベータ版は直す回数が多いので、「前はうまくいっていた動画が、新しい版でおかしくなっていないか」を確かめるしくみがあります。</p>
+ <p><b class="lb">記録する</b></p>
+ <ul>
+  <li>合成と自動チェックが終わり、見て・聞いて問題がなければ、「成功として記録」を押します。</li>
+  <li>メモには、成功と判断した理由を書きます(例: 通して聞いた。始まりの曲と暗転の所も問題なし)。</li>
+  <li>記録されるのは、素材のファイルの場所、合わせ方、区間の一覧、版の番号、自動チェックの結果、メモです。動画そのものは記録しません。</li>
+  <li>同じ素材を同じ合わせ方で記録し直すと、前の記録を上書きします。</li>
+ </ul>
+ <p><b class="lb">比べる</b></p>
+ <ul>
+  <li>右上の「更新・設定」→「記録と比べる (回帰チェック)」を選びます。</li>
+  <li>記録した素材を、今の版で順に合わせ直します(合成はしません)。1件あたり数分〜10分ほどかかります。</li>
+  <li>終わると結果が出ます。「コピー」で、そのまま貼れる文面になります。</li>
+ </ul>
+ <div class="table-wrap"><table>
+  <tr><th>判定</th><th>意味</th><th>どうするか</th></tr>
+  <tr><td>変化なし</td><td>区間の一覧も測定も、記録と同じです。</td><td>何もしなくて大丈夫です。</td></tr>
+  <tr><td>変化あり・測定は良くなった</td><td>区間は変わりましたが、ずれや途切れは減っています。</td><td>改良の結果のことが多いです。気になる所だけ作り直して確かめ、よければ記録し直します。</td></tr>
+  <tr><td>変化あり・測定は同じ</td><td>区間は変わりましたが、測定の数字は同じです。</td><td>変わった区間のあたりを作り直して確かめます。</td></tr>
+  <tr><td>変化あり・測定が悪くなった(要確認)</td><td>ずれや途切れが増えています。</td><td>不具合の可能性が高いので、結果をコピーして報告します。</td></tr>
+  <tr><td>素材が見つからない</td><td>記録したときの場所に、動画がありません。</td><td>動画を元の場所に戻すか、新しい場所で作り直して記録し直します。</td></tr>
+ </table></div>
+ <div class="note"><b class="lb">いつ比べるか</b>ベータ版を更新するたびに行う必要はありません。大きめの直しが入ったあとや、正式版にする前に行うのがおすすめです。記録は、作りの違う素材を数本(CMの入り方が違うもの、音だけでは合いにくいもの、など)そろえておくと役に立ちます。</div>
+ <div class="warn"><b class="lb">注意</b>「測定」は、合成せずに元の音から計算した目安です。自動チェックと同じく、耳で分かる不具合をすべて拾えるわけではありません。手で直した結果を記録した場合、比べる相手は自動合わせの結果なので、「変化あり」と出ます。</div>
+</section>
+
+<section id="update">
+ <h2><span class="n">07</span>更新のしかた</h2>
+ <ul>
+  <li>起動時に、新しいベータ版があるか自動で確認します。「新しい版 v〇〇 ベータ13 があります」と出たら、「はい」で更新して再起動します。右上の「更新・設定」→「更新を確認」で、手動でも確認できます。</li>
+  <li>ベータ版の更新は、正式版の更新とは別です。ベータ版を更新しても、正式版は変わりません。</li>
+  <li>更新すると、前の版は <code>syncdub_beta_backups</code> フォルダに残ります(5つまで)。</li>
+  <li>新しい版で調子が悪いときは、「更新・設定」→「更新前の版に戻す」で1つ前の版に戻せます。</li>
+ </ul>
+ <div class="note"><b class="lb">ヒント</b>ベータ版をやめるときは、<code>syncdub_beta.pyw</code> を使わずに、正式版の <code>syncdub.pyw</code> を使うだけです。設定の移しかえは要りません。</div>
+</section>
+
+<section id="trouble">
+ <h2><span class="n">08</span>困ったとき</h2>
+ <div class="table-wrap"><table>
+  <tr><th>症状</th><th>対処</th></tr>
+  <tr><td>「保存先を使えません」と出る</td><td>同じ名前の動画を、動画プレーヤーなどで開いたままにしています。閉じてからもう一度「合成スタート」を押すか、「変更」で別の名前にします。</td></tr>
+  <tr><td>「映像でも合わせる」がとても遅い</td><td>映像を全部読むため、長い動画や高画質の動画では時間がかかります。急ぐときはチェックを外すと、音だけで合わせます。</td></tr>
+  <tr><td>ファイルを選ぶ画面に、目当ての動画が出てこない</td><td>選ぶ画面が日付ごとに分かれていて、古い日付のグループに入っていることがあります。一覧の何もない所を右クリックして「グループで表示」を「(なし)」にすると、まとめて並びます。ドラッグ&ドロップでも入れられます。</td></tr>
+  <tr><td>更新のときに「配布元の記録と一致しません」と出る</td><td>公開した直後は、数分待つと直ります。しばらく待っても同じときは、このページのボタンから入れ直してください。</td></tr>
+  <tr><td>自動チェックが終わらない</td><td>長い動画では1分以上かかります。出来上がった動画は、チェック中でももう開けます。</td></tr>
+  <tr><td>新しい版にしたら結果がおかしくなった</td><td>「更新前の版に戻す」で戻して使えます。「記録と比べる」の結果か、自動チェックの報告文を添えて知らせてください。</td></tr>
+ </table></div>
+</section>
+
+<section id="files">
+ <h2><span class="n">09</span>ファイルの場所</h2>
+ <p>どれも <code>syncdub_beta.pyw</code> と同じフォルダにできます。</p>
+ <div class="table-wrap"><table>
+  <tr><th>名前</th><th>中身</th></tr>
+  <tr><td><code>syncdub_beta.pyw</code></td><td>ベータ版の本体です。</td></tr>
+  <tr><td><code>syncdub_beta_backups</code> フォルダ</td><td>更新する前の版です(5つまで)。「更新前の版に戻す」で使います。</td></tr>
+  <tr><td><code>syncdub_記録</code> フォルダ</td><td>「成功として記録」で作った記録です(1素材につき1ファイル)。動画の名前と場所が入るので、人に渡すときは気をつけてください。消すと、その素材は比べる対象から外れます。</td></tr>
+ </table></div>
+ <div class="note"><b class="lb">ヒント</b>記録のフォルダは、「更新・設定」→「記録のフォルダを開く」で開けます。</div>
+</section>
+
+<section id="history">
+ <h2><span class="n">10</span>更新履歴</h2>
+ <div id="notes"></div>
+ <p>ベータ版は直す回数が多いので、このページには最新の内容だけを出しています。これまでの変更は、<a href="https://github.com/tatata17/syncdub/commits/main/beta">GitHub の履歴</a>で見られます。</p>
+</section>
+
+<footer>
+  <a href="https://github.com/tatata17/syncdub">GitHub リポジトリ</a> ・ <a href="./">正式版の使い方</a>
+</footer>
+</main>
+</div>
+
+<script>
+(function(){
+  function $(id){return document.getElementById(id);}
+  function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
+  var root=document.documentElement,themeBtn=$("theme");
+  function isDark(){var t=root.getAttribute("data-theme");return t?t==="dark":matchMedia("(prefers-color-scheme: dark)").matches;}
+  function syncTheme(){themeBtn.textContent=isDark()?"明るい表示":"暗い表示";}
+  themeBtn.addEventListener("click",function(){var n=isDark()?"light":"dark";root.setAttribute("data-theme",n);try{localStorage.setItem("theme",n);}catch(e){}syncTheme();});
+  syncTheme();
+  var toc=$("toc"),tocBtn=$("tocBtn");
+  function closeToc(){toc.classList.remove("open");tocBtn.setAttribute("aria-expanded","false");}
+  tocBtn.addEventListener("click",function(ev){ev.stopPropagation();var o=toc.classList.toggle("open");tocBtn.setAttribute("aria-expanded",o?"true":"false");});
+  toc.addEventListener("click",function(ev){if(ev.target.closest("a"))closeToc();});
+  document.addEventListener("click",function(ev){if(!toc.contains(ev.target))closeToc();});
+  document.addEventListener("keydown",function(ev){if(ev.key==="Escape")closeToc();});
+  var links=[].slice.call(toc.querySelectorAll("a")),map={};links.forEach(function(a){map[a.getAttribute("href").slice(1)]=a;});
+  if("IntersectionObserver" in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){
+      if(e.isIntersecting){links.forEach(function(a){a.classList.remove("on");});var a=map[e.target.id];if(a)a.classList.add("on");}
+    });},{rootMargin:"-20% 0px -70% 0px"});
+    Object.keys(map).forEach(function(id){var el=$(id);if(el)io.observe(el);});
+  }
+  [].forEach.call(document.querySelectorAll(".table-wrap table"),function(t){
+    var head=[].map.call(t.rows[0].cells,function(c){return c.textContent.trim();});
+    [].slice.call(t.rows,1).forEach(function(r){[].forEach.call(r.cells,function(c,i){if(head[i])c.setAttribute("data-label",head[i]);});});
+  });
+  var raw="https://raw.githubusercontent.com/tatata17/syncdub/main/beta/",ver=$("ver");
+  fetch(raw+"version.json",{cache:"no-store"}).then(function(r){return r.json();}).then(function(j){
+    ver.textContent="最新: v"+j.version+" ベータ"+j.beta;
+    var n=$("notes");
+    if(n&&j.notes){n.innerHTML='<p class="note"><b class="lb">最新のベータ版(ベータ'+esc(j.beta)+')の内容</b>'+esc([].concat(j.notes).join("\n")).replace(/\n/g,"<br>")+'</p>';}
+  }).catch(function(){ver.textContent="";});
+  var dl=$("dl");
+  dl.addEventListener("click",function(ev){
+    ev.preventDefault();
+    fetch(raw+"syncdub_beta.pyw",{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.blob();}).then(function(b){
+      var a=document.createElement("a");a.href=URL.createObjectURL(b);a.download="syncdub_beta.pyw";document.body.appendChild(a);a.click();
+      setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},1000);
+    }).catch(function(){location.href=dl.href;});
+  });
+})();
+</script>
+</body>
+</html>

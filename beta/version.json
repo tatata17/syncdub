@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 18, "file": "beta/syncdub_beta.pyw", "sha256": "b5cf932afef9e899f630342c6bace2d26eeda8ed18d91122171f3428c3540ca0", "notes": "英語版だけ長い所の間を、曲の余韻が残る暗転にも移せるように(日本語が無音になる所で切る)"}
+{"version": "2026.11.10.41", "beta": 19, "file": "beta/syncdub_beta.pyw", "sha256": "9853620aad9a19fc264864de47eb11b1dba5b785a9c9ce91e1bf507a8538cc2e", "notes": "成功した結果の記録と、記録と比べる(回帰チェック)を追加。ベータ版の使い方ページを公開"}
