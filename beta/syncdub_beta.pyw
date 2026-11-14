@@ -624,7 +624,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 10       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 11       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3970,8 +3970,10 @@ def _mmss(t):
     return f"{int(t // 60)}:{t % 60:04.1f}"
 
 
-def output_check(path, sr=8000):
+def output_check(path, sr=8000, cuts=()):
     """書き出した動画の日本語音声(1本目)と英語音声(2本目)を比べて、おかしそうな所を探す(ベータ版の自動チェック用)。
+    cuts: 区間の切れ目(出力の時刻)。ひと続きの区間の中では日本語の音は切れ目なくつながっているので、
+          前後が合っているのに途中の1か所だけずれる、ということは起きない(測定の外れとして扱う)。
     戻り値: (問題の一覧 [文字列], 補足の一覧 [文字列])。比べられなければ (None, [理由])。"""
     try:
         raws = []
@@ -4049,8 +4051,11 @@ def output_check(path, sr=8000):
         k = good.index(x)
         pv = good[k - 1] if k > 0 else None
         nx = good[k + 1] if k + 1 < len(good) else None
-        if (x[2] < 0.4 and pv and nx and x[0] - pv[0] <= 30.0 and nx[0] - x[0] <= 30.0
-                and abs(pv[1]) <= 0.05 and abs(nx[1]) <= 0.05):
+        if not (x[2] < 0.4 and pv and nx and abs(pv[1]) <= 0.05 and abs(nx[1]) <= 0.05):
+            continue
+        near = x[0] - pv[0] <= 30.0 and nx[0] - x[0] <= 30.0
+        same_seg = bool(cuts) and not any(pv[0] < c_ < nx[0] + 6.0 for c_ in cuts)   # 前後の測定と同じ区間の中
+        if near or same_seg:
             bad.remove(x)
             iso.append(x)
     cur = None
@@ -6061,10 +6066,11 @@ class App(_TkBase):
         self.easy_done.config(text=f"✔ 完成しました: {name}　／　自動チェック中…(1分ほど)", fg="#1f6f43")
         self.rbar.config(mode="indeterminate")
         self.rbar.start(12)
+        cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
         def work():
             try:
-                issues, notes = output_check(out)
+                issues, notes = output_check(out, cuts=cuts)
             except Exception as ex:  # noqa: BLE001
                 issues, notes = None, [f"チェック中にエラー: {ex}"]
             self.q.put(lambda: done(issues, notes))
