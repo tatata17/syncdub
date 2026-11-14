@@ -631,7 +631,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 17       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 18       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1285,14 +1285,23 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
         if esl is not None and en_thr is not None and g_en >= 0.05 and abs(g_jp) < 0.02:
             lo6 = -min(10.0, p["en_end"] - p["en_start"] - 1.0)
             hi6 = min(10.0, s["en_end"] - s["en_start"] - 1.0)
+
+            def rms_of(x_):
+                return float(np.sqrt((x_ ** 2).mean())) if len(x_) else 0.0
             cand = []
-            for dd in np.arange(lo6, hi6 + 1e-6, 0.05):
+            for dd in np.arange(lo6, hi6 + 1e-6, 0.02):
                 x = p["en_end"] + dd
-                if all(float(np.sqrt((esl(x + u, 0.1) ** 2).mean())) < en_thr for u in np.arange(0.0, max(g_en - 0.1, 0.0) + 1e-6, 0.05)):
-                    cand.append((jq(pe + dd * rp), abs(dd), float(dd)))
+                jr = rms_of(jsl(pe + dd * rp - 0.03, 0.06))          # 日本語を切る所(前後0.03秒)の音量
+                if jr >= 0.5 * jthr:
+                    continue                                          # 日本語が鳴っている最中では切らない
+                er = rms_of(esl(x, g_en))                             # 間にする範囲の、英語の音量
+                e_min = min(rms_of(esl(x + u, 0.1)) for u in np.arange(0.0, max(g_en - 0.1, 0.0) + 1e-6, 0.05))
+                # 英語側は、その範囲のどこかで無音になり、全体としても静か(ふだんの半分以下)であること。
+                # 曲の余韻が少し残っていてもよい(日本語の録画は、余韻と無音をまとめて短くしていることがある)
+                if e_min < en_thr and er < 5.0 * en_thr:
+                    cand.append((er, abs(dd), float(dd)))
             if cand:
-                qs = [c for c in cand if c[0] < quiet]
-                dd = min(qs, key=lambda c: c[1])[2] if qs else min(cand)[2]
+                dd = min(cand)[2]
                 p["en_end"] = round(p["en_end"] + dd, 4)
                 if p_str:
                     p["jp_end"] = round(p["jp_end"] + dd * rp, 4)

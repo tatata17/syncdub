@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 17, "file": "beta/syncdub_beta.pyw", "sha256": "4162c4f92182528d24614ac264ca4debbf7b71d749c22409d31c29e88fade2a4", "notes": "英語版だけ長い所の間を移す範囲を前後10秒に広げ、日本語が少し重なる形のつなぎ目にも対応"}
+{"version": "2026.11.10.41", "beta": 18, "file": "beta/syncdub_beta.pyw", "sha256": "b5cf932afef9e899f630342c6bace2d26eeda8ed18d91122171f3428c3540ca0", "notes": "英語版だけ長い所の間を、曲の余韻が残る暗転にも移せるように(日本語が無音になる所で切る)"}
