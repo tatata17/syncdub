@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 21       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 22       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1374,6 +1374,14 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
         nx = [x for x in segs if x["en_start"] >= sg0["en_end"] - 1e-6 and x is not sg0]
         return bool(nx) and min(nx, key=lambda x: x["en_start"])["jp_start"] - je0 > 1.0
 
+    def _cm_before(sg0):  # この区間のすぐ前に、日本語にだけある所(CM)が1秒以上あるか
+        pv = [x for x in segs if x["en_end"] <= sg0["en_start"] + 1e-6 and x is not sg0]
+        if not pv:
+            return False
+        p0 = max(pv, key=lambda x: x["en_end"])
+        pje = p0["jp_end"] if p0["jp_end"] is not None else p0["jp_start"] + (p0["en_end"] - p0["en_start"])
+        return sg0["jp_start"] - pje > 1.0
+
     QT = 1.0   # 英語の0.1秒の音量が、「音がある所」の目安のこの倍率より小さければ無音とみなす
     for sg_ in segs:
         d_en = sg_["en_end"] - sg_["en_start"]
@@ -1385,6 +1393,31 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
         def jrms(t0_, t1_):
             return float(np.sqrt((jsl(t0_, max(t1_ - t0_, 0.05)) ** 2).mean()))
 
+        # CM(日本語にだけある所)の直後: 頭から4秒以内に英語の無音(0.4秒以上)があって、そこに日本語の音があるなら、
+        #   無音の終わり(英語の音が始まる所)まで頭を詰める (CM明けのジングルなどが、英語の無音に重なるのを防ぐ。
+        #   区間の頭が、英語の前の場面の余韻に少し掛かっていて、無音から始まっていないときにも効く)
+        if _cm_before(sg_):
+            run_s, run_e, n_q = None, None, 0
+            t_ = sg_["en_start"]
+            while t_ < min(sg_["en_start"] + 8.0, sg_["en_end"] - 1.0):
+                if float(np.sqrt((esl(t_, 0.1) ** 2).mean())) < QT * rms_thr:
+                    if run_s is None:
+                        if t_ - sg_["en_start"] > 4.0:
+                            break                      # 無音の始まりは、頭から4秒以内だけを見る
+                        run_s = t_
+                    n_q += 1
+                    run_e = t_ + 0.1
+                elif run_s is not None:
+                    if n_q >= 4:
+                        break
+                    run_s, run_e, n_q = None, None, 0
+                t_ += 0.1
+            if run_s is not None and n_q >= 4:
+                j0 = sg_["jp_start"] + (run_s - sg_["en_start"]) * r_
+                j1 = sg_["jp_start"] + (run_e - sg_["en_start"]) * r_
+                if jrms(j0, j1) >= 0.25 * jthr:
+                    sg_["en_start"], sg_["jp_start"] = round(float(run_e), 4), round(float(j1), 4)
+                    sg_["trim_s"] = True
         # 先頭: 英語が無音のあいだ進める(日本語に音があるときだけ。最大3秒)
         t_ = sg_["en_start"]
         while t_ - sg_["en_start"] < 3.0 and sg_["en_end"] - t_ > 0.5 and float(np.sqrt((esl(t_, 0.1) ** 2).mean())) < QT * rms_thr:
