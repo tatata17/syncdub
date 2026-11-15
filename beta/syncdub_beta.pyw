@@ -635,9 +635,9 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.10.41"
-BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 22       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+APP_VERSION = "2026.11.16.42"
+BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
+BETA_BUILD = 23       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4093,7 +4093,7 @@ def _mmss(t):
 
 
 def output_check(path, sr=8000, cuts=()):
-    """書き出した動画の日本語音声(1本目)と英語音声(2本目)を比べて、おかしそうな所を探す(ベータ版の自動チェック用)。
+    """書き出した動画の日本語音声(1本目)と英語音声(2本目)を比べて、おかしそうな所を探す(合成後の自動チェック用)。
     cuts: 区間の切れ目(出力の時刻)。ひと続きの区間の中では日本語の音は切れ目なくつながっているので、
           前後が合っているのに途中の1か所だけずれる、ということは起きない(測定の外れとして扱う)。
     戻り値: (問題の一覧 [文字列], 補足の一覧 [文字列])。比べられなければ (None, [理由])。"""
@@ -4236,8 +4236,8 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
     return issues, notes
 
 
-# ------------------------------------------------------------------ 成功した結果の記録と、回帰チェック(ベータ版)
-RECORD_DIR = "syncdub_記録"     # ベータ版と同じフォルダの中に作る(番組名が入るので、リポジトリには入れない)
+# ------------------------------------------------------------------ 成功した結果の記録と、回帰チェック
+RECORD_DIR = "syncdub_記録"     # このファイルと同じフォルダの中に作る(番組名が入るので、リポジトリには入れない)
 
 
 def virtual_tracks(en, jp, segs, sr=None):
@@ -4379,7 +4379,7 @@ def run_regress(base, say=print, progress=lambda f, m: None):
         except Exception as ex:  # noqa: BLE001
             v, lines = "エラー", [f"  {ex}"]
         tally[v] = tally.get(v, 0) + 1
-        L.append(f"■ {r.get('name', '?')} [{r.get('mode', '音')} / 記録した版 v{r.get('version', '?')} ベータ{r.get('beta', '?')}] → {v}")
+        L.append(f"■ {r.get('name', '?')} [{r.get('mode', '音')} / 記録した版 v{r.get('version', '?')}{(' ベータ' + str(r['beta'])) if r.get('beta') else ''}] → {v}")
         L += lines
         if r.get("memo"):
             L.append(f"  記録のメモ: {r['memo']}")
@@ -4885,10 +4885,9 @@ class App(_TkBase):
         m.add_command(label="更新前の版に戻す", command=self.rollback)
         m.add_separator()
         m.add_checkbutton(label="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto)
-        if BETA_REVIEW:
-            m.add_separator()
-            m.add_command(label="記録と比べる (回帰チェック)", command=self._regress_window)
-            m.add_command(label="記録のフォルダを開く", command=self._open_records)
+        m.add_separator()
+        m.add_command(label="記録と比べる (回帰チェック)", command=self._regress_window)
+        m.add_command(label="記録のフォルダを開く", command=self._open_records)
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
@@ -4996,10 +4995,10 @@ class App(_TkBase):
         self.easy_done = tk.Label(r5, text="", anchor="w", fg="#2a7")
         self.easy_done.pack(side="left", padx=10)
         self.open_btn = ttk.Button(r5, text="フォルダを開く", command=self.open_folder)
-        self.beta_btn = ttk.Button(r5, text="自動チェックの結果", command=self._beta_show)   # ベータ版だけ。合成のあとに出す
-        self.rec_btn = ttk.Button(r5, text="成功として記録", command=self._record_success)      # ベータ版だけ
+        self.beta_btn = ttk.Button(r5, text="自動チェックの結果", command=self._beta_show)   # 合成のあとに出す
+        self.rec_btn = ttk.Button(r5, text="成功として記録", command=self._record_success)
         Tooltip(self.rec_btn, "見て・聞いて問題なかったら押します。この素材・この合わせ方・この結果を記録しておき、\n"
-                              "あとで新しいベータ版が同じ結果を出すか比べられるようにします(更新・設定 →「記録と比べる」)。")
+                              "あとで新しい版が同じ結果を出すか比べられるようにします(更新・設定 →「記録と比べる」)。")
 
     # ---------- 切り出し (一致部分だけ) ----------
     def _build_clip(self):
@@ -6334,7 +6333,7 @@ class App(_TkBase):
             return
         self.play(k)
 
-    # ---- ベータ版: 書き出した動画の自動チェックと、貼り付け用の報告文
+    # ---- 書き出した動画の自動チェックと、貼り付け用の報告文
     def _beta_report(self, out, issues, notes, log=""):
         def med(path):
             try:
@@ -6381,7 +6380,7 @@ class App(_TkBase):
 
     def _beta_check(self, out, log=""):
         name = Path(out).name
-        self.say("書き出した動画を自動チェックしています…(ベータ版)")
+        self.say("書き出した動画を自動チェックしています…")
         # かかる時間は、動画の大きさ(読み込む量)でほぼ決まる。前回までにかかった実績(1GBあたりの秒数)から目安を出す。
         # 実績がまだないとき(初回)は、目安を出さずに経過時間だけを見せる
         try:
@@ -6455,15 +6454,15 @@ class App(_TkBase):
             if issues:
                 self.say(f"合成完了 (自動チェック: おかしそうな所 {len(issues)} 件)")
                 self._beta_show(rep, f"書き出した動画に、おかしそうな所が {len(issues)} 件ありました。\n"
-                                     "下の文面をコピーして、そのまま Claude に貼ると原因を調べやすくなります。")
+                                     "その場所を見て・聞いて確かめてください。下の文面は、不具合を報告するときにそのまま使えます(「コピー」)。")
             else:
                 self.say("合成完了 (自動チェック: 問題は見つかりませんでした)" if issues is not None else "合成完了 (自動チェックはできませんでした)")
         threading.Thread(target=work, daemon=True).start()
 
-    def _beta_show(self, rep=None, head="書き出した動画の自動チェックの結果です。Claude に貼るときは「コピー」を押してください。"):
+    def _beta_show(self, rep=None, head="書き出した動画の自動チェックの結果です。不具合を報告するときは、「コピー」でこの文面をそのまま使えます。"):
         rep = rep or getattr(self, "_beta_rep", "")
         w = tk.Toplevel(self)
-        w.title("自動チェック (ベータ版)")
+        w.title("自動チェック")
         w.geometry("760x520")
         ttk.Label(w, text=head, justify="left").pack(anchor="w", padx=10, pady=(10, 4))
         bf = ttk.Frame(w)
@@ -6486,7 +6485,7 @@ class App(_TkBase):
         note.pack(side="left", padx=8)
         ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
 
-    # ---- ベータ版: 成功した結果の記録と、回帰チェック
+    # ---- 成功した結果の記録と、回帰チェック
     def _record_success(self):
         last = getattr(self, "_beta_last", None)
         virt = getattr(self, "_beta_virtual", None)
@@ -6500,7 +6499,7 @@ class App(_TkBase):
         mode = getattr(self, "_align_mode", "音")
         rec = {"name": jp_p.stem, "en": str(Path(self.en_var.get()).resolve()), "jp": str(jp_p.resolve()),
                "jp_ast": int(self.jp_ast.get()), "mode": mode, "hand_edited": bool(self.auto_flags is None and self.items),
-               "version": APP_VERSION, "beta": BETA_BUILD, "date": f"{datetime.now():%Y-%m-%d %H:%M}", "memo": memo.strip(),
+               "version": APP_VERSION, "beta": BETA_BUILD if BETA_REVIEW else 0, "date": f"{datetime.now():%Y-%m-%d %H:%M}", "memo": memo.strip(),
                "segs": segs_to_rows(last["segs"]), "unused": [[round(a, 2), round(b, 2)] for a, b in getattr(self, "_align_unused", [])],
                "output_check": {"issues": last["issues"], "notes": last["notes"]}, "virtual": virt}
         d = Path(__file__).resolve().parent / RECORD_DIR
@@ -6513,7 +6512,7 @@ class App(_TkBase):
             return
         note = "\n(手で直した結果です。回帰チェックでは、自動合わせの結果と比べるので「変化あり」と出ます)" if rec["hand_edited"] else ""
         messagebox.showinfo("記録しました", f"{f.name} に記録しました。{note}\n\n"
-                            "新しいベータ版にしたあと、「更新・設定」→「記録と比べる」で、同じ結果になるか確かめられます。")
+                            "新しい版に更新したあと、「更新・設定」→「記録と比べる」で、同じ結果になるか確かめられます。")
 
     def _open_records(self):
         d = Path(__file__).resolve().parent / RECORD_DIR
@@ -6567,7 +6566,7 @@ class App(_TkBase):
         def work():
             rep = run_regress(base, say=lambda t: ui(lambda: head.config(text="比べています… " + t)),
                               progress=lambda f, m_: ui(lambda: bar.config(value=int(1000 * f))))
-            ui(lambda: (head.config(text="終わりました。結果を Claude に貼るときは「コピー」を押してください。"),
+            ui(lambda: (head.config(text="終わりました。「コピー」で、結果をそのまま報告に使える文面にできます。"),
                         bar.config(value=1000), tx.insert("1.0", rep)))
         threading.Thread(target=work, daemon=True).start()
 
@@ -7373,8 +7372,7 @@ class App(_TkBase):
         if ok:
             self.easy_done.config(text=f"✔ 完成しました: {Path(self.out_path.get()).name}", fg="#1f6f43")
             self.open_btn.pack(side="left", padx=8)
-            if BETA_REVIEW:
-                self._beta_check(self.out_path.get(), text)
+            self._beta_check(self.out_path.get(), text)      # 出来上がった動画を自動でチェックする
         else:
             self.easy_done.config(text="⚠ 合成に失敗しました (詳細は「手動調整」タブ下のログ)", fg="#b33")
             if "Permission denied" in text:

@@ -1,1 +1,1 @@
-{"version": "2026.11.10.41", "beta": 22, "file": "beta/syncdub_beta.pyw", "sha256": "ba2d06149f02519c36de555dac33029f75979475f10b52a1bcd3e82aeda4bf2e", "notes": "CM明けの短い曲が、英語の無音に重なって入るのを防ぐ(CMの直後の区間の頭を、英語の音が始まる所まで詰める)"}
+{"version": "2026.11.16.42", "beta": 23, "file": "beta/syncdub_beta.pyw", "sha256": "9e4518391b90ba1c9b2a53060255828862c895b0198c00b999981ce7c7a6b787", "notes": "正式版 v2026.11.16.42 と同じ内容です"}
