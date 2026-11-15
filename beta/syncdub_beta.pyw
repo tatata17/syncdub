@@ -271,7 +271,10 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
     for tag, n, idx, ai in (("j", nj, in_idx, a_index), ("e", ne, en_idx, 0)):
         if n:
             outs = "".join(f"[s{tag}{i}]" for i in range(n))
-            lines.append(f"[{idx}:a:{ai}]{fmt},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{fmt}[s{tag}0]")
+            # 音の終わりのあとに無音を足しておく。区間が録画の終わりを越えていても、切り出した結果が空にならないようにする
+            # (空のままだと、あとの無音埋めが働かず、時刻のおかしい音が出て合成が失敗する)。使われない分は作られない
+            pad = fmt + ",apad=pad_dur=7200"
+            lines.append(f"[{idx}:a:{ai}]{pad},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{pad}[s{tag}0]")
     warns = []
 
     def src_end(x):
@@ -319,7 +322,10 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                         stretch = f"asetrate={sr * r:.6f},aresample={sr}"
                     else:
                         stretch = atempo_chain(r)
-                    chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS", stretch,
+                    # 日本語の音がその範囲にない(録画の終わりを越えている)ときも、無音で埋めてから伸縮する。
+                    # (埋めないと、伸縮の処理に音が1つも届かず、時刻のおかしい音が出て合成が失敗する)
+                    chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS",
+                             f"apad=whole_dur={jdur + a0 + a1:.6f}", stretch,
                              f"atrim={a0 / r:.6f}:{a0 / r + D:.6f}", "asetpts=PTS-STARTPTS"]
                 else:
                     chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
@@ -631,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.10.41"
 BETA_REVIEW = True   # ベータ版用: 「録画から探す」の終わりに確認ウインドウを開く(正式版では False にする)
-BETA_BUILD = 20       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 21       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -6210,6 +6216,10 @@ class App(_TkBase):
     def run_auto(self):
         if not all(self.media.values()):
             return
+        if self._stale_media():        # 念のため: 選んでいるファイルと中身が違えば、読み込み直してから合わせる
+            self._auto_after_load = True
+            self.load_media()
+            return
         en, jp = self.media["en"], self.media["jp"]
         self._busy(True)
         self.pbar.config(value=0)
@@ -6698,6 +6708,9 @@ class App(_TkBase):
         self.pbar.config(value=0)
         self._busy(True)
         ast = self.jp_ast.get()  # Tk変数はメインスレッドで読む
+        # 読み込みの通し番号。ファイルを続けて入れ替えると読み込みが2つ同時に走り、古いほうがあとから終わって、
+        # 画面の表示は新しいファイルなのに中身は古いファイル、という食い違いが起きる。いちばん新しい読み込みの結果だけを使う
+        self._load_id = tok = getattr(self, "_load_id", 0) + 1
 
         def work():
             try:
@@ -6705,14 +6718,24 @@ class App(_TkBase):
             except Exception as ex:  # noqa: BLE001
                 err = getattr(ex, "stderr", b"") or b""
                 msg = f"{ex}\n{err.decode(errors='ignore')[-500:] if isinstance(err, bytes) else err}"
-                self.q.put(lambda: (self.say("読み込み失敗"), self.auto_msg.config(text="⚠ 読み込めませんでした", fg="#b33"),
-                                    messagebox.showerror("読み込みエラー", msg), self._busy(False)))
+                self.q.put(lambda: tok == self._load_id and (
+                    self.say("読み込み失敗"), self.auto_msg.config(text="⚠ 読み込めませんでした", fg="#b33"),
+                    messagebox.showerror("読み込みエラー", msg), self._busy(False)))
                 return
-            self.q.put(lambda: self._loaded(m))
+            self.q.put(lambda: self._loaded(m) if tok == self._load_id else None)
         threading.Thread(target=work, daemon=True).start()
+
+    def _stale_media(self):
+        """読み込んである中身が、いま画面で選んでいるファイルと違うか。"""
+        m = self.media
+        if not all(m.values()):
+            return False
+        same = lambda a, b: os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))  # noqa: E731
+        return not (same(m["en"].path, self.en_var.get().strip()) and same(m["jp"].path, self.jp_var.get().strip()))
 
     def _loaded(self, m):
         self.media = m
+        self.items, self.auto_flags = [], None      # 前のファイルの結果は残さない
         for k in ("en", "jp"):
             t = self.tr[k]
             t.media = m[k]
@@ -7258,6 +7281,9 @@ class App(_TkBase):
     def render(self):
         if not self.segs:
             messagebox.showinfo("区間なし", "区間がありません。先に「自動で合わせる」を実行してください。")
+            return
+        if self._stale_media():
+            messagebox.showwarning("ファイルが変わっています", "合わせたあとで、ファイルが入れ替わっています。\nもう一度「自動で合わせる」を押してから、合成してください。")
             return
         if not self.out_path.get():
             self.pick_out()
