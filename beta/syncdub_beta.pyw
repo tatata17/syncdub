@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 33       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 34       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1250,10 +1250,11 @@ def _flux(x, fs):
     """音の「立ち上がり」の強さ(帯域ごと、1秒に200コマ)。声や音量のちがう吹き替えどうしでも、曲や効果音の出だしは同じ所に出る。"""
     hop, n = int(round(fs / 200)), 128
     if len(x) < n + hop:
-        return np.zeros((40, 0))
+        return np.zeros((32, 0))
     k = (len(x) - n) // hop + 1
     idx = np.arange(n)[None, :] + hop * np.arange(k)[:, None]
-    mag = np.abs(np.fft.rfft(x[idx] * np.hanning(n), axis=1))[:, 2:42]
+    mag = np.abs(np.fft.rfft(x[idx] * np.hanning(n), axis=1))[:, 1:65]
+    mag = mag.reshape(len(mag), 32, 2).sum(2)       # 32帯域にまとめる(速くするため)
     mag = np.log1p(mag / (np.median(mag) * 4 + 1e-9))
     return np.maximum(np.diff(mag, axis=0), 0.0).T
 
@@ -1298,7 +1299,7 @@ def _recheck_wide(segs, esl, jsl, fs, rms_thr):
             c = corr(E[:, i0:i0 + n], J, j0 + i0 - m, j0 + i0 + m + 1)
             k = int(c.argmax())
             z = (c[k] - np.median(c)) / (c.std() + 1e-9)
-            if z >= 5.0 and 2 <= k <= 2 * m - 2:
+            if z >= 4.0 and 2 <= k <= 2 * m - 2:      # 1回ごとの基準はゆるく、「同じずれが続く」ことで確かめる
                 smp.append((float(t), (k - m) / FPS))
         groups, cur, pend = [], None, []
         for i, (t, lg) in enumerate(smp):
