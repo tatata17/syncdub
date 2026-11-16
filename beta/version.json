@@ -1,1 +1,1 @@
-{"version": "2026.11.16.42", "beta": 25, "file": "beta/syncdub_beta.pyw", "sha256": "9c829c2e3278cd82013f48494608b9f4b948d70b60abbb5dd99406de8ad18b14", "notes": "手動調整: 波形の上で、区間の境目(緑の線)をドラッグして動かせるようにしました。Shift+ドラッグで片側だけ、ダブルクリックで数字の編集"}
+{"version": "2026.11.16.42", "beta": 26, "file": "beta/syncdub_beta.pyw", "sha256": "6a8cb0c729e9bcb1b3dee091b268c62bb0853bd3bcf28daedac65f875443d203", "notes": "手動調整: 境目のドラッグを軽くしました(動かしている間は波形を描き直さない)。短い範囲があると動かせなかった不具合を修正"}

@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 25       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 26       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3869,14 +3869,38 @@ class Track(tk.Canvas):
             body = f"{m}:{int(round(sec)):02d}" if not h else f"{h}:{m:02d}:{int(round(sec)):02d}"
         return sign + body
 
-    def redraw(self):
-        self.delete("all")
+    def redraw(self, fast=False):
+        """描き直す。fast=True: 表示範囲が前と同じなら、波形はそのまま残して、帯・線・文字だけ描き直す
+        (境目をつまんで動かしている最中に使う。波形の計算と描画を省くので、動きがなめらかになる)。"""
         W, H = self.winfo_width(), self.winfo_height()
+        key = (self.vs, self.vspan, W, H, id(self.media))
+        keep = bool(fast and getattr(self, "_wave_ids", None) and getattr(self, "_wave_key", None) == key)
+        if keep:
+            wave = set(self._wave_ids)
+            for i in self.find_all():
+                if i not in wave:
+                    self.delete(i)
+        else:
+            self.delete("all")
+            self._wave_ids = []
         if W < 10:
             return
         body = H - 22  # 波形エリアの高さ (下は目盛り)
         mid = body / 2
         v1 = self.vs + self.vspan
+        self._draw_under(W, body, v1)
+        if keep:      # いま描いた下地を、残してある波形の下へ送る(描いた順は保つ)
+            for i in self.find_all():
+                if i not in wave:
+                    self.tag_lower(i, self._wave_ids[0])
+        else:
+            before = set(self.find_all())
+            self._draw_wave(W, H, body, mid, v1)
+            self._wave_ids = [i for i in self.find_all() if i not in before]
+            self._wave_key = key
+        self._draw_over(W, H, body, v1)
+
+    def _draw_under(self, W, body, v1):
         # --- 区間の色帯 (波形の下地)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
@@ -3912,6 +3936,8 @@ class Track(tk.Canvas):
         if self.selr:
             xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
             self.create_rectangle(xa, 0, xb, body, fill="#cfe3ff", outline="#2f6fd0", width=2)
+
+    def _draw_wave(self, W, H, body, mid, v1):
         self.create_line(0, mid, W, mid, fill="#c9cfd8")
         # --- 波形
         m = self.media
@@ -3928,6 +3954,8 @@ class Track(tk.Canvas):
             elif env:
                 _, xs, ys = env
                 self.create_line(np.column_stack([xs, mid - ys * amp]).ravel().tolist(), fill="#3b6ea5")
+
+    def _draw_over(self, W, H, body, v1):
         # --- 区間の境界線・名前 (A, B, C…)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
@@ -7132,9 +7160,10 @@ class App(_TkBase):
                             c["en0"] += d
         m = self.media
         lim = {"en": (min(0.0, m["en"].a_origin), m["en"].end), "jp": (min(0.0, m["jp"].a_origin), m["jp"].end)} if all(m.values()) else None
-        for i in items:
-            for a, b, kk in (("en0", "en1", "en"), ("jp0", "jp1", "jp")):
-                if a in i and i[b] - i[a] < 0.02:
+        for i, i0 in zip(items, base):
+            for a, b in (("en0", "en1"), ("jp0", "jp1")):
+                # 範囲を0.02秒より短くはしない(はじめからそれより短い範囲は、そのままならよい)
+                if a in i and i[b] - i[a] < min(0.02, i0[b] - i0[a]) - 1e-9:
                     return None
             if lim:
                 for key, kk in (("en", "en"), ("jp", "jp"), ("en0", "en"), ("en1", "en"), ("jp0", "jp"), ("jp1", "jp")):
@@ -7174,15 +7203,15 @@ class App(_TkBase):
         if all(m.values()):
             self.segs, self.extra_segs, self.warns = build_from_items(
                 self.items, (min(0.0, m["en"].a_origin), m["en"].end), (min(0.0, m["jp"].a_origin), m["jp"].end))
-        self.refresh()
-        self.select_item(h[1])
         # 赤いカーソルを境目に合わせる(下のプレビュー画面で、境目の場面を見ながら動かせる)
-        if h[0] == "pt":
-            self.set_cursor("en", it["en"])
-            self.set_cursor("jp", it["jp"])
-        else:
-            self.set_cursor(k, t_now)
-        self.say(f"{what} {d:+.2f}秒 動かしています (離すと決まります。Ctrl+Z で元に戻せます)")
+        moved = {"en": it["en"], "jp": it["jp"]} if h[0] == "pt" else {k: t_now}
+        for kk, t in moved.items():
+            self.tr[kk].cursor = t
+        # 動かしている最中は、波形はそのままにして、帯と線だけを描き直す(一覧の作り直しは、離したときに1回だけ)
+        self._refresh_tracks(fast=True)
+        for kk in moved:
+            self.schedule_preview(kk)
+        self.status.config(text=f"{what} {d:+.2f}秒 動かしています (離すと決まります。Ctrl+Z で元に戻せます)")
 
     def drag_end(self, k, h, moved):
         if getattr(self, "_drag_pending", None) is not None:
@@ -7203,6 +7232,9 @@ class App(_TkBase):
         self.auto_flags = None
         self.rebuild()
         self.select_item(h[1])
+        it = self.items[h[1]]
+        for kk in (("en", "jp") if h[0] == "pt" else (k,)):      # 時刻の表示欄も、動かした先に合わせる
+            self.set_cursor(kk, it[kk] if h[0] == "pt" else it[h[2]])
         self.say("境目を動かしました (Ctrl+Z で元に戻せます)")
 
     def add_point(self):
@@ -7321,7 +7353,11 @@ class App(_TkBase):
             self.itree.insert("", "end", iid=str(i), tags=(k,), values=(self.KIND_JA[k], en, jp, note))
         more = f"  (ほか {len(self.warns) - 1} 件)" if len(self.warns) > 1 else ""
         self.warn_lbl.config(text=("⚠ " + self.warns[0] + more) if self.warns else "")
-        # 波形上の表示
+        self._refresh_tracks()
+        self.refresh_easy()
+
+    def _refresh_tracks(self, fast=False):
+        """波形の上の表示(帯・範囲・点)を、いまの指定と区間から作り直す。"""
         en_pts, jp_pts, n = [], [], 0
         for it in self.items:
             if it["k"] == "pt":
@@ -7341,8 +7377,7 @@ class App(_TkBase):
                     for i, s in enumerate(self.segs)]
         for t in self.tr.values():
             t.sel = None
-            t.redraw()
-        self.refresh_easy()
+            t.redraw(fast)
 
     def undo(self):
         if not self.undo_st:
