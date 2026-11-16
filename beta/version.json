@@ -1,1 +1,1 @@
-{"version": "2026.11.16.42", "beta": 24, "file": "beta/syncdub_beta.pyw", "sha256": "32cdff7fb0a1a84d164d31fb7593564facedcc67af7b51cc132a264a9d8b41d8", "notes": "保存先が英語版・日本語の録画そのものになっているときは、合成しない(元のファイルを守る)"}
+{"version": "2026.11.16.42", "beta": 25, "file": "beta/syncdub_beta.pyw", "sha256": "9c829c2e3278cd82013f48494608b9f4b948d70b60abbb5dd99406de8ad18b14", "notes": "手動調整: 波形の上で、区間の境目(緑の線)をドラッグして動かせるようにしました。Shift+ドラッグで片側だけ、ダブルクリックで数字の編集"}

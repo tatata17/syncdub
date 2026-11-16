@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 24       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 25       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3743,6 +3743,10 @@ class Track(tk.Canvas):
         self.selr = None   # ドラッグで選んだ範囲 (開始, 終了)
         self._press = None
         self._pan = None
+        self._grab = None  # つまんで動かしている最中の情報 (つまみ, 押した所のx, 動いたか)
+        self.drag_note = None  # 動かしている最中に、つまみの横に出す文字 (時刻, 文字)
+        self.bind("<Motion>", self.on_hover)
+        self.bind("<Double-Button-1>", self.on_double)
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_motion)
@@ -3760,12 +3764,50 @@ class Track(tk.Canvas):
         return self.vs + x / max(self.winfo_width(), 1) * self.vspan
 
     # --- マウス: クリック=カーソル / ドラッグ=範囲選択 / ホイール=拡大縮小 / 右ドラッグ=横移動
+    def _handle_at(self, x):
+        """x の近く(5ピクセル以内)にある、つまんで動かせる境目。なければ None。"""
+        best = None
+        for t, h in self.app.drag_handles(self.key):
+            d = abs(self.x_of(t) - x)
+            if d <= 5 and (best is None or (h[0] == "pt", -d) > (best[1][0] == "pt", -best[0])):
+                best = (d, h)
+        return best[1] if best else None
+
+    def on_hover(self, e):
+        if self._grab or self._press:
+            return
+        h = self._handle_at(e.x) if e.y < self.winfo_height() - 22 else None
+        want = "sb_h_double_arrow" if h else ""
+        if self["cursor"] != want:
+            self.config(cursor=want)
+            if h:
+                self.app.say(self.app.drag_hint(h))
+
+    def on_double(self, e):
+        h = self._handle_at(e.x)
+        if h:
+            self._press = self._grab = None
+            self.app.select_item(h[1])
+            self.app.edit_item()
+
     def on_press(self, e):
         self.focus_set()
         self.app.set_active(self.key)
+        h = self._handle_at(e.x) if e.y < self.winfo_height() - 22 else None
+        if h:
+            self._grab = [h, e.x, False]
+            self.app.drag_begin(h)
+            return
         self._press = (e.x, False)
 
     def on_motion(self, e):
+        if self._grab:
+            h, x0, _moved = self._grab
+            if abs(e.x - x0) < 3 and not self._grab[2]:
+                return
+            self._grab[2] = True
+            self.app.drag_move(self.key, h, self.t_of(e.x) - self.t_of(x0), bool(e.state & 0x1))
+            return
         if not self._press:
             return
         x0, dragging = self._press
@@ -3777,6 +3819,11 @@ class Track(tk.Canvas):
         self.redraw()
 
     def on_release(self, e):
+        if self._grab:
+            h, _x0, moved = self._grab
+            self._grab = None
+            self.app.drag_end(self.key, h, moved)
+            return
         if not self._press:
             return
         _x0, dragging = self._press
@@ -3915,6 +3962,12 @@ class Track(tk.Canvas):
                 self.create_text(x + 4, 8, text=label, anchor="w", fill="white", font=("", 8, "bold"))
         x = self.x_of(self.cursor)
         self.create_line(x, 0, x, body, fill="#e0262d", width=1)
+        if self.drag_note:
+            xn = min(max(self.x_of(self.drag_note[0]) + 8, 4), W - 150)
+            tid = self.create_text(xn + 4, 30, text=self.drag_note[1], anchor="w", fill="#0b6b3a", font=("", 9, "bold"))
+            bb = self.bbox(tid)
+            if bb:      # 波形の上でも読めるように、白い下地を敷く
+                self.tag_lower(self.create_rectangle(bb[0] - 4, bb[1] - 2, bb[2] + 4, bb[3] + 2, fill="white", outline="#0b6b3a"), tid)
         if self.selr:
             xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
             self.create_text((xa + xb) / 2, 24, text=f"選択 {self.selr[1] - self.selr[0]:.2f}秒",
@@ -4742,7 +4795,7 @@ class App(_TkBase):
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 境目(緑の線・範囲の端)をドラッグ: 境目を動かす / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
                  "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
         def _toggle_keys(btn):
             if self.keys_lbl.winfo_ismapped():
@@ -6992,6 +7045,166 @@ class App(_TkBase):
         except Exception:  # noqa: BLE001
             pass
 
+    # ---------- 波形の上で、境目をつまんで動かす ----------
+    LINK = 0.03   # これより近い端どうしは「同じ境目」として一緒に動かす
+
+    def _linked(self, items, pt):
+        """『同じ場面』の点 pt に、終わりがくっついているカット・CM(= 区間の境目を作っている組)。"""
+        cuts = [i for i in items if i["k"] == "cut" and abs(i["en1"] - pt["en"]) < self.LINK]
+        cms = [i for i in items if i["k"] == "cm" and abs(i["jp1"] - pt["jp"]) < self.LINK]
+        return cuts, cms
+
+    def drag_handles(self, k):
+        """波形 k (en / jp) の上で、つまんで動かせる境目の一覧 [(時刻, つまみ)]。
+        つまみ = ("pt", 番号) / ("edge", 番号, 項目名)"""
+        out = []
+        pts = [i for i in self.items if i["k"] == "pt"]
+        for n, it in enumerate(self.items):
+            kind = it["k"]
+            if kind == "pt":
+                out.append((it[k], ("pt", n)))
+            elif kind == "dim":
+                out += [(it[k + "0"], ("edge", n, k + "0")), (it[k + "1"], ("edge", n, k + "1"))]
+            elif (kind == "cut" and k == "en") or (kind == "cm" and k == "jp"):
+                # 終わりが『同じ場面』の点にくっついている(自動でできた境目)ときは、点のほうをつまんで動かす
+                if not any(abs(it[k + "1"] - p[k]) < self.LINK for p in pts):
+                    out += [(it[k + "0"], ("edge", n, k + "0")), (it[k + "1"], ("edge", n, k + "1"))]
+        return out
+
+    def drag_hint(self, h):
+        if h[0] == "pt":
+            return "ドラッグ: 区間の境目を動かす(音の合わせ方はそのまま) / Shift+ドラッグ: こちら側だけ動かす(音のずれを直す) / ダブルクリック: 数字で直す"
+        return "ドラッグ: この範囲の端を動かす / ダブルクリック: 数字で直す"
+
+    def select_item(self, n):
+        try:
+            self.itree.selection_set(str(n))
+            self.itree.see(str(n))
+        except tk.TclError:
+            pass
+
+    def _drag_apply(self, base, k, h, d, solo):
+        """base(動かす前の指定)に、つまみ h を d 秒動かした結果を返す。成り立たない形(範囲が裏返るなど)なら None。"""
+        import copy
+        items = copy.deepcopy(base)
+        it = items[h[1]]
+        if h[0] == "edge":
+            it[h[2]] += d
+        else:
+            cuts, cms = self._linked(items, it)
+            if not solo:        # 境目を動かす: 英語側も日本語側も同じだけ動かす(時間差は変えない)
+                first_en = min(i["en"] for i in items if i["k"] == "pt")
+                first_jp = min(i["jp"] for i in items if i["k"] == "pt")
+                for c in cuts:
+                    if c["en0"] > first_en - self.LINK:   # 前に区間があるカットは、始まりも一緒に動かす(前の区間の終わりが動く)
+                        c["en0"] += d
+                    c["en1"] += d
+                for c in cms:
+                    if c["jp0"] > first_jp - self.LINK:
+                        c["jp0"] += d
+                    c["jp1"] += d
+                it["en"] += d
+                it["jp"] += d
+            else:
+                # こちら側だけ動かす = この点から始まる区間の時間差を変える(音のずれを直す)。
+                # 区間の終わり(次の境目)も、伸び縮みが起きないように合わせて動かす
+                later = sorted((i for i in items if i["k"] == "pt" and i["en"] > it["en"] + 1e-6), key=lambda i: i["en"])
+                n_cuts, n_cms = self._linked(items, later[0]) if later else ([], [])
+                if k == "jp":     # 日本語側: 直前のCMの終わりがついてくる
+                    for c in cms:
+                        c["jp1"] += d
+                    it["jp"] += d
+                    for c in n_cms:           # 次がCM: 使う日本語の終わりが、同じだけ動く
+                        c["jp0"] += d
+                    if not n_cms:
+                        for c in n_cuts:      # 次が「英語だけ長い所」: 日本語の終わりは次の区間で決まっているので、英語側の終わりを動かす
+                            c["en0"] -= d
+                else:             # 英語側: 直前のカットの終わりと、CMの始まり(前の区間の終わり)がついてくる
+                    for c in cuts:
+                        c["en1"] += d
+                    for c in cms:
+                        c["jp0"] += d
+                    it["en"] += d
+                    for c in n_cms:
+                        c["jp0"] -= d
+                    if not n_cms:
+                        for c in n_cuts:
+                            c["en0"] += d
+        m = self.media
+        lim = {"en": (min(0.0, m["en"].a_origin), m["en"].end), "jp": (min(0.0, m["jp"].a_origin), m["jp"].end)} if all(m.values()) else None
+        for i in items:
+            for a, b, kk in (("en0", "en1", "en"), ("jp0", "jp1", "jp")):
+                if a in i and i[b] - i[a] < 0.02:
+                    return None
+            if lim:
+                for key, kk in (("en", "en"), ("jp", "jp"), ("en0", "en"), ("en1", "en"), ("jp0", "jp"), ("jp1", "jp")):
+                    if key in i and not (lim[kk][0] - 1e-6 <= i[key] <= lim[kk][1] + 1e-6):
+                        return None
+        pts = sorted((i for i in items if i["k"] == "pt"), key=lambda i: i["en"])
+        if any(b["en"] - a["en"] < 0.05 or b["jp"] - a["jp"] < 0.0 for a, b in zip(pts, pts[1:])):
+            return None        # 『同じ場面』の点の順番が入れ替わる所までは動かさない
+        return items
+
+    def drag_begin(self, h):
+        import copy
+        self.select_item(h[1])
+        self._drag0 = (copy.deepcopy(self.items), self._last)
+        self._drag_pending = None
+
+    def drag_move(self, k, h, d, solo):
+        self._drag_args = (k, h, d, solo)
+        if self._drag_pending is None:          # マウスの動きが続いても、描き直しは1回にまとめる
+            self._drag_pending = self.after_idle(self._drag_flush)
+
+    def _drag_flush(self):
+        self._drag_pending = None
+        if not getattr(self, "_drag0", None):
+            return
+        k, h, d, solo = self._drag_args
+        new = self._drag_apply(self._drag0[0], k, h, d, solo)
+        if new is None:
+            return                               # それ以上は動かせない → 直前の位置のまま
+        self.items = new
+        it = new[h[1]]
+        t_now = it[k] if h[0] == "pt" else it[h[2]]
+        what = ("こちら側だけ" if solo else "境目を") if h[0] == "pt" else "端を"
+        for kk, tr in self.tr.items():
+            tr.drag_note = (t_now, f"{what} {d:+.2f}秒") if kk == k else None
+        m = self.media
+        if all(m.values()):
+            self.segs, self.extra_segs, self.warns = build_from_items(
+                self.items, (min(0.0, m["en"].a_origin), m["en"].end), (min(0.0, m["jp"].a_origin), m["jp"].end))
+        self.refresh()
+        self.select_item(h[1])
+        # 赤いカーソルを境目に合わせる(下のプレビュー画面で、境目の場面を見ながら動かせる)
+        if h[0] == "pt":
+            self.set_cursor("en", it["en"])
+            self.set_cursor("jp", it["jp"])
+        else:
+            self.set_cursor(k, t_now)
+        self.say(f"{what} {d:+.2f}秒 動かしています (離すと決まります。Ctrl+Z で元に戻せます)")
+
+    def drag_end(self, k, h, moved):
+        if getattr(self, "_drag_pending", None) is not None:
+            self.after_cancel(self._drag_pending)
+            self._drag_flush()
+        base = getattr(self, "_drag0", None)
+        self._drag0 = None
+        for tr in self.tr.values():
+            tr.drag_note = None
+        if not base:
+            return
+        if not moved or self.items == base[0]:
+            self.items = base[0]
+            self.refresh()
+            self.select_item(h[1])
+            return
+        self._last = base[1]                     # 元に戻す(Ctrl+Z)で、動かす前に戻れるようにする
+        self.auto_flags = None
+        self.rebuild()
+        self.select_item(h[1])
+        self.say("境目を動かしました (Ctrl+Z で元に戻せます)")
+
     def add_point(self):
         if not all(self.media.values()):
             self.say("先に映像と録画を読み込んでください")
@@ -7156,6 +7369,8 @@ class App(_TkBase):
         return int(s[0]) if s else None
 
     def on_item_select(self, _):
+        if getattr(self, "_drag0", None):
+            return                 # 境目を動かしている最中は、表示位置を勝手に動かさない
         if len(self.itree.selection()) != 1:
             return
         i = self.item_idx()
