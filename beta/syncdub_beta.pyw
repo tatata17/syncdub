@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 31       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 32       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -2521,6 +2521,41 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
     return segs, {"ok": True, "unused_jp": unused, "msg": ""}
 
 
+def _bridge_same_scene(segs, max_gap=60.0, tol=0.15):
+    """となり合う区間の間が、英語側と日本語側で同じ長さだけ空いている所をつなぐ(note が "A"=音 / "V"=映像 の段階で呼ぶ)。
+    間の長さが同じ = CM やカットではなく、同じ場面が続いている。音で測れなかっただけ(声だけの場面など)なので、空けたままにすると
+    そこが無音になる。音で決めた区間(時間差が一定)のほうを延ばし、映像だけで決めた短い区間は、それに置きかえる。"""
+    def je(g):
+        return g["jp_end"] if g["jp_end"] is not None else g["jp_start"] + (g["en_end"] - g["en_start"])
+
+    def mark(g):
+        if "声だけの場面を推定" not in g.get("flag", ""):
+            g["flag"] = "・".join(x for x in (g.get("flag", ""), "声だけの場面を推定") if x)
+    out = []
+    for g in segs:
+        p = out[-1] if out else None
+        if p is not None:
+            g_en, g_jp = g["en_start"] - p["en_end"], g["jp_start"] - je(p)
+            if 0.5 <= g_en <= max_gap and abs(g_en - g_jp) <= tol:
+                if g["jp_end"] is None and (p["jp_end"] is not None or p.get("note") == "V"):
+                    # 後ろが音で決めた区間 → 後ろを手前へ延ばす。前が映像だけの区間なら、それごと置きかえる
+                    lim = je(out[-2]) if len(out) >= 2 else None
+                    to = p["en_start"] if p.get("note") == "V" else p["en_end"]
+                    if to == p["en_start"] and lim is not None and g["jp_start"] - (g["en_start"] - to) < lim - 1e-3:
+                        to = p["en_end"]
+                    if to == p["en_start"]:
+                        out.pop()
+                    g = dict(g, jp_start=round(g["jp_start"] - (g["en_start"] - to), 4), en_start=to)
+                    g.pop("trim_s", None)
+                    mark(g)
+                elif p["jp_end"] is None:
+                    p["en_end"] = g["en_start"]          # 前が音で決めた区間 → 前を先へ延ばす
+                    p.pop("trim_e", None)
+                    mark(p)
+        out.append(g)
+    segs[:] = out
+
+
 def combined_align(en, jp, progress=lambda f, m: None):
     """音(auto_align)と映像(video_align)の両方で合わせ、場所ごとに確かなほうを採る。
     ・両方が同じ答え → 音の結果(細かい位置が正確)   ・片方しか見つけていない → その結果
@@ -2678,6 +2713,7 @@ def combined_align(en, jp, progress=lambda f, m: None):
                             p["jp_end"] = round(p["jp_end"] - cut, 4)
         keep.append(s)
     out = keep
+    _bridge_same_scene(out)
     for s in out:
         s["note"] = "自動(音+映像)"
     # 区間の中で時間差が少しだけ変わる所(0.1秒ほどのずれ)を測り直して、そこで分ける
