@@ -1,1 +1,1 @@
-{"version": "2026.11.16.42", "beta": 26, "file": "beta/syncdub_beta.pyw", "sha256": "6a8cb0c729e9bcb1b3dee091b268c62bb0853bd3bcf28daedac65f875443d203", "notes": "手動調整: 境目のドラッグを軽くしました(動かしている間は波形を描き直さない)。短い範囲があると動かせなかった不具合を修正"}
+{"version": "2026.11.16.42", "beta": 27, "file": "beta/syncdub_beta.pyw", "sha256": "a072040d2fb71c1c8b2af78dba3b0100b49abc636fe37e8a955d133ae4cf7b5c", "notes": "手動調整: 緑の線のドラッグは、つかんだ側だけ動くようにしました(Shift+ドラッグで上下一緒)。波形の下に横スクロールバーを追加。右クリックのメニューを追加(CMではない、カットではない、など)"}

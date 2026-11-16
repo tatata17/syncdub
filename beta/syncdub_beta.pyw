@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 26       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 27       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3756,6 +3756,8 @@ class Track(tk.Canvas):
         self.bind("<Button-5>", lambda e: self.on_wheel(e, -1))
         self.bind("<ButtonPress-3>", self.pan_start)
         self.bind("<B3-Motion>", self.pan_move)
+        self.bind("<ButtonRelease-3>", self.pan_end)
+        self.sbar = None   # 下に付ける横スクロールバー(App が作って渡す)
 
     def x_of(self, t):
         return (t - self.vs) / self.vspan * self.winfo_width()
@@ -3806,7 +3808,7 @@ class Track(tk.Canvas):
             if abs(e.x - x0) < 3 and not self._grab[2]:
                 return
             self._grab[2] = True
-            self.app.drag_move(self.key, h, self.t_of(e.x) - self.t_of(x0), bool(e.state & 0x1))
+            self.app.drag_move(self.key, h, self.t_of(e.x) - self.t_of(x0), not (e.state & 0x1))   # Shift なし = こちら側だけ
             return
         if not self._press:
             return
@@ -3847,12 +3849,52 @@ class Track(tk.Canvas):
         self.vspan = new
 
     def pan_start(self, e):
-        self._pan = (e.x, self.vs)
+        self._pan = (e.x, self.vs, False)
 
     def pan_move(self, e):
         if self._pan:
+            if not self._pan[2] and abs(e.x - self._pan[0]) < 4:
+                return                       # ほとんど動いていないうちは、右クリック(メニュー)として扱う
+            self._pan = (self._pan[0], self._pan[1], True)
             self.vs = self._pan[1] - (e.x - self._pan[0]) / self.winfo_width() * self.vspan
             self.redraw()
+
+    def pan_end(self, e):
+        pan, self._pan = self._pan, None
+        if pan and not pan[2]:               # 動かさずに離した = 右クリック → その場所のメニュー
+            self.focus_set()
+            self.app.set_active(self.key)
+            self.app.track_menu(self.key, self.t_of(e.x), self._handle_at(e.x), e.x_root, e.y_root)
+
+    # --- 横スクロールバー
+    def _range(self):
+        m = self.media
+        return (min(0.0, m.a_origin), max(m.end, 1.0)) if m else None
+
+    def xview(self, *args):
+        """スクロールバーからの操作。"""
+        r = self._range()
+        if not r or not args:
+            return
+        lo, hi = r
+        if args[0] == "moveto":
+            self.vs = lo + float(args[1]) * (hi - lo)
+        elif args[0] == "scroll":
+            self.vs += int(args[1]) * self.vspan * (0.9 if args[2] == "pages" else 0.1)
+        self.vs = min(max(self.vs, lo - self.vspan * 0.5), hi - self.vspan * 0.5)
+        self.redraw()
+
+    def _sync_sbar(self):
+        if not self.sbar:
+            return
+        r = self._range()
+        if not r:
+            self.sbar.set(0.0, 1.0)
+            return
+        lo, hi = r
+        a = (self.vs - lo) / (hi - lo)
+        b = (self.vs + self.vspan - lo) / (hi - lo)
+        self.sbar.set(min(max(a, 0.0), 1.0), min(max(b, 0.0), 1.0))
 
     def ensure_visible(self, t):
         if t < self.vs + self.vspan * 0.05 or t > self.vs + self.vspan * 0.95:
@@ -3899,6 +3941,7 @@ class Track(tk.Canvas):
             self._wave_ids = [i for i in self.find_all() if i not in before]
             self._wave_key = key
         self._draw_over(W, H, body, v1)
+        self._sync_sbar()
 
     def _draw_under(self, W, body, v1):
         # --- 区間の色帯 (波形の下地)
@@ -4823,8 +4866,8 @@ class App(_TkBase):
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 境目(緑の線・範囲の端)をドラッグ: 境目を動かす / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
-                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+                 "Shift+ホイール・右ドラッグ・下のバー: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
         def _toggle_keys(btn):
             if self.keys_lbl.winfo_ismapped():
                 self.keys_lbl.pack_forget()
@@ -4841,8 +4884,11 @@ class App(_TkBase):
 
         self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準の映像)"),
                    "jp": Track(self.manual, self, "jp", "日本語の録画")}
-        self.tr["en"].pack(fill="x", padx=6, pady=(2, 2))
-        self.tr["jp"].pack(fill="x", padx=6, pady=(2, 2))
+        for k in ("en", "jp"):
+            t = self.tr[k]
+            t.pack(fill="x", padx=6, pady=(2, 0))
+            t.sbar = ttk.Scrollbar(self.manual, orient="horizontal", command=t.xview)   # 波形の横スクロール
+            t.sbar.pack(fill="x", padx=6, pady=(0, 2))
 
         mid = ttk.Frame(self.manual, padding=4)
         mid.pack(fill="x")
@@ -7101,8 +7147,73 @@ class App(_TkBase):
 
     def drag_hint(self, h):
         if h[0] == "pt":
-            return "ドラッグ: 区間の境目を動かす(音の合わせ方はそのまま) / Shift+ドラッグ: こちら側だけ動かす(音のずれを直す) / ダブルクリック: 数字で直す"
-        return "ドラッグ: この範囲の端を動かす / ダブルクリック: 数字で直す"
+            return "ドラッグ: この線だけ動かす(合わせる位置を直す) / Shift+ドラッグ: 上下の線を一緒に動かす(区間の境目だけ動かす) / ダブルクリック: 数字で直す / 右クリック: メニュー"
+        return "ドラッグ: この範囲の端を動かす / ダブルクリック: 数字で直す / 右クリック: メニュー"
+
+    # ---------- 波形の上の右クリックメニュー ----------
+    def _pair_of(self, it):
+        """CM(またはカット)と同じ境目にある、相方のカット(またはCM)。自動合わせは、見つからなかった場面を
+        「英語側のカット + 日本語側のCM」の組にすることがある。"""
+        for p in (i for i in self.items if i["k"] == "pt"):
+            cuts, cms = self._linked(self.items, p)
+            if any(c is it for c in cuts + cms):
+                return [c for c in (cms if it["k"] == "cut" else cuts)]
+        return []
+
+    def track_menu(self, k, t, h, x_root, y_root):
+        n = h[1] if h else None
+        if n is None:      # 線の上でなければ、その時刻にかかっている範囲(CM・カット・暗転)
+            for q, it in enumerate(self.items):
+                a, b = (("en0", "en1") if k == "en" else ("jp0", "jp1"))
+                if a in it and min(it[a], it[b]) <= t <= max(it[a], it[b]):
+                    n = q
+                    break
+        mnu = tk.Menu(self, tearoff=0)
+        if n is not None:
+            it = self.items[n]
+            self.select_item(n)
+            kind = it["k"]
+
+            def remove(extra=()):
+                ids = {id(it)} | {id(x) for x in extra}
+                self.items = [i for i in self.items if id(i) not in ids]
+                self.auto_flags = None
+                self.rebuild()
+                msg = f"{self.KIND_JA[kind]}の指定を消しました (Ctrl+Z で元に戻せます)"
+                if self.warns:
+                    msg += "。前後のつながりを確かめてください"
+                self.say(msg)
+            if kind == "cm":
+                pair = self._pair_of(it)
+                mnu.add_command(label="CMではない (この範囲も使う)" + ("  ※英語側のカットも一緒に消します" if pair else ""),
+                                command=lambda: remove(pair))
+            elif kind == "cut":
+                pair = self._pair_of(it)
+                mnu.add_command(label="カットではない (ここにも日本語の音を入れる)" + ("  ※日本語側のCMも一緒に消します" if pair else ""),
+                                command=lambda: remove(pair))
+                eng = it.get("audio") == "english"
+
+                def toggle():
+                    it["audio"] = "silence" if eng else "english"
+                    self.auto_flags = None
+                    self.rebuild()
+                mnu.add_command(label="この範囲の音声: 無音にする" if eng else "この範囲の音声: 英語版の音声を流す", command=toggle)
+            elif kind == "pt":
+                mnu.add_command(label="この『同じ場面』の点を消す", command=remove)
+            else:
+                mnu.add_command(label="この「暗転・長さ違い」の指定を消す", command=remove)
+            mnu.add_command(label="数字で直す…", command=self.edit_item)
+            mnu.add_separator()
+        tr = self.tr[k]
+        mnu.add_command(label="ここを拡大", command=lambda: self.zoom(k, 0.4, t))
+        mnu.add_command(label="全体を表示", command=self.fit_all)
+        mnu.add_command(label="ここに赤いカーソルを置く", command=lambda: self.set_cursor(k, t))
+        if tr.selr:
+            mnu.add_command(label="範囲の選択を解除", command=lambda: (setattr(tr, "selr", None), tr.redraw()))
+        try:
+            mnu.tk_popup(x_root, y_root)
+        finally:
+            mnu.grab_release()
 
     def select_item(self, n):
         try:
@@ -7196,7 +7307,7 @@ class App(_TkBase):
         self.items = new
         it = new[h[1]]
         t_now = it[k] if h[0] == "pt" else it[h[2]]
-        what = ("こちら側だけ" if solo else "境目を") if h[0] == "pt" else "端を"
+        what = ("この線を" if solo else "上下一緒に") if h[0] == "pt" else "端を"
         for kk, tr in self.tr.items():
             tr.drag_note = (t_now, f"{what} {d:+.2f}秒") if kk == k else None
         m = self.media
