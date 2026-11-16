@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 32       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 33       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1244,6 +1244,138 @@ def _refine_offsets(segs, esl, jsl, fs, rms_thr):
             out.append(ns)
             prev_je = js + (x1 - x0)
     segs[:] = out
+
+
+def _flux(x, fs):
+    """音の「立ち上がり」の強さ(帯域ごと、1秒に200コマ)。声や音量のちがう吹き替えどうしでも、曲や効果音の出だしは同じ所に出る。"""
+    hop, n = int(round(fs / 200)), 128
+    if len(x) < n + hop:
+        return np.zeros((40, 0))
+    k = (len(x) - n) // hop + 1
+    idx = np.arange(n)[None, :] + hop * np.arange(k)[:, None]
+    mag = np.abs(np.fft.rfft(x[idx] * np.hanning(n), axis=1))[:, 2:42]
+    mag = np.log1p(mag / (np.median(mag) * 4 + 1e-9))
+    return np.maximum(np.diff(mag, axis=0), 0.0).T
+
+
+def _recheck_wide(segs, esl, jsl, fs, rms_thr):
+    """時間差が一定の区間を、広い幅(±1.5秒)で測り直し、0.3秒以上ずれたままになっている所を直す。
+    会話ばかりで音の手がかりが弱い場面は、となりのはっきり合う場面の時間差をそのまま当てはめているので、
+    その間に英語版だけ少し長い所があると、1秒近くずれたままになる(波形の一致では弱すぎて見えない)。
+    音の立ち上がり(_flux)の一致を 6秒の窓・3秒おきに測り、同じずれが 5回以上続けて出たときだけ、その範囲の時間差を直す。"""
+    WL, RAD, FPS, TOL = 6.0, 1.5, 200, 0.03
+    n, m = int(WL * FPS), int(RAD * FPS)
+
+    def corr(a, B, k0, k1):
+        """a(帯域×n) を B の中でずらして、ずらし幅ごとの一致を返す。"""
+        a = a - a.mean(1, keepdims=True)
+        na = float(np.linalg.norm(a))
+        out = np.full(k1 - k0, -1.0)
+        if na < 1e-9:
+            return out
+        for q, k in enumerate(range(k0, k1)):
+            if k < 0 or k + a.shape[1] > B.shape[1]:
+                continue
+            b = B[:, k:k + a.shape[1]]
+            b = b - b.mean(1, keepdims=True)
+            out[q] = float((a * b).sum() / (na * float(np.linalg.norm(b)) + 1e-9))
+        return out
+    out = []
+    for sg in segs:
+        d = sg["en_end"] - sg["en_start"]
+        if d < 30.0 or sg.get("jp_end") is not None:
+            out.append(sg)
+            continue
+        o = sg["jp_start"] - sg["en_start"]
+        E = _flux(esl(sg["en_start"], d), fs)
+        J = _flux(jsl(sg["jp_start"] - RAD - 0.5, d + 2 * RAD + 1.0), fs)
+        j0 = int(round((RAD + 0.5) * FPS))              # J の中で、E の先頭に当たる位置
+        smp = []
+        for t in np.arange(0.0, d - WL, 3.0):
+            if float(np.sqrt((esl(sg["en_start"] + t, WL) ** 2).mean())) < rms_thr:
+                continue
+            i0 = int(t * FPS)
+            c = corr(E[:, i0:i0 + n], J, j0 + i0 - m, j0 + i0 + m + 1)
+            k = int(c.argmax())
+            z = (c[k] - np.median(c)) / (c.std() + 1e-9)
+            if z >= 5.0 and 2 <= k <= 2 * m - 2:
+                smp.append((float(t), (k - m) / FPS))
+        groups, cur, pend = [], None, []
+        for i, (t, lg) in enumerate(smp):
+            if cur is not None and abs(lg - float(np.median([smp[q][1] for q in cur]))) <= TOL:
+                cur.append(i)
+                pend = []
+            else:
+                pend.append(i)
+                if len(pend) >= 2 and abs(smp[pend[-1]][1] - smp[pend[-2]][1]) <= TOL:
+                    cur = pend[-2:]
+                    groups.append(cur)
+                    pend = []
+        mg = []
+        for g in groups:
+            a_ = float(np.median([smp[q][1] for q in g]))
+            if abs(a_) < 0.3:
+                a_ = 0.0                                # 小さなずれは、ここでは扱わない(_refine_offsets の仕事)
+            elif len(g) < 5:
+                continue                                # 大きなずれは、5回以上続けて測れたときだけ信じる
+            if mg and abs(a_ - mg[-1]["a"]) < TOL:
+                mg[-1]["t1"] = smp[g[-1]][0]
+            else:
+                mg.append({"a": a_, "t0": smp[g[0]][0], "t1": smp[g[-1]][0]})
+        if not any(g["a"] for g in mg):
+            out.append(sg)
+            continue
+        bnd = [0.0]
+        for g1, g2 in zip(mg, mg[1:]):                  # 切り替わる所: 2秒の窓で、どちらの時間差によく合うかを比べる
+            ts = np.arange(max(g1["t1"], 0.0), min(g2["t0"] + WL, d - 2.0), 0.25)
+            pf = []
+            for t in ts:
+                i0 = int(t * FPS)
+                a = E[:, i0:i0 + 2 * FPS]
+                c1 = corr(a, J, j0 + i0 + int(round(g1["a"] * FPS)), j0 + i0 + int(round(g1["a"] * FPS)) + 1)[0]
+                c2 = corr(a, J, j0 + i0 + int(round(g2["a"] * FPS)), j0 + i0 + int(round(g2["a"] * FPS)) + 1)[0]
+                pf.append(0.0 if max(c1, c2) < 0.1 else c1 - c2)
+            pf = np.array(pf)
+            if not len(pf) or np.abs(pf).max() < 0.05:
+                x = (g1["t1"] + WL + g2["t0"]) / 2
+            else:
+                sc = np.array([pf[:i].sum() - pf[i:].sum() for i in range(len(pf) + 1)])
+                ks = np.flatnonzero(sc >= sc.max() - 1e-9)      # どちらとも言えない所(会話だけ)が続くと、同点が並ぶ → そのまん中
+                k = int((ks[0] + ks[-1]) // 2)                  # (このあと _splice_at_quiet が、近くの音の切れ目へ動かす)
+                x = float(ts[k] + 1.0 if k < len(ts) else ts[-1] + 1.25)     # 窓のまん中あたりで切り替える
+            bnd.append(min(max(x, bnd[-1] + 1.0), d - 1.0))
+        bnd.append(d)
+        prev_je = None
+        for q, (g, x0, x1) in enumerate(zip(mg, bnd, bnd[1:])):
+            es, ee = sg["en_start"] + x0, sg["en_start"] + x1
+            js = es + o + g["a"]
+            if prev_je is not None and js < prev_je:      # 日本語が重なる(英語版のほうが少し長い) → その分、英語側に間をあける
+                es, js = es + (prev_je - js), prev_je
+            if ee - es < 0.5:
+                continue
+            ns = dict(sg, en_start=round(float(es), 4), en_end=round(float(ee), 4), jp_start=round(float(js), 4), jp_end=None)
+            if g["a"]:
+                ns["flag"] = "・".join(x for x in (sg.get("flag", ""), "広く測り直して合わせました") if x)
+            if q > 0:
+                ns.pop("trim_s", None)
+            if q < len(mg) - 1:
+                ns.pop("trim_e", None)
+            out.append(ns)
+            prev_je = js + (ee - es)
+    # 時間差を直した区間が、前後の区間と日本語側で重なったら(同じ音が2回出る)、重なるぶんだけ英語側に間をあける
+    fixed = []
+    for sg in out:
+        p = fixed[-1] if fixed else None
+        if p is not None and "広く測り直して" in (p.get("flag", "") + sg.get("flag", "")):
+            pe = p["jp_end"] if p["jp_end"] is not None else p["jp_start"] + (p["en_end"] - p["en_start"])
+            ov = pe - sg["jp_start"]
+            if 1e-3 < ov < 2.0 and sg["jp_start"] > p["jp_start"]:
+                if "広く測り直して" in p.get("flag", "") and p["jp_end"] is None and p["en_end"] - p["en_start"] > ov + 1.0:
+                    p["en_end"] = round(p["en_end"] - ov, 4)             # 直した区間の終わりを削る
+                elif sg["jp_end"] is None and sg["en_end"] - sg["en_start"] > ov + 1.0:
+                    sg = dict(sg, en_start=round(sg["en_start"] + ov, 4), jp_start=round(sg["jp_start"] + ov, 4))
+        fixed.append(sg)
+    segs[:] = fixed
 
 
 def _refine_edges(segs, esl, jsl, fs, rms_thr):
@@ -2055,6 +2187,8 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 where = "、".join(_fmt_t(sg_["jp_start"] - o_) for o_ in others[:2])
                 sg_["flag"] = "・".join(x for x in (sg_["flag"], f"似た場所が他にもあります(英語版 {where})") if x)
 
+    _recheck_wide(segs, esl, jsl, fs, rms_thr)
+    _bridge_same_scene(segs)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr)
     _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
 
@@ -2717,7 +2851,9 @@ def combined_align(en, jp, progress=lambda f, m: None):
     for s in out:
         s["note"] = "自動(音+映像)"
     # 区間の中で時間差が少しだけ変わる所(0.1秒ほどのずれ)を測り直して、そこで分ける
+    _recheck_wide(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     _refine_offsets(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
+    _bridge_same_scene(out)      # 時間差を直した結果、前の区間とちょうどつながるようになった所
     _refine_edges(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
