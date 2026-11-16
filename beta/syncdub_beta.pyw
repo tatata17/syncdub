@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 34       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 35       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1299,10 +1299,10 @@ def _recheck_wide(segs, esl, jsl, fs, rms_thr):
             c = corr(E[:, i0:i0 + n], J, j0 + i0 - m, j0 + i0 + m + 1)
             k = int(c.argmax())
             z = (c[k] - np.median(c)) / (c.std() + 1e-9)
-            if z >= 4.0 and 2 <= k <= 2 * m - 2:      # 1回ごとの基準はゆるく、「同じずれが続く」ことで確かめる
-                smp.append((float(t), (k - m) / FPS))
+            if z >= 4.0 and 2 <= k <= 2 * m - 2:
+                smp.append((float(t), (k - m) / FPS, float(z)))
         groups, cur, pend = [], None, []
-        for i, (t, lg) in enumerate(smp):
+        for i, (t, lg, _z) in enumerate(smp):
             if cur is not None and abs(lg - float(np.median([smp[q][1] for q in cur]))) <= TOL:
                 cur.append(i)
                 pend = []
@@ -1317,8 +1317,16 @@ def _recheck_wide(segs, esl, jsl, fs, rms_thr):
             a_ = float(np.median([smp[q][1] for q in g]))
             if abs(a_) < 0.3:
                 a_ = 0.0                                # 小さなずれは、ここでは扱わない(_refine_offsets の仕事)
-            elif len(g) < 5:
-                continue                                # 大きなずれは、5回以上続けて測れたときだけ信じる
+            else:
+                # 大きなずれは、同じ値が5回以上続けて測れたときだけ信じる。基準は2段:
+                #  きびしい基準(z 5 以上)だけで5回 → 直す
+                #  ゆるい基準(z 4 以上)を混ぜて5回 → いまの時間差が「合っていなさそうな所」に限って直す
+                #    (その範囲に、いまの時間差をきびしい基準で支える測定が1つもなく、ずれのほうにはきびしい基準の測定が2回以上ある)
+                n_strict = sum(1 for q in g if smp[q][2] >= 5.0)
+                t_a, t_b = smp[g[0]][0], smp[g[-1]][0]
+                held = any(z_ >= 5.0 and abs(l_) < 0.3 and t_a <= t_ <= t_b for t_, l_, z_ in smp)
+                if not (n_strict >= 5 or (len(g) >= 5 and n_strict >= 2 and not held)):
+                    continue
             if mg and abs(a_ - mg[-1]["a"]) < TOL:
                 mg[-1]["t1"] = smp[g[-1]][0]
             else:
