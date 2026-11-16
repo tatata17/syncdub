@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 29       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 30       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1735,7 +1735,11 @@ def auto_align(en, jp, progress=lambda f, m: None):
             runs_ = _runs_pos()
             for i_ in range(len(runs_) - 1):
                 a_, b_ = _span(runs_[i_]), _span(runs_[i_ + 1])
-                if b_[0] < a_[1] - 1.0:
+                # 窓の中心で比べているので、境目をまたぐ窓のぶん、見かけの逆戻りが窓の長さ近くまで出る。
+                # 英語側だけの場面(日本語版でカットされた場面)の前後は、日本語がちょうど続くので、これに当たりやすい。
+                # どちらもしっかりした区間(3窓以上)なら、窓の長さまでの逆戻りは偽の一致とみなさない(重なりは 6.5 で引き直す)
+                solid = min(runs_[i_][2] - runs_[i_][1], runs_[i_ + 1][2] - runs_[i_ + 1][1]) + 1 >= 3
+                if b_[0] < a_[1] - (max(1.0, WL) if solid else 1.0):
                     weak = runs_[i_] if a_[2] < b_[2] else runs_[i_ + 1]
                     lab[weak[1]:weak[2] + 1] = np.where(lab[weak[1]:weak[2] + 1] == weak[0], -1, lab[weak[1]:weak[2] + 1])
                     changed = True
