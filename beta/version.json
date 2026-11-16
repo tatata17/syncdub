@@ -1,1 +1,1 @@
-{"version": "2026.11.16.42", "beta": 23, "file": "beta/syncdub_beta.pyw", "sha256": "9e4518391b90ba1c9b2a53060255828862c895b0198c00b999981ce7c7a6b787", "notes": "正式版 v2026.11.16.42 と同じ内容です"}
+{"version": "2026.11.16.42", "beta": 24, "file": "beta/syncdub_beta.pyw", "sha256": "32cdff7fb0a1a84d164d31fb7593564facedcc67af7b51cc132a264a9d8b41d8", "notes": "保存先が英語版・日本語の録画そのものになっているときは、合成しない(元のファイルを守る)"}

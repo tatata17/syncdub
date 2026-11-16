@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 23       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 24       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -7322,6 +7322,18 @@ class App(_TkBase):
             if not self.out_path.get():
                 return
         out = Path(self.out_path.get())
+        # 保存先が、いま使っている英語版・日本語の録画そのものなら、合成しない(元のファイルを壊さないため)
+        for src, what in ((self.en_var.get(), "英語版の映像"), (self.jp_var.get(), "日本語の録画")):
+            try:
+                same = bool(src) and os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(str(out)))
+                same = same or (bool(src) and out.exists() and os.path.samefile(src, out))
+            except OSError:
+                same = False
+            if same:
+                messagebox.showwarning("保存先を使えません",
+                                       f"保存先が、{what}と同じファイルになっています。\n元のファイルを上書きしてしまうので、合成できません。\n\n"
+                                       "「変更」で、別の名前か別のフォルダにしてください。")
+                return
         if out.exists() and not messagebox.askyesno("上書き確認", f"{out.name} は既にあります。上書きしますか?"):
             return
         if out.exists():      # 前に作った動画をプレーヤーなどで開いたままだと、上書きできずに失敗する → 始める前に知らせる
