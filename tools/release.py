@@ -53,6 +53,8 @@ def main():
     print(f"{out.relative_to(ROOT)} を書きました: v{ver}" + (f" ベータ{build}" if beta else ""))
     if not beta:
         print("忘れずに: docs/changelog.json の先頭に履歴を1件追記する")
+    else:
+        print("忘れずに: ベータの機能を変えたら docs/beta.html と、docs/DEVELOPING.md の「ベータ版にだけ入っている変更」の一覧も更新する")
 
 
 if __name__ == "__main__":

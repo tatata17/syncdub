@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 28       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 29       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -713,6 +713,68 @@ def ver_label(info=None):
     if info is None:
         return f"v{APP_VERSION}" + (f" ベータ{BETA_BUILD}" if BETA_REVIEW else "")
     return f"v{info['version']}" + (f" ベータ{info.get('beta', 0)}" if BETA_REVIEW else "")
+
+
+# ---------- 想定外のエラーの記録と、診断情報 ----------
+ERROR_LOG = "syncdub_error.log"
+ERROR_LOG_MAX = 300_000      # これを超えたら、古い方を捨てて後ろ半分だけ残す
+
+
+def error_log_path():
+    return Path(__file__).resolve().parent / ERROR_LOG
+
+
+def log_exception(where, exc_type, exc, tb):
+    """つかまえられなかった例外を、本体と同じフォルダのログに書き足す。書けなくても、ここでは何も起こさない。"""
+    import traceback
+    try:
+        text = (f"\n==== {datetime.now():%Y-%m-%d %H:%M:%S}  {ver_label()}  ({where}) ====\n"
+                + "".join(traceback.format_exception(exc_type, exc, tb)))
+        f = error_log_path()
+        old = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        if len(old) > ERROR_LOG_MAX:
+            old = "(古い記録は省きました)\n" + old[-ERROR_LOG_MAX // 2:]
+        f.write_text(old + text, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sys.__stderr__.write(text)
+    except Exception:  # noqa: BLE001  .pyw には出力先がない
+        pass
+
+
+def install_exception_log():
+    """画面の処理・作業スレッドのどちらで起きた例外も、ログに残るようにする。"""
+    sys.excepthook = lambda t, e, tb: log_exception("本体", t, e, tb)
+    threading.excepthook = lambda a: log_exception(f"作業スレッド {a.thread.name if a.thread else ''}", a.exc_type, a.exc_value, a.exc_traceback)
+
+
+def diagnostic_text(extra=()):
+    """不具合の報告に付ける診断情報(版・環境・設定・直近の警告・エラーの記録)を、1つの文面にする。"""
+    import platform
+    out = [f"syncdub 診断情報  {datetime.now():%Y-%m-%d %H:%M:%S}",
+           f"版: {ver_label()}  (ファイル: {Path(__file__).name})",
+           f"Python: {sys.version.split()[0]}  /  {platform.platform()}"]
+    for tool in ("ffmpeg", "ffprobe"):
+        try:
+            r = subprocess.run([tool, "-version"], capture_output=True, text=True, timeout=15)
+            out.append(f"{tool}: " + ((r.stdout or r.stderr).splitlines() or ["(版が分かりません)"])[0])
+        except Exception as e:  # noqa: BLE001
+            out.append(f"{tool}: 動かせません ({type(e).__name__}: {e})")
+    out.append("\n---- 設定 (syncdub_settings.json) ----")
+    try:
+        out.append((Path(__file__).resolve().parent / "syncdub_settings.json").read_text(encoding="utf-8"))
+    except OSError:
+        out.append("(設定ファイルはありません)")
+    for title, body in extra:
+        out.append(f"\n---- {title} ----")
+        out.append(body or "(なし)")
+    out.append(f"\n---- エラーの記録 ({ERROR_LOG}) の終わりの方 ----")
+    try:
+        out.append(error_log_path().read_text(encoding="utf-8", errors="replace")[-20000:])
+    except OSError:
+        out.append("(エラーの記録はありません)")
+    return "\n".join(out) + "\n"
 
 
 def download_update_source(info, ref):
@@ -5034,6 +5096,8 @@ class App(_TkBase):
         m.add_separator()
         m.add_command(label="記録と比べる (回帰チェック)", command=self._regress_window)
         m.add_command(label="記録のフォルダを開く", command=self._open_records)
+        m.add_separator()
+        m.add_command(label="診断情報を保存… (不具合の報告用)", command=self._save_diagnostic)
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
@@ -6745,8 +6809,53 @@ class App(_TkBase):
         cur.update(kw)
         try:
             f.write_text(json.dumps(cur), encoding="utf-8")
-        except OSError:
+        except OSError as e:
+            if not getattr(self, "_settings_warned", False):      # 知らせるのは、起動している間に1回だけ
+                self._settings_warned = True
+                msg = (f"設定を保存できませんでした。次に起動したとき、設定が元に戻ります。\n\n場所: {f}\n理由: {e}\n\n"
+                       "本体を、書き込みのできるフォルダ(デスクトップやドキュメントなど)に置いてください。")
+                self.after(100, lambda: messagebox.showwarning("syncdub", msg))
+
+    # ---------- 想定外のエラーの記録・診断情報 ----------
+    def report_callback_exception(self, exc, val, tb):
+        """画面の操作の途中で起きた、想定外のエラー(tkinter がここに知らせてくる)。"""
+        log_exception("画面の操作", exc, val, tb)
+        try:
+            self.say(f"想定外のエラーが起きました ({exc.__name__}: {val})。記録: {error_log_path()}")
+        except Exception:  # noqa: BLE001
             pass
+
+    def _notify_error_log(self):
+        """前回までに記録されたエラーがあって、まだ知らせていなければ、1回だけ知らせる。"""
+        f = error_log_path()
+        try:
+            mark = f"{f.stat().st_size}"
+        except OSError:
+            return
+        if self._setting("error_log_seen", "") == mark:
+            return
+        self._save_settings(error_log_seen=mark)
+        messagebox.showinfo("syncdub", "前回、想定外のエラーが記録されました。\n\n"
+                            f"記録: {f}\n\n不具合を報告するときは、「更新・設定」→「診断情報を保存」でできるファイルを付けてください。")
+
+    def _save_diagnostic(self):
+        last = getattr(self, "_beta_last", None) or {}
+        extra = [("読み込んでいる素材", "\n".join(f"{k}: {v}" for k, v in (("英語版", self.en_var.get()), ("日本語の録画", self.jp_var.get()),
+                                                                    ("保存先", self.out_path.get())) if v)),
+                 ("直近の警告", "\n".join(self.warns)),
+                 ("直近の自動チェック", "\n".join([str(last.get("out", ""))] + [str(i) for i in last.get("issues", [])]
+                                                + [str(n) for n in last.get("notes", [])]).strip())]
+        p = filedialog.asksaveasfilename(title="診断情報を保存", defaultextension=".txt", filetypes=[("テキスト", "*.txt")],
+                                         initialfile=f"syncdub_診断情報_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        if not p:
+            return
+        try:
+            Path(p).write_text(diagnostic_text(extra), encoding="utf-8")
+        except OSError as e:
+            messagebox.showerror("syncdub", f"保存できませんでした: {e}")
+            return
+        messagebox.showinfo("syncdub", f"保存しました。\n{p}\n\nファイルの場所(番組名が入ることがあります)が書かれています。"
+                            "人に送る前に、中身を確かめてください。")
 
     def _save_auto(self):
         self._save_settings(auto_update=self.auto_upd.get())
@@ -7873,8 +7982,10 @@ class App(_TkBase):
 
 
 if __name__ == "__main__":
+    install_exception_log()
     set_taskbar_identity()
     app = App()
+    app.after(800, app._notify_error_log)
     app.after(500, lambda: set_window_taskbar_identity(app))
     if len(sys.argv) > 1:
         app.load_project(sys.argv[1])
