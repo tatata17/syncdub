@@ -224,6 +224,11 @@ def load_segments(proj, en_dur, en_fps, jp_fps):
         fit = d.get("fit", "stretch")
         if fit not in ("stretch", "pad", "trim"):
             raise ValueError(f"segments[{i}]: fit は stretch/pad/trim")
+        if es < 0:        # 映像の先頭より前の部分は使えない(残すと、そのぶん全体が後ろへずれる)
+            if ee <= 0:
+                continue
+            js += -es * ((je - js) / (ee - es) if je is not None else 1.0)
+            es = 0.0
         segs.append(Seg(es, ee, js, je, fit, d.get("note", "")))
     segs.sort(key=lambda s: s.en_start)
     for a, b in zip(segs, segs[1:]):
@@ -637,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 30       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 31       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3627,6 +3632,12 @@ def build_from_items(items, en_rng, jp_rng):
         if x1 > jp_rng[1]:
             t1 -= (x1 - jp_rng[1]) / ratio
             x1 = jp_rng[1]
+        # 映像の先頭(0秒)より前には、音を置けない。英語版の音が映像より少し早く始まる素材で、0秒より前の切れ端ができると、
+        # 合成のときにそのぶん全体が後ろへずれてしまう
+        if t0 < 0.0:
+            d0 = min(-t0, t1 - t0)
+            t0 += d0
+            x0 += d0 * ratio
         if t1 - t0 < 0.05:
             continue
         segs.append({"en_start": t0, "en_end": t1, "jp_start": x0,
