@@ -637,7 +637,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 27       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 28       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3745,6 +3745,8 @@ class Track(tk.Canvas):
         self._pan = None
         self._grab = None  # つまんで動かしている最中の情報 (つまみ, 押した所のx, 動いたか)
         self.drag_note = None  # 動かしている最中に、つまみの横に出す文字 (時刻, 文字)
+        self.hover = None      # マウスが乗っている「つまめる線」 (つまみ, 時刻)
+        self.bind("<Leave>", lambda e: self._set_hover(None))
         self.bind("<Motion>", self.on_hover)
         self.bind("<Double-Button-1>", self.on_double)
         self.bind("<Configure>", lambda e: self.redraw())
@@ -3768,17 +3770,30 @@ class Track(tk.Canvas):
     # --- マウス: クリック=カーソル / ドラッグ=範囲選択 / ホイール=拡大縮小 / 右ドラッグ=横移動
     def _handle_at(self, x):
         """x の近く(5ピクセル以内)にある、つまんで動かせる境目。なければ None。"""
+        best = self._handle_t_at(x)
+        return best[0] if best else None
+
+    def _handle_t_at(self, x):
+        """_handle_at と同じものを (つまみ, 時刻) で返す。"""
         best = None
         for t, h in self.app.drag_handles(self.key):
             d = abs(self.x_of(t) - x)
             if d <= 5 and (best is None or (h[0] == "pt", -d) > (best[1][0] == "pt", -best[0])):
-                best = (d, h)
-        return best[1] if best else None
+                best = (d, h, t)
+        return (best[1], best[2]) if best else None
+
+    def _set_hover(self, ht):
+        if ht != self.hover:
+            self.hover = ht
+            if not self._grab:
+                self.redraw(fast=True)       # 波形は描き直さず、線だけ
 
     def on_hover(self, e):
         if self._grab or self._press:
             return
-        h = self._handle_at(e.x) if e.y < self.winfo_height() - 22 else None
+        ht = self._handle_t_at(e.x) if e.y < self.winfo_height() - 22 else None
+        h = ht[0] if ht else None
+        self._set_hover(ht)
         want = "sb_h_double_arrow" if h else ""
         if self["cursor"] != want:
             self.config(cursor=want)
@@ -3798,6 +3813,7 @@ class Track(tk.Canvas):
         h = self._handle_at(e.x) if e.y < self.winfo_height() - 22 else None
         if h:
             self._grab = [h, e.x, False]
+            self.hover = None
             self.app.drag_begin(h)
             return
         self._press = (e.x, False)
@@ -4031,10 +4047,13 @@ class Track(tk.Canvas):
                 self.create_line(x, 0, x, body, fill="#1a9e57", width=2)
                 self.create_rectangle(x, 0, x + 8 + 7 * len(label), 15, fill="#1a9e57", outline="")
                 self.create_text(x + 4, 8, text=label, anchor="w", fill="white", font=("", 8, "bold"))
+        if self.hover and not self._grab:      # マウスが乗っている「つまめる線」を太く
+            x = self.x_of(self.hover[1])
+            self.create_line(x, 0, x, body, fill="#ff8a00", width=4)
         x = self.x_of(self.cursor)
         self.create_line(x, 0, x, body, fill="#e0262d", width=1)
         if self.drag_note:
-            xn = min(max(self.x_of(self.drag_note[0]) + 8, 4), W - 150)
+            xn = min(max(self.x_of(self.drag_note[0]) + 8, 4), max(W - 300, 4))
             tid = self.create_text(xn + 4, 30, text=self.drag_note[1], anchor="w", fill="#0b6b3a", font=("", 9, "bold"))
             bb = self.bbox(tid)
             if bb:      # 波形の上でも読めるように、白い下地を敷く
@@ -4866,7 +4885,7 @@ class App(_TkBase):
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 一覧で選んで←→(または Alt+←→): 線を1コマ動かす(Shift: 0.1秒) / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
                  "Shift+ホイール・右ドラッグ・下のバー: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
         def _toggle_keys(btn):
             if self.keys_lbl.winfo_ismapped():
@@ -4921,7 +4940,7 @@ class App(_TkBase):
         ttk.Button(r1, text="A 音で探して合わせる", width=20, command=self.auto_snap).pack(side="left")
         ttk.Button(r1, text="S この2つは『同じ場面』", width=22, command=self.add_point).pack(side="left", padx=6, ipady=3)
         self.refine_v = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g1, text="登録するとき、音で微調整する",
+        ttk.Checkbutton(g1, text="登録するとき・線をドラッグしたとき、音で微調整する",
                         variable=self.refine_v).pack(anchor="w", padx=8, pady=(0, 4))
         g2 = ttk.LabelFrame(ctr, text=" ② 特別な部分 (先に波形をドラッグして範囲を選ぶ) ")
         g2.pack(fill="x")
@@ -6956,8 +6975,17 @@ class App(_TkBase):
             return
         ks = ev.keysym
         k = self.active
+        alt = bool(ev.state & 0x20008)      # Alt (Windows は 0x20000、X11 は 0x8)
+        if ks in ("Left", "Right") and (alt or w is getattr(self, "itree", None)) and self.nudge_target() is not None:
+            d = -1 if ks == "Left" else 1    # 選んでいる『同じ場面』の線を、少しだけ動かす
+            fps = self.fps(k)
+            self.nudge(d * (0.1 if ev.state & 0x1 else 10 / fps if ev.state & 0x4 else 1 / fps))
+            return "break"
         if isinstance(w, ttk.Treeview) and ks in ("Up", "Down", "Left", "Right"):
             return  # 一覧の操作中は矢印キーを一覧に任せる
+        if ks == "Escape" and getattr(self, "_drag0", None):
+            self.drag_cancel()
+            return "break"
         if ks in ("Left", "Right"):
             d = -1 if ks == "Left" else 1
             if ev.state & 0x1:
@@ -7205,6 +7233,13 @@ class App(_TkBase):
             mnu.add_command(label="数字で直す…", command=self.edit_item)
             mnu.add_separator()
         tr = self.tr[k]
+        if all(self.media.values()):
+            o = "日本語" if k == "en" else "英語"
+
+            def add_here():
+                self.set_cursor(k, t)
+                self.add_point()
+            mnu.add_command(label=f"ここに『同じ場面』を追加 ({o}側は赤いカーソルの位置)", command=add_here)
         mnu.add_command(label="ここを拡大", command=lambda: self.zoom(k, 0.4, t))
         mnu.add_command(label="全体を表示", command=self.fit_all)
         mnu.add_command(label="ここに赤いカーソルを置く", command=lambda: self.set_cursor(k, t))
@@ -7308,8 +7343,12 @@ class App(_TkBase):
         it = new[h[1]]
         t_now = it[k] if h[0] == "pt" else it[h[2]]
         what = ("この線を" if solo else "上下一緒に") if h[0] == "pt" else "端を"
+        note = f"{what} {d:+.2f}秒"
+        if h[0] == "pt" and solo:        # この線から始まる区間の時間差(日本語 − 英語)がどう変わるか
+            b0 = self._drag0[0][h[1]]
+            note += f"  (時間差 {b0['jp'] - b0['en']:+.2f} → {it['jp'] - it['en']:+.2f}秒)"
         for kk, tr in self.tr.items():
-            tr.drag_note = (t_now, f"{what} {d:+.2f}秒") if kk == k else None
+            tr.drag_note = (t_now, note) if kk == k else None
         m = self.media
         if all(m.values()):
             self.segs, self.extra_segs, self.warns = build_from_items(
@@ -7322,7 +7361,7 @@ class App(_TkBase):
         self._refresh_tracks(fast=True)
         for kk in moved:
             self.schedule_preview(kk)
-        self.status.config(text=f"{what} {d:+.2f}秒 動かしています (離すと決まります。Ctrl+Z で元に戻せます)")
+        self.status.config(text=f"{note} 動かしています (離すと決まります。Esc で取り消し)")
 
     def drag_end(self, k, h, moved):
         if getattr(self, "_drag_pending", None) is not None:
@@ -7339,14 +7378,90 @@ class App(_TkBase):
             self.refresh()
             self.select_item(h[1])
             return
-        self._last = base[1]                     # 元に戻す(Ctrl+Z)で、動かす前に戻れるようにする
+        snap = ""
+        args = getattr(self, "_drag_args", None)
+        if h[0] == "pt" and args and args[1] == h and args[3] and self.refine_v.get() and all(self.media.values()):
+            snap = self._drag_snap(base[0], k, h)
+        self._last = base[1]                     # 元に戻す(Ctrl+Z)で、動かす前に戻れるようにする(音での微調整も込みで1回)
         self.auto_flags = None
         self.rebuild()
         self.select_item(h[1])
         it = self.items[h[1]]
         for kk in (("en", "jp") if h[0] == "pt" else (k,)):      # 時刻の表示欄も、動かした先に合わせる
             self.set_cursor(kk, it[kk] if h[0] == "pt" else it[h[2]])
-        self.say("境目を動かしました (Ctrl+Z で元に戻せます)")
+        self.say("線を動かしました" + snap + " (Ctrl+Z で元に戻せます)")
+
+    def _drag_snap(self, base, k, h):
+        """こちら側だけ動かして離したとき、動かした側を音で微調整する(±0.3秒の中で、はっきり合う所があるときだけ)。
+        戻り値はステータスに足す文字。"""
+        it = self.items[h[1]]
+        o = "jp" if k == "en" else "en"
+        try:
+            r = xcorr_find(self.media[o], it[o], self.media[k], it[k], 2.0, 0.3)
+        except Exception:
+            r = None
+        # 探す幅が ±0.3秒と狭いので、突出度は当てにならない(正しい位置でも 3 前後)。相関の高さだけで決める
+        if not (r and r[1] >= 0.35):
+            return "。音では寄せられませんでした(無音・声だけの場面など)"
+        dd = r[0] - it[k]
+        if abs(dd) < 0.002:
+            return "。音とも合っています"
+        new = self._drag_apply(base, k, h, it[k] - base[h[1]][k] + dd, True)
+        if new is None:
+            return "。音では寄せられませんでした"
+        self.items = new
+        return f"。音で {dd:+.2f}秒 寄せました"
+
+    def drag_cancel(self):
+        """動かしている最中の Esc: 動かす前に戻してやめる。"""
+        if getattr(self, "_drag_pending", None) is not None:
+            self.after_cancel(self._drag_pending)
+            self._drag_pending = None
+        base, self._drag0 = self._drag0, None
+        for tr in self.tr.values():
+            tr.drag_note = None
+            tr._grab = None
+        self.items = base[0]
+        self.refresh()
+        self.say("動かすのをやめました")
+
+    # ---------- 選んでいる『同じ場面』の線を、キーで少しずつ動かす ----------
+    def nudge_target(self):
+        if len(self.itree.selection()) != 1 or not all(self.media.values()):
+            return None
+        n = self.item_idx()
+        return n if n is not None and n < len(self.items) and self.items[n]["k"] == "pt" else None
+
+    def nudge(self, d):
+        import copy, time
+        n, k = self.nudge_target(), self.active
+        h = ("pt", n)
+        now = time.time()
+        g = getattr(self, "_nudge", None)
+        # 同じ線・同じ側を2秒以内に続けて動かしたら、Ctrl+Z では1回分として戻る
+        cont = bool(g and g["key"] == (n, k) and now - g["t"] < 2.0 and g["after"] == self.items)
+        if not cont:
+            g = {"key": (n, k), "base": copy.deepcopy(self.items), "d": 0.0}
+        new = self._drag_apply(g["base"], k, h, g["d"] + d, True)
+        if new is None:
+            self.say("これ以上は動かせません")
+            return
+        g["d"] += d
+        self.items = new
+        self.auto_flags = None
+        self.rebuild(track=not cont)
+        g["after"], g["t"] = copy.deepcopy(self.items), now
+        self._nudge = g
+        self.select_item(n)
+        try:
+            self.itree.focus(str(n))
+        except tk.TclError:
+            pass
+        it, b0 = self.items[n], g["base"][n]
+        self.tr[k].cursor = it[k]
+        self.set_cursor(k, it[k])
+        side = "英語" if k == "en" else "日本語"
+        self.say(f"{side}側の線を {g['d']:+.3f}秒  (時間差 {b0['jp'] - b0['en']:+.2f} → {it['jp'] - it['en']:+.2f}秒)  Tab で動かす側を切り替え")
 
     def add_point(self):
         if not all(self.media.values()):
