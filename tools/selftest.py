@@ -82,7 +82,7 @@ def write_media(path, x):
 
 
 def cases():
-    """[(番号, 名前, 作り方)]。作り方は (英語の音, 日本語の音, 答え, 区間の数) を返す。
+    """[(番号, 名前, 作り方)]。作り方は (英語の音, 日本語の音, 答え, 区間の数[, 境目の前後で採点しない秒数]) を返す。
     答え = [(英語の開始, 英語の終了, 日本語の開始, 速さ)] … 英語の時刻 t は、日本語の 開始 + (t − 英語の開始) × 速さ に当たる。"""
     def mk(seed):
         rng = np.random.default_rng(seed)
@@ -136,16 +136,27 @@ def cases():
         a[int(30 * SR):int(45 * SR)] = 0
         return both(a), np.concatenate([sound(rng, 5), both(a)]), [(0, 70, 5.0, 1.0)], 1
 
+    def c8():      # 音が鳴り続けている途中で、英語側だけ 0.4秒長い。無音をはさまず、前後を少し伸ばしてつなぐ(区間は 3つ)
+        rng, prog, both = mk(8)
+        n = int(90 * SR)
+        t = np.arange(n) / SR
+        a = prog(90) + 0.4 * np.sin(2 * np.pi * 220 * t) * (1 + 0.5 * np.sin(2 * np.pi * 0.7 * t)) + 0.15 * rng.standard_normal(n)
+        k = int(45 * SR)
+        extra = a[k - int(0.4 * SR):k][::-1]
+        return (np.concatenate([both(a[:k]), extra, both(a[k:])]), np.concatenate([sound(rng, 5), both(a)]),
+                [(0, 45, 5.0, 1.0), (45.4, 90.4, 50.0, 1.0)], 3, 9.0)
+
     return [(1, "一定のずれだけ", c1), (2, "日本語側だけ CM (30秒) が入る", c2), (3, "英語側だけの場面 (8秒)", c3),
             (4, "後半ほどずれる (0.1% のドリフト)", c4), (5, "12秒未満の短い CM (8秒)", c5),
-            (6, "英語側だけの場面が2か所 (6秒と10秒)", c6), (7, "途中が声だけの場面 (15秒。切り出さない)", c7)]
+            (6, "英語側だけの場面が2か所 (6秒と10秒)", c6), (7, "途中が声だけの場面 (15秒。切り出さない)", c7),
+            (8, "音の途中で、英語側だけ 0.4秒長い (伸ばしてつなぐ)", c8)]
 
 
 # いまの自動合わせでは通らないと分かっているケースの番号。NG でも終了コードには数えない(通るようになったら、ここから外す)。
 KNOWN_NG = set()
 
 
-def judge(segs, truth, n_exp):
+def judge(segs, truth, n_exp, margin=MARGIN):
     """できた区間を答えと比べる。戻り値 (合格か, 説明の行のリスト)。"""
     out, ok = [], True
     segs = [s for s in segs if s.get("jp_start") is not None]
@@ -162,11 +173,11 @@ def judge(segs, truth, n_exp):
         tr = next(((s, e, j, r) for s, e, j, r in truth if s <= t < e), None)
         g = got(t)
         if tr is None:                       # 日本語版にない所: 区間に入っていてはいけない(境目の近くは見ない)
-            if g is not None and all(abs(t - x) > MARGIN for s, e, _j, _r in truth for x in (s, e)):
+            if g is not None and all(abs(t - x) > margin for s, e, _j, _r in truth for x in (s, e)):
                 bad_cov += 1
             continue
         s, e, j, r = tr
-        if t - s < MARGIN or e - t < MARGIN:
+        if t - s < margin or e - t < margin:
             continue
         n_in += 1
         if g is not None:
@@ -211,12 +222,12 @@ def main():
                 continue
             t0 = time.time()
             try:
-                en_x, jp_x, truth, n_exp = make()
+                en_x, jp_x, truth, n_exp, *more = make()
                 pe, pj = tmp / f"en{num}.mkv", tmp / f"jp{num}.mkv"
                 write_media(pe, en_x)
                 write_media(pj, jp_x)
                 segs = mod.align_for_record(mod.Media(str(pe)), mod.Media(str(pj)), "音")
-                ok, lines = judge(segs, truth, n_exp)
+                ok, lines = judge(segs, truth, n_exp, *more)
             except Exception as e:          # 合わせられなかった・素材を作れなかった、も NG として数える
                 ok, lines = False, [f"    NG: {type(e).__name__}: {e}"]
             known = num in KNOWN_NG

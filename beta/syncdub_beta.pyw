@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 35       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 36       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1573,6 +1573,59 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
     segs[:] = out
 
 
+STRETCH_GAP_MAX = 0.6      # 英語版だけ長い分がこの秒数までなら、無音を入れずに、日本語の音を伸ばしてつなぐ
+STRETCH_GAP_RATE = 0.029   # 伸ばす割合(3%未満。この範囲なら、合成は回転数を変える方式なので、境目でプツッと鳴らない)
+
+
+def _stretch_small_gaps(segs, jsl, jthr):
+    """英語版だけ少し長い所(日本語はひと続き、または同じ所を2回使っている)で、切れ目が日本語の音の鳴っている最中にあるとき、無音をはさむかわりに、
+    前後の日本語の音を少しだけ(3%未満)遅く再生して、その長さを埋める。
+    切れ目が日本語の無音の所にあるときは、何もしない(間が少し長くなるだけで、途切れには聞こえない。口の動きとも合ったまま)。
+    伸ばす範囲では、音の高さがわずかに下がり、口の動きとのずれが最大で「長い分の半分」出る。なので、長い分が大きいとき
+    (STRETCH_GAP_MAX 超)は伸ばさない。"""
+    def jq(t):
+        return float(np.sqrt((jsl(t - 0.1, 0.2) ** 2).mean()))
+    quiet = 0.5 * jthr
+    out = []
+    for q, sg in enumerate(segs):
+        nx = segs[q + 1] if q + 1 < len(segs) else None
+        if nx is None or sg.get("jp_end") is not None or nx.get("jp_end") is not None:
+            out.append(sg)
+            continue
+        d = sg["en_end"] - sg["en_start"]
+        pe = sg["jp_start"] + d
+        g_en, g_jp = nx["en_start"] - sg["en_end"], nx["jp_start"] - pe
+        net = g_en - g_jp
+        # g_jp < 0 は、英語版の長い分を、日本語の同じ所をもう一度使って埋めている形(同じ音が2回出る)。これも伸ばしてつなぐ
+        if not (g_en >= -0.002 and -STRETCH_GAP_MAX <= g_jp <= 0.02 and 0.02 < net <= STRETCH_GAP_MAX):
+            out.append(sg)
+            continue
+        rep_q = g_jp > -0.02 or float(np.sqrt((jsl(nx["jp_start"], -g_jp) ** 2).mean())) < quiet     # くり返す所は無音か
+        if max(jq(pe), jq(nx["jp_start"])) < quiet and rep_q:
+            out.append(sg)                              # 無音の所で切れている → 間が少し長くなるだけ。そのまま
+            continue
+        L = (g_en - (1.0 + STRETCH_GAP_RATE) * g_jp) / STRETCH_GAP_RATE      # 伸ばすのに使う、英語側の長さ(間を除く)
+        room_a, room_b = d - 1.0, (nx["en_end"] - nx["en_start"]) - 1.0
+        a = min(L / 2, room_a)
+        b = min(L - a, room_b)
+        a = min(L - b, room_a)
+        if a < 0 or b < 0 or a + b < L - 1e-6:
+            out.append(sg)                              # 前後の区間が短くて、3%未満では埋めきれない → そのまま
+            continue
+        x0, x1 = round(sg["en_end"] - a, 4), round(nx["en_start"] + b, 4)
+        br = dict(sg, en_start=x0, en_end=x1, jp_start=round(pe - a, 4), jp_end=round(nx["jp_start"] + b, 4))
+        br["flag"] = ""          # 前後の区間の続き。要確認には数えない
+        br.pop("trim_s", None)
+        br.pop("trim_e", None)
+        sg.pop("trim_e", None)
+        sg["en_end"] = x0
+        nx["jp_start"] = round(nx["jp_start"] + (x1 - nx["en_start"]), 4)
+        nx["en_start"] = x1
+        nx.pop("trim_s", None)
+        out += [sg, br]
+    segs[:] = out
+
+
 def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
     """区間の端が英語側の無音に掛かっているとき、そこまで日本語を入れない(segs を書き換える)。"""
     # ---- 6.9) 区間の端が英語側の無音に掛かっているとき、そこまで日本語を入れない
@@ -1673,7 +1726,7 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
                     sg_["jp_end"] = round(float(j1), 4)
 
 
-def auto_align(en, jp, progress=lambda f, m: None):
+def auto_align(en, jp, progress=lambda f, m: None, stretch_gaps=True):
     """英語版(en)の各時刻に対応する日本語録画(jp)の時刻を自動で見つけ、区間リストを返す。
 
     戻り値: (segs, info)
@@ -2200,6 +2253,8 @@ def auto_align(en, jp, progress=lambda f, m: None):
     _bridge_same_scene(segs)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr)
     _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
+    if stretch_gaps:       # 音+映像のときは、2つの結果を合わせたあとで行う
+        _stretch_small_gaps(segs, jsl, jthr)
 
     unused = []
     prev_end = jo
@@ -2323,7 +2378,7 @@ def _offset_groups(smp, zs, WL, merge=True):
     return out
 
 
-def video_align(en, jp, progress=lambda f, m: None, ctx=None):
+def video_align(en, jp, progress=lambda f, m: None, ctx=None, stretch_gaps=True):
     """auto_align の映像版。画面の似かたで、英語版の各時刻に当たる日本語録画の時刻を見つける(音が違いすぎて合わないとき用)。
     大まかな位置は画面で決め、細かい位置は音で合わせ直す(音で決められない所は画面で1コマ単位に合わせる)。
     戻り値は auto_align と同じ (segs, info)。"""
@@ -2650,6 +2705,8 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
                     p["jp_end"] = round(p["jp_end"] - cut, 4)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.1)
     _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
+    if stretch_gaps:       # 音+映像のときは、2つの結果を合わせたあとで行う
+        _stretch_small_gaps(segs, jsl, jthr)
     unused = []
     prev_end = jo
     for s in segs:
@@ -2703,9 +2760,9 @@ def combined_align(en, jp, progress=lambda f, m: None):
     """音(auto_align)と映像(video_align)の両方で合わせ、場所ごとに確かなほうを採る。
     ・両方が同じ答え → 音の結果(細かい位置が正確)   ・片方しか見つけていない → その結果
     ・答えが違う → 画面がはっきり合っているほう(差が小さければ音)。違っていた所は「要確認」にする。"""
-    A, ia = auto_align(en, jp, lambda f, m: progress(0.35 * f, "(1/2 音) " + m))
+    A, ia = auto_align(en, jp, lambda f, m: progress(0.35 * f, "(1/2 音) " + m), stretch_gaps=False)
     ctx = {}
-    V, iv = video_align(en, jp, lambda f, m: progress(0.35 + 0.6 * f, "(2/2 映像) " + m), ctx)
+    V, iv = video_align(en, jp, lambda f, m: progress(0.35 + 0.6 * f, "(2/2 映像) " + m), ctx, stretch_gaps=False)
     if not iv["ok"] or not V:
         if ia["ok"] and A:
             for s in A:
@@ -2867,6 +2924,7 @@ def combined_align(en, jp, progress=lambda f, m: None):
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
     _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3], esl=ctx["trim"][0], en_thr=ctx["trim"][2])
+    _stretch_small_gaps(out, ctx["trim"][1], ctx["trim"][3])
     jo, j_end = jp.a_origin, jp.end
     unused, prev_end = [], jo
     for s in out:
@@ -4493,7 +4551,7 @@ def _mmss(t):
     return f"{int(t // 60)}:{t % 60:04.1f}"
 
 
-def output_check(path, sr=8000, cuts=()):
+def output_check(path, sr=8000, cuts=(), ramps=()):
     """書き出した動画の日本語音声(1本目)と英語音声(2本目)を比べて、おかしそうな所を探す(合成後の自動チェック用)。
     cuts: 区間の切れ目(出力の時刻)。ひと続きの区間の中では日本語の音は切れ目なくつながっているので、
           前後が合っているのに途中の1か所だけずれる、ということは起きない(測定の外れとして扱う)。
@@ -4508,10 +4566,16 @@ def output_check(path, sr=8000, cuts=()):
             raws.append(np.frombuffer(r.stdout, dtype=np.int16))   # 長い動画でもメモリを食わないよう、16ビットのまま持つ(計算する所だけ変換)
     except Exception as ex:  # noqa: BLE001
         return None, [f"出力を読めませんでした: {ex}"]
-    return check_tracks(raws[0], raws[1], sr, cuts)
+    return check_tracks(raws[0], raws[1], sr, cuts, ramps=ramps)
 
 
-def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
+def stretch_ramps(segs):
+    """伸び縮みさせてつないでいる区間の一覧 [(英語の開始, 終了, 長さの差)]。自動チェックで、その範囲のずれを数えないために使う。"""
+    return [(float(x["en_start"]), float(x["en_end"]), abs((x["jp_end"] - x["jp_start"]) - (x["en_end"] - x["en_start"])))
+            for x in segs if x.get("jp_start") is not None and x.get("jp_end") is not None]
+
+
+def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
     """output_check の中身。日本語と英語の音(16ビットの配列)を比べる。stats に辞書を渡すと、数字の結果も入れる。"""
     j, e = j_all, e_all
     n = min(len(j), len(e))
@@ -4609,6 +4673,9 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
         if near or same_seg:
             bad.remove(x)
             iso.append(x)
+    # 音を伸び縮みさせてつないでいる範囲は、その途中で「長さの差」の分までずれるのが正しい。ずれとは数えない
+    ramp = [x for x in bad if any(a - 6.0 < x[0] < b and abs(x[1]) <= dl + 0.1 for a, b, dl in ramps)]
+    bad = [x for x in bad if x not in ramp]
     cur = None
     for t, lg, c, c0 in bad + [(None, None, None, None)]:
         if cur and t is not None and abs(t - cur[1] - 6.0) < 0.01 and abs(lg - cur[2]) <= 0.05:
@@ -4618,7 +4685,10 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
             issues.append(f"{_mmss(cur[0])}〜{_mmss(cur[1] + 6)}: 日本語の音が {abs(cur[2]):.2f}秒 {'遅れて' if cur[2] > 0 else '早く'}入っているようです (一致 {cur[3]:.2f})")
         cur = [t, t, lg, c] if t is not None else None
     if good:
-        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1) + len(amb)
+        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1) + len(amb) + len(ramp)
+        if ramp:
+            notes.append("音を少し伸び縮みさせてつないでいる所(その途中は少しずれます。ずれとは数えていません): "
+                         + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in ramp[:20]))
         if iso:
             notes.append("1か所だけ外れた測定(前後は合っているので、ずれとは数えていません): "
                          + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in iso[:20]))
@@ -4682,7 +4752,7 @@ def measure_segs(en, jp, segs):
     j, e = virtual_tracks(en, jp, segs)
     cuts = sorted({round(float(v), 3) for x in segs for v in (x["en_start"], x["en_end"])})
     stats = {}
-    issues, _notes = check_tracks(j, e, SR, cuts, stats)
+    issues, _notes = check_tracks(j, e, SR, cuts, stats, ramps=stretch_ramps(segs))
     return {"issues": issues if issues is not None else ["(測れませんでした)"], "stats": stats}
 
 
@@ -6825,12 +6895,13 @@ class App(_TkBase):
         cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
         segs_now = [dict(x) for x in self.segs]
+        ramps = stretch_ramps(segs_now)
         med = dict(self.media)
         self._beta_virtual = None
 
         def work():
             try:
-                issues, notes = output_check(out, cuts=cuts)
+                issues, notes = output_check(out, cuts=cuts, ramps=ramps)
             except Exception as ex:  # noqa: BLE001
                 issues, notes = None, [f"チェック中にエラー: {ex}"]
             try:      # 記録用: 合成せずに測った数字も取っておく(回帰チェックは、この数字と比べる)
