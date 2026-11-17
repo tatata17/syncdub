@@ -750,7 +750,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.17.43"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 41       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 42       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -5454,10 +5454,14 @@ class App(_TkBase):
             e = ttk.Entry(row, textvariable=var, width=14)
             e.pack(side="left")
             e.bind("<Return>", lambda ev, k=k: self.entry_apply(k))
+            e.bind("<KP_Enter>", lambda ev, k=k: self.entry_apply(k))
             e.bind("<FocusIn>", lambda ev, k=k: self.set_active(k))
+            # Enter を押さずに離れたら、打ちかけの数字は捨てて、いまのカーソルの時刻に戻す(表示と実際が食い違わないように)
+            e.bind("<FocusOut>", lambda ev, k=k: self.ent[k].set(tc(self.tr[k].cursor)))
             self.ent[k] = var
             fl = ttk.Label(row, text="f 0")
             fl.pack(side="left", padx=6)
+            tk.Label(row, text="Enterで移動", fg="#888", font=("", 8)).pack(side="left")
             self.fr_lbl[k] = fl
             ttk.Button(row, text="▶ 再生", width=7, command=lambda k=k: self.play(k)).pack(side="right")
 
@@ -5512,6 +5516,8 @@ class App(_TkBase):
         RangeSelect(self.itree)
         self.itree.bind("<<TreeviewSelect>>", self.on_item_select)
         self.itree.bind("<Double-1>", lambda e: self.edit_item())
+        for seq in ("<ButtonRelease-1>", "<KeyRelease-Up>", "<KeyRelease-Down>"):
+            self.itree.bind(seq, lambda e: self.after(1, self.nudge_hint), add="+")
         self.itree.bind("<Delete>", lambda e: self.del_item())
         bt = ttk.Frame(mid2)
         bt.pack(side="left", padx=6, anchor="n")
@@ -7538,8 +7544,9 @@ class App(_TkBase):
     def entry_apply(self, k):
         try:
             self.set_cursor(k, parse_tc(self.ent[k].get(), self.fps(k)), scroll=True)
+            self.tr[k].focus_set()      # 続けて ←→ や Space が使えるように、波形のほうへ移る
         except ValueError:
-            self.say("時刻の書式が不正です (例 00:01:02.500 / 125.5 / 3000f)")
+            self.say("時刻の書き方が違います (例 00:01:02.500 / 125.5 / 3000f)")
 
     def step(self, k, frames=0, seconds=0.0):
         t = self.tr[k].cursor
@@ -7553,7 +7560,9 @@ class App(_TkBase):
             return
         ks = ev.keysym
         k = self.active
-        alt = bool(ev.state & 0x20008)      # Alt (Windows は 0x20000、X11 は 0x8)
+        # Alt が押されているか。Windows では 0x20000。0x8 は、Windows では NumLock(X11 では Alt)なので、Windows では見ない
+        # (見ると、NumLock がオンのあいだ、←→ がいつも「線を動かす」になってしまう)
+        alt = bool(ev.state & (0x20000 if sys.platform == "win32" else 0x8))
         if ks in ("Left", "Right") and (alt or w is getattr(self, "itree", None)) and self.nudge_target() is not None:
             d = -1 if ks == "Left" else 1    # 選んでいる『同じ場面』の線を、少しだけ動かす
             fps = self.fps(k)
@@ -7588,6 +7597,7 @@ class App(_TkBase):
             self.play(k)
         elif ks == "Tab":
             self.set_active("jp" if k == "en" else "en")
+            self.nudge_hint()
         return "break"
 
     # ---------- 拡大縮小 (Reaper風) ----------
@@ -8010,6 +8020,13 @@ class App(_TkBase):
         n = self.item_idx()
         return n if n is not None and n < len(self.items) and self.items[n]["k"] == "pt" else None
 
+    def nudge_hint(self, _ev=None):
+        """一覧で『同じ場面』を選んでいるとき、←→ でどちら側の線が動くかを知らせる。"""
+        if self.nudge_target() is None or self.focus_get() is not self.itree:
+            return
+        side, other = ("英語", "日本語") if self.active == "en" else ("日本語", "英語")
+        self.say(f"←→ で、{side}側の線を1コマ動かせます (Shift: 0.1秒 / Tab: {other}側に切り替え)。動く側は、黄色い枠の波形です")
+
     def nudge(self, d):
         import copy, time
         n, k = self.nudge_target(), self.active
@@ -8263,10 +8280,13 @@ class App(_TkBase):
         for r, (lab, key, tk_) in enumerate(keys):
             ttk.Label(d, text=lab).grid(row=r, column=0, sticky="w", padx=6, pady=3)
             v = tk.StringVar(value=tc(it[key]))
-            ttk.Entry(d, textvariable=v, width=18).grid(row=r, column=1, padx=6)
+            ent = ttk.Entry(d, textvariable=v, width=18)
+            ent.grid(row=r, column=1, padx=6)
+            if r == 0:
+                first = ent
             vs[key] = (v, tk_)
 
-        def ok():
+        def ok(_ev=None):
             try:
                 new = dict(it)
                 for key, (v, tk_) in vs.items():
@@ -8274,11 +8294,27 @@ class App(_TkBase):
             except ValueError as ex:
                 messagebox.showerror("入力エラー", str(ex), parent=d)
                 return
-            self.items[i] = new
+            for a_, b_, name in (("en0", "en1", "英語"), ("jp0", "jp1", "日本語")):
+                if a_ in new and new[b_] - new[a_] < 0.02:
+                    messagebox.showerror("入力エラー", f"{name}の終わりが、始まりより前(または同じ)になっています。", parent=d)
+                    return
             d.destroy()
+            if new == it:
+                return
+            self.items[i] = new
             self.auto_flags = None
             self.rebuild()
-        ttk.Button(d, text="OK", command=ok).grid(row=len(keys), column=0, columnspan=2, pady=8)
+        bf = ttk.Frame(d)
+        bf.grid(row=len(keys), column=0, columnspan=2, pady=8)
+        ttk.Button(bf, text="OK", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="キャンセル", command=d.destroy).pack(side="left", padx=4)
+        d.bind("<Return>", ok)
+        d.bind("<KP_Enter>", ok)
+        d.bind("<Escape>", lambda e: d.destroy())
+        # 開いているあいだは、本体を操作できないようにする(一覧の行が入れ替わると、別の行を書きかえてしまうため)
+        d.grab_set()
+        first.focus_set()
+        first.select_range(0, "end")
 
     # ---------- 自動吸着 / 検証 ----------
     def _params(self):
