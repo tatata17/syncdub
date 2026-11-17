@@ -750,7 +750,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.17.43"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 43       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 44       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -6960,7 +6960,9 @@ class App(_TkBase):
         threading.Thread(target=work, daemon=True).start()
 
     def _auto_done(self, segs, info):
-        had = bool(self._last)      # すでに区間があった(手で直した内容など) → Ctrl+Z で、その状態に戻れるようにする
+        # このファイルで、すでに何か作業をしていたか。区間があるか、区間は全部消してあっても履歴が残っていれば「していた」。
+        # していたなら、Ctrl+Z でその状態に戻れるようにする。まだ何もしていない(読み込んだだけ)なら、この結果を出発点にする
+        had = bool(self._last or self.undo_st or self.redo_st)
         if not info["ok"]:
             self.items, self.auto_flags = [], None
             self.rebuild(track=had)
