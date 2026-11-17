@@ -642,7 +642,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 36       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 37       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1496,16 +1496,25 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
             continue                                  # もう静かな所で切れている
         # 英語版だけが少し長い所(日本語はつながっている)は、近く(前後10秒)に「英語がその長さぶん無音」の所があれば、そこが本当の場所。
         # (英語版は場面の変わり目の無音が長く、日本語の録画は短い、という形が多い) 見つかれば、間をそこへ移す
-        if esl is not None and en_thr is not None and g_en >= 0.05 and abs(g_jp) < 0.02:
-            lo6 = -min(10.0, p["en_end"] - p["en_start"] - 1.0)
-            hi6 = min(10.0, s["en_end"] - s["en_start"] - 1.0)
+        # 端を詰めた(頭詰め・末尾詰め)せいで、日本語側にも同じだけ間があいている形(g_jp > 0)も、詰める前の形に戻して同じように探す。
+        # ただし、詰めた所のすぐそば(戻すだけになる所)は候補にしない
+        untrim = 0.0
+        if esl is not None and en_thr is not None and not p_str and 0.02 <= g_jp <= 0.6 and g_en - g_jp >= 0.05:
+            untrim = g_jp
+        if esl is not None and en_thr is not None and (untrim or (g_en >= 0.05 and abs(g_jp) < 0.02)):
+            base_en, base_jp, g_en0 = p["en_end"] + untrim, pe + untrim, g_en
+            g_en = g_en - untrim
+            lo6 = -min(10.0, base_en - p["en_start"] - 1.0)
+            hi6 = min(10.0, s["en_end"] - (base_en + g_en) - 1.0)
 
             def rms_of(x_):
                 return float(np.sqrt((x_ ** 2).mean())) if len(x_) else 0.0
             cand = []
             for dd in np.arange(lo6, hi6 + 1e-6, 0.02):
-                x = p["en_end"] + dd
-                jr = rms_of(jsl(pe + dd * rp - 0.03, 0.06))          # 日本語を切る所(前後0.03秒)の音量
+                if untrim and -untrim - 0.3 < dd < 0.3:
+                    continue
+                x = base_en + dd
+                jr = rms_of(jsl(base_jp + dd * rp - 0.03, 0.06))     # 日本語を切る所(前後0.03秒)の音量
                 if jr >= 0.5 * jthr:
                     continue                                          # 日本語が鳴っている最中では切らない
                 er = rms_of(esl(x, g_en))                             # 間にする範囲の、英語の音量
@@ -1516,12 +1525,16 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
                     cand.append((er, abs(dd), float(dd)))
             if cand:
                 dd = min(cand)[2]
-                p["en_end"] = round(p["en_end"] + dd, 4)
+                p["en_end"] = round(base_en + dd, 4)
                 if p_str:
                     p["jp_end"] = round(p["jp_end"] + dd * rp, 4)
-                s["en_start"] = round(s["en_start"] + dd, 4)
-                s["jp_start"] = round(pe + dd * rp + g_jp, 4)
+                s["en_start"] = round(base_en + dd + g_en, 4)
+                s["jp_start"] = round(base_jp + dd * rp + (0.0 if untrim else g_jp), 4)
+                if untrim:
+                    p.pop("trim_e", None)
+                    s.pop("trim_s", None)
                 continue
+            g_en = g_en0
         if p_str:
             continue
         lo = -min(reach, p["en_end"] - p["en_start"] - 1.0)
