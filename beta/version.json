@@ -1,1 +1,1 @@
-{"version": "2026.11.17.43", "beta": 44, "file": "beta/syncdub_beta.pyw", "sha256": "7d6d56964b624de57814a63006ed1b2985fef71df9cebf27c2a9a9875048fda4", "notes": "自動合わせの直後に Ctrl+Z を押すと区間が消えるのを直しました。元に戻すと「要確認」も一緒に戻ります。設定ファイルを開くと指定の一覧が空になる不具合を直しました"}
+{"version": "2026.11.18.44", "beta": 45, "file": "beta/syncdub_beta.pyw", "sha256": "70bf55210159104badd381c65d5ff908d943aaeff70b11576a1da2bfef42820d", "notes": "正式版 v2026.11.18.44 と同じ内容です"}
