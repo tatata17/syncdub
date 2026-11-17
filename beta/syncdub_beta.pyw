@@ -750,7 +750,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.17.43"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 42       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 43       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -5341,7 +5341,8 @@ class App(_TkBase):
         self.segs = []         # items から自動計算した区間 (エンジンに渡す)
         self.extra_segs = []   # 英語版の音声をそのまま使う区間
         self.warns = []
-        self.undo_st, self.redo_st, self._last = [], [], []  # 元に戻す用
+        self.undo_st, self.redo_st, self._last = [], [], []  # 元に戻す用 (履歴の1件 = (指定の一覧, 要確認の情報))
+        self._last_flags = None
         self.auto_flags = None  # 自動検出直後の「要確認」情報 (手で直すと消える)
         self.active = "en"
         self.proj_path = None
@@ -5362,7 +5363,9 @@ class App(_TkBase):
         self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus), add="+")
         for seq, fn in (("<Control-z>", self.undo), ("<Control-Z>", self.undo), ("<Control-y>", self.redo),
                         ("<Control-Y>", self.redo)):
-            self.bind_all(seq, lambda e, fn=fn: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else fn())
+            # 手動調整タブを開いているときだけ効く(ほかのタブで押して、見えない所で区間が変わらないように)
+            self.bind_all(seq, lambda e, fn=fn: None if (isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text))
+                                                        or self.nb.select() != str(self.manual)) else fn())
         def ok_(fn):
             return lambda e: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else (fn(), "break")[1]
         for seq, fn in (("<Control-Shift-z>", self.redo), ("<Control-Shift-Z>", self.redo),
@@ -6957,9 +6960,12 @@ class App(_TkBase):
         threading.Thread(target=work, daemon=True).start()
 
     def _auto_done(self, segs, info):
+        had = bool(self._last)      # すでに区間があった(手で直した内容など) → Ctrl+Z で、その状態に戻れるようにする
         if not info["ok"]:
             self.items, self.auto_flags = [], None
-            self.rebuild()
+            self.rebuild(track=had)
+            if not had:
+                self.reset_history()
             self.pbar.config(value=0)
             self.auto_msg.config(text="⚠ " + info["msg"], fg="#b33")
             self._busy(False)
@@ -6972,7 +6978,9 @@ class App(_TkBase):
         self._align_unused = list(info.get("unused_jp") or [])
         self._align_segs = [dict(x) for x in segs]
         self.auto_flags = [(s["en_start"], s["en_end"], s["flag"]) for s in segs if s.get("flag")]
-        self.rebuild()
+        self.rebuild(track=had)
+        if not had:
+            self.reset_history()    # 何もない所からの自動合わせ: この結果が出発点(Ctrl+Z で空に戻らない)
         self.pbar.config(value=100)
         warn = len(self.auto_flags)
         lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
@@ -7498,6 +7506,12 @@ class App(_TkBase):
     def _loaded(self, m):
         self.media = m
         self.items, self.auto_flags = [], None      # 前のファイルの結果は残さない
+        keep, self._proj_items = getattr(self, "_proj_items", None), None
+        if keep:        # 設定ファイルを開いて読み込んだとき: その設定の「指定の一覧」を使う(同じファイルのときだけ)
+            same = lambda a, b: os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))  # noqa: E731
+            if same(m["en"].path, keep[1]) and same(m["jp"].path, keep[2]):
+                self.items = keep[0]
+        self.reset_history()                        # 前のファイルの区間が、Ctrl+Z で戻ってこないように
         for k in ("en", "jp"):
             t = self.tr[k]
             t.media = m[k]
@@ -8135,13 +8149,25 @@ class App(_TkBase):
         return res["v"]
 
     # ---------- 指定 → 区間 ----------
+    def reset_history(self):
+        """元に戻す・やり直すの履歴を空にして、いまの状態を出発点にする。
+        ファイルを読み込んだとき・設定ファイルを開いたとき・何もない所に自動合わせの結果が入ったときに呼ぶ
+        (前のファイルの区間や、空の状態が、Ctrl+Z で戻ってこないように)。"""
+        import copy
+        self.undo_st.clear()
+        self.redo_st.clear()
+        self._last = copy.deepcopy(self.items)
+        self._last_flags = self.auto_flags
+
     def rebuild(self, track=True):
         import copy
         if track and self.items != self._last:
-            self.undo_st.append(self._last)
+            # 「要確認」の情報も一緒に取っておく(手で直すと消えるが、元に戻したら、区間と一緒に戻るように)
+            self.undo_st.append((self._last, self._last_flags))
             del self.undo_st[:-100]
             self.redo_st.clear()
         self._last = copy.deepcopy(self.items)
+        self._last_flags = self.auto_flags
         m = self.media
         if all(m.values()):
             en_rng = (min(0.0, m["en"].a_origin), m["en"].end)
@@ -8204,9 +8230,8 @@ class App(_TkBase):
         if not self.undo_st:
             self.say("これ以上、元に戻せません")
             return
-        self.redo_st.append(self._last)
-        self.items = self.undo_st.pop()
-        self.auto_flags = None
+        self.redo_st.append((self._last, self._last_flags))
+        self.items, self.auto_flags = self.undo_st.pop()
         self.rebuild(track=False)
         self.say("元に戻しました (Ctrl+Z) / やり直し: Ctrl+Y")
 
@@ -8214,9 +8239,8 @@ class App(_TkBase):
         if not self.redo_st:
             self.say("やり直す操作がありません")
             return
-        self.undo_st.append(self._last)
-        self.items = self.redo_st.pop()
-        self.auto_flags = None
+        self.undo_st.append((self._last, self._last_flags))
+        self.items, self.auto_flags = self.redo_st.pop()
         self.rebuild(track=False)
         self.say("やり直しました (Ctrl+Y)")
 
@@ -8407,7 +8431,10 @@ class App(_TkBase):
         self.out_path.set(str(base / d["output"]) if d.get("output") else "")
         self.items = d.get("items", [])
         self.auto_flags = None
-        self.rebuild()
+        self.rebuild(track=False)
+        self.reset_history()        # 開いた設定が出発点(開く前の状態は、Ctrl+Z で戻らない)
+        # このあと素材を読み込むと、区間はいったん空になる(_loaded)。読み込みが終わったら、この一覧を入れ直す
+        self._proj_items = (json.loads(json.dumps(self.items)), self.en_var.get(), self.jp_var.get())
         if Path(self.en_var.get()).exists() and Path(self.jp_var.get()).exists():
             self.say("設定を読み込みました。素材の波形を読み込んでいます…")
             self._auto_after_load = False
