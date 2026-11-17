@@ -368,7 +368,8 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
   <li><b>ドラッグ</b>: 範囲を選ぶ / <b>クリック</b>: カーソルを置く</li>
   <li><b>緑の線(同じ場面)・範囲の端をドラッグ</b>: その線を動かす。つかんだ側(英語か日本語)だけが動きます。<b>Shift+ドラッグ</b>で上下一緒に動きます。カーソルを乗せると、つかめる線がオレンジになります。動かしている間は、時間差がどう変わるかが出ます。<b>Esc</b> で取り消せます</li>
   <li><b>線をダブルクリック</b>: 数字で直す / <b>右クリック</b>: メニュー(「CMではない」「カットではない」「この点を消す」「ここに『同じ場面』を追加」など)</li>
-  <li><b>一覧で「同じ場面」を選んで ←→</b>: その線を1コマずつ動かす(Shift: 0.1秒、Ctrl: 10コマ)。動くのは選んでいる側(黒枠の波形)で、Tab で切り替わります</li>
+  <li><b>一覧で「同じ場面」を選んで ←→</b>: その線を1コマずつ動かす(Shift: 0.1秒、Ctrl: 10コマ)。動くのは、黄色い枠の波形の側です。どちらが動くかは下にも出ます。Tab で切り替わります</li>
+  <li><b>時刻の欄</b>: 時刻を打って Enter を押すと、その時刻へ移動します</li>
   <li><b>マウスホイール・↑↓キー</b>: 拡大縮小(Reaper風。上下は同じ縮尺になります)</li>
   <li><b>Shift+ホイール・右ドラッグ・波形の下のバー</b>: 横にずらす</li>
   <li><b>←→</b>: 1コマ移動(Shift: 1秒、Ctrl: 10コマ)</li>
@@ -382,7 +383,7 @@ footer{border-top:1px solid var(--line);margin-top:60px;padding:22px 0;color:var
  <h2><span class="n">06</span>ショートカット</h2>
  <div class="table-wrap"><table>
   <tr><th>キー</th><th>動き</th></tr>
-  <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す</td></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す(「手動調整」タブで効きます。自動で合わせた直後は、それより前には戻りません)</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>Y</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>やり直し</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>設定を保存 / 名前を付けて保存</td></tr>
   <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>設定を開く</td></tr>

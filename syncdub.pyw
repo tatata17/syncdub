@@ -748,9 +748,9 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.17.43"
+APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = False  # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 39       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 44       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -833,6 +833,18 @@ ERROR_LOG = "syncdub_error.log"
 ERROR_LOG_MAX = 300_000      # これを超えたら、古い方を捨てて後ろ半分だけ残す
 
 
+def write_text_safely(path, text):
+    """ファイルを書きかえる。いったん別の名前で書いてから置きかえるので、途中で止まっても、元のファイルは壊れない。"""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def error_log_path():
     return Path(__file__).resolve().parent / ERROR_LOG
 
@@ -890,16 +902,40 @@ def diagnostic_text(extra=()):
     return "\n".join(out) + "\n"
 
 
+def check_project(d):
+    """設定ファイル(プロジェクト)の中身を確かめる。問題があれば、その説明を返す。なければ None。"""
+    if not isinstance(d, dict):
+        return "中身の形が違います"
+    for k in ("en_video", "jp_media"):
+        if not isinstance(d.get(k), str) or not d[k]:
+            return f"「{k}」(素材のファイル名)がありません"
+    items = d.get("items", [])
+    if not isinstance(items, list):
+        return "「items」(指定の一覧)の形が違います"
+    need = {"pt": ("en", "jp"), "cm": ("jp0", "jp1"), "cut": ("en0", "en1"), "dim": ("en0", "en1", "jp0", "jp1")}
+    for n, it in enumerate(items, 1):
+        if not isinstance(it, dict) or it.get("k") not in need:
+            return f"指定の一覧の {n} 番目が、知らない種類です"
+        for k in need[it["k"]]:
+            v = it.get(k)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or abs(v) > 1e7:
+                return f"指定の一覧の {n} 番目の時刻「{k}」が、数字ではありません"
+    return None
+
+
 def download_update_source(info, ref):
     base = TEST_BASE or f"https://raw.githubusercontent.com/{REPO}/{ref}"
     raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
-    if info.get("sha256"):     # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる
-        # 改行を LF にそろえてから比べる(tools/release.py と同じ計算。改行コードの違いだけで更新が止まらないように)
-        got = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
-        if got != str(info["sha256"]).lower():
-            raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。\n"
-                             "公開直後なら、数分待つと直ります。しばらく待っても同じときは、待っても直りません。"
-                             "配布ページから新しいファイルを入れ直してください")
+    # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる。確かめるための値がなければ、更新しない
+    if not info.get("sha256"):
+        raise ValueError("配布元の記録に、ファイルを確かめるための値(SHA-256)がありません。安全のため、更新をやめました。\n"
+                         "しばらく待っても同じときは、配布ページから新しいファイルを入れ直してください")
+    # 改行を LF にそろえてから比べる(tools/release.py と同じ計算。改行コードの違いだけで更新が止まらないように)
+    got = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    if got != str(info["sha256"]).lower():
+        raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。\n"
+                         "公開直後なら、数分待つと直ります。しばらく待っても同じときは、待っても直りません。"
+                         "配布ページから新しいファイルを入れ直してください")
     code = raw.decode("utf-8").replace("\r\n", "\n")   # 保存のときに改行が二重にならないように、LF にそろえておく
     m = re.search(r'^APP_VERSION = "([^"]+)"', code, re.M)
     if BETA_REVIEW:
@@ -5305,7 +5341,8 @@ class App(_TkBase):
         self.segs = []         # items から自動計算した区間 (エンジンに渡す)
         self.extra_segs = []   # 英語版の音声をそのまま使う区間
         self.warns = []
-        self.undo_st, self.redo_st, self._last = [], [], []  # 元に戻す用
+        self.undo_st, self.redo_st, self._last = [], [], []  # 元に戻す用 (履歴の1件 = (指定の一覧, 要確認の情報))
+        self._last_flags = None
         self.auto_flags = None  # 自動検出直後の「要確認」情報 (手で直すと消える)
         self.active = "en"
         self.proj_path = None
@@ -5326,7 +5363,9 @@ class App(_TkBase):
         self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus), add="+")
         for seq, fn in (("<Control-z>", self.undo), ("<Control-Z>", self.undo), ("<Control-y>", self.redo),
                         ("<Control-Y>", self.redo)):
-            self.bind_all(seq, lambda e, fn=fn: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else fn())
+            # 手動調整タブを開いているときだけ効く(ほかのタブで押して、見えない所で区間が変わらないように)
+            self.bind_all(seq, lambda e, fn=fn: None if (isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text))
+                                                        or self.nb.select() != str(self.manual)) else fn())
         def ok_(fn):
             return lambda e: None if isinstance(self.focus_get(), (tk.Entry, ttk.Entry, tk.Text)) else (fn(), "break")[1]
         for seq, fn in (("<Control-Shift-z>", self.redo), ("<Control-Shift-Z>", self.redo),
@@ -5418,10 +5457,14 @@ class App(_TkBase):
             e = ttk.Entry(row, textvariable=var, width=14)
             e.pack(side="left")
             e.bind("<Return>", lambda ev, k=k: self.entry_apply(k))
+            e.bind("<KP_Enter>", lambda ev, k=k: self.entry_apply(k))
             e.bind("<FocusIn>", lambda ev, k=k: self.set_active(k))
+            # Enter を押さずに離れたら、打ちかけの数字は捨てて、いまのカーソルの時刻に戻す(表示と実際が食い違わないように)
+            e.bind("<FocusOut>", lambda ev, k=k: self.ent[k].set(tc(self.tr[k].cursor)))
             self.ent[k] = var
             fl = ttk.Label(row, text="f 0")
             fl.pack(side="left", padx=6)
+            tk.Label(row, text="Enterで移動", fg="#888", font=("", 8)).pack(side="left")
             self.fr_lbl[k] = fl
             ttk.Button(row, text="▶ 再生", width=7, command=lambda k=k: self.play(k)).pack(side="right")
 
@@ -5476,6 +5519,8 @@ class App(_TkBase):
         RangeSelect(self.itree)
         self.itree.bind("<<TreeviewSelect>>", self.on_item_select)
         self.itree.bind("<Double-1>", lambda e: self.edit_item())
+        for seq in ("<ButtonRelease-1>", "<KeyRelease-Up>", "<KeyRelease-Down>"):
+            self.itree.bind(seq, lambda e: self.after(1, self.nudge_hint), add="+")
         self.itree.bind("<Delete>", lambda e: self.del_item())
         bt = ttk.Frame(mid2)
         bt.pack(side="left", padx=6, anchor="n")
@@ -6915,9 +6960,14 @@ class App(_TkBase):
         threading.Thread(target=work, daemon=True).start()
 
     def _auto_done(self, segs, info):
+        # このファイルで、すでに何か作業をしていたか。区間があるか、区間は全部消してあっても履歴が残っていれば「していた」。
+        # していたなら、Ctrl+Z でその状態に戻れるようにする。まだ何もしていない(読み込んだだけ)なら、この結果を出発点にする
+        had = bool(self._last or self.undo_st or self.redo_st)
         if not info["ok"]:
             self.items, self.auto_flags = [], None
-            self.rebuild()
+            self.rebuild(track=had)
+            if not had:
+                self.reset_history()
             self.pbar.config(value=0)
             self.auto_msg.config(text="⚠ " + info["msg"], fg="#b33")
             self._busy(False)
@@ -6930,7 +6980,9 @@ class App(_TkBase):
         self._align_unused = list(info.get("unused_jp") or [])
         self._align_segs = [dict(x) for x in segs]
         self.auto_flags = [(s["en_start"], s["en_end"], s["flag"]) for s in segs if s.get("flag")]
-        self.rebuild()
+        self.rebuild(track=had)
+        if not had:
+            self.reset_history()    # 何もない所からの自動合わせ: この結果が出発点(Ctrl+Z で空に戻らない)
         self.pbar.config(value=100)
         warn = len(self.auto_flags)
         lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
@@ -7241,7 +7293,7 @@ class App(_TkBase):
             cur = {}
         cur.update(kw)
         try:
-            f.write_text(json.dumps(cur), encoding="utf-8")
+            write_text_safely(f, json.dumps(cur))
         except OSError as e:
             if not getattr(self, "_settings_warned", False):      # 知らせるのは、起動している間に1回だけ
                 self._settings_warned = True
@@ -7456,6 +7508,12 @@ class App(_TkBase):
     def _loaded(self, m):
         self.media = m
         self.items, self.auto_flags = [], None      # 前のファイルの結果は残さない
+        keep, self._proj_items = getattr(self, "_proj_items", None), None
+        if keep:        # 設定ファイルを開いて読み込んだとき: その設定の「指定の一覧」を使う(同じファイルのときだけ)
+            same = lambda a, b: os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))  # noqa: E731
+            if same(m["en"].path, keep[1]) and same(m["jp"].path, keep[2]):
+                self.items = keep[0]
+        self.reset_history()                        # 前のファイルの区間が、Ctrl+Z で戻ってこないように
         for k in ("en", "jp"):
             t = self.tr[k]
             t.media = m[k]
@@ -7502,8 +7560,9 @@ class App(_TkBase):
     def entry_apply(self, k):
         try:
             self.set_cursor(k, parse_tc(self.ent[k].get(), self.fps(k)), scroll=True)
+            self.tr[k].focus_set()      # 続けて ←→ や Space が使えるように、波形のほうへ移る
         except ValueError:
-            self.say("時刻の書式が不正です (例 00:01:02.500 / 125.5 / 3000f)")
+            self.say("時刻の書き方が違います (例 00:01:02.500 / 125.5 / 3000f)")
 
     def step(self, k, frames=0, seconds=0.0):
         t = self.tr[k].cursor
@@ -7517,7 +7576,9 @@ class App(_TkBase):
             return
         ks = ev.keysym
         k = self.active
-        alt = bool(ev.state & 0x20008)      # Alt (Windows は 0x20000、X11 は 0x8)
+        # Alt が押されているか。Windows では 0x20000。0x8 は、Windows では NumLock(X11 では Alt)なので、Windows では見ない
+        # (見ると、NumLock がオンのあいだ、←→ がいつも「線を動かす」になってしまう)
+        alt = bool(ev.state & (0x20000 if sys.platform == "win32" else 0x8))
         if ks in ("Left", "Right") and (alt or w is getattr(self, "itree", None)) and self.nudge_target() is not None:
             d = -1 if ks == "Left" else 1    # 選んでいる『同じ場面』の線を、少しだけ動かす
             fps = self.fps(k)
@@ -7552,6 +7613,7 @@ class App(_TkBase):
             self.play(k)
         elif ks == "Tab":
             self.set_active("jp" if k == "en" else "en")
+            self.nudge_hint()
         return "break"
 
     # ---------- 拡大縮小 (Reaper風) ----------
@@ -7974,6 +8036,13 @@ class App(_TkBase):
         n = self.item_idx()
         return n if n is not None and n < len(self.items) and self.items[n]["k"] == "pt" else None
 
+    def nudge_hint(self, _ev=None):
+        """一覧で『同じ場面』を選んでいるとき、←→ でどちら側の線が動くかを知らせる。"""
+        if self.nudge_target() is None or self.focus_get() is not self.itree:
+            return
+        side, other = ("英語", "日本語") if self.active == "en" else ("日本語", "英語")
+        self.say(f"←→ で、{side}側の線を1コマ動かせます (Shift: 0.1秒 / Tab: {other}側に切り替え)。動く側は、黄色い枠の波形です")
+
     def nudge(self, d):
         import copy, time
         n, k = self.nudge_target(), self.active
@@ -8082,13 +8151,25 @@ class App(_TkBase):
         return res["v"]
 
     # ---------- 指定 → 区間 ----------
+    def reset_history(self):
+        """元に戻す・やり直すの履歴を空にして、いまの状態を出発点にする。
+        ファイルを読み込んだとき・設定ファイルを開いたとき・何もない所に自動合わせの結果が入ったときに呼ぶ
+        (前のファイルの区間や、空の状態が、Ctrl+Z で戻ってこないように)。"""
+        import copy
+        self.undo_st.clear()
+        self.redo_st.clear()
+        self._last = copy.deepcopy(self.items)
+        self._last_flags = self.auto_flags
+
     def rebuild(self, track=True):
         import copy
         if track and self.items != self._last:
-            self.undo_st.append(self._last)
+            # 「要確認」の情報も一緒に取っておく(手で直すと消えるが、元に戻したら、区間と一緒に戻るように)
+            self.undo_st.append((self._last, self._last_flags))
             del self.undo_st[:-100]
             self.redo_st.clear()
         self._last = copy.deepcopy(self.items)
+        self._last_flags = self.auto_flags
         m = self.media
         if all(m.values()):
             en_rng = (min(0.0, m["en"].a_origin), m["en"].end)
@@ -8151,9 +8232,8 @@ class App(_TkBase):
         if not self.undo_st:
             self.say("これ以上、元に戻せません")
             return
-        self.redo_st.append(self._last)
-        self.items = self.undo_st.pop()
-        self.auto_flags = None
+        self.redo_st.append((self._last, self._last_flags))
+        self.items, self.auto_flags = self.undo_st.pop()
         self.rebuild(track=False)
         self.say("元に戻しました (Ctrl+Z) / やり直し: Ctrl+Y")
 
@@ -8161,9 +8241,8 @@ class App(_TkBase):
         if not self.redo_st:
             self.say("やり直す操作がありません")
             return
-        self.undo_st.append(self._last)
-        self.items = self.redo_st.pop()
-        self.auto_flags = None
+        self.undo_st.append((self._last, self._last_flags))
+        self.items, self.auto_flags = self.redo_st.pop()
         self.rebuild(track=False)
         self.say("やり直しました (Ctrl+Y)")
 
@@ -8227,10 +8306,13 @@ class App(_TkBase):
         for r, (lab, key, tk_) in enumerate(keys):
             ttk.Label(d, text=lab).grid(row=r, column=0, sticky="w", padx=6, pady=3)
             v = tk.StringVar(value=tc(it[key]))
-            ttk.Entry(d, textvariable=v, width=18).grid(row=r, column=1, padx=6)
+            ent = ttk.Entry(d, textvariable=v, width=18)
+            ent.grid(row=r, column=1, padx=6)
+            if r == 0:
+                first = ent
             vs[key] = (v, tk_)
 
-        def ok():
+        def ok(_ev=None):
             try:
                 new = dict(it)
                 for key, (v, tk_) in vs.items():
@@ -8238,11 +8320,27 @@ class App(_TkBase):
             except ValueError as ex:
                 messagebox.showerror("入力エラー", str(ex), parent=d)
                 return
-            self.items[i] = new
+            for a_, b_, name in (("en0", "en1", "英語"), ("jp0", "jp1", "日本語")):
+                if a_ in new and new[b_] - new[a_] < 0.02:
+                    messagebox.showerror("入力エラー", f"{name}の終わりが、始まりより前(または同じ)になっています。", parent=d)
+                    return
             d.destroy()
+            if new == it:
+                return
+            self.items[i] = new
             self.auto_flags = None
             self.rebuild()
-        ttk.Button(d, text="OK", command=ok).grid(row=len(keys), column=0, columnspan=2, pady=8)
+        bf = ttk.Frame(d)
+        bf.grid(row=len(keys), column=0, columnspan=2, pady=8)
+        ttk.Button(bf, text="OK", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="キャンセル", command=d.destroy).pack(side="left", padx=4)
+        d.bind("<Return>", ok)
+        d.bind("<KP_Enter>", ok)
+        d.bind("<Escape>", lambda e: d.destroy())
+        # 開いているあいだは、本体を操作できないようにする(一覧の行が入れ替わると、別の行を書きかえてしまうため)
+        d.grab_set()
+        first.focus_set()
+        first.select_range(0, "end")
 
     # ---------- 自動吸着 / 検証 ----------
     def _params(self):
@@ -8294,13 +8392,21 @@ class App(_TkBase):
                 "segments": segs, "items": self.items}
 
     def save_project(self, ask=True):
+        old_path = self.proj_path
         if ask or not self.proj_path:
             p = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("プロジェクト", "*.json")],
                                              initialfile=Path(self.proj_path).name if self.proj_path else "project.json")
             if not p:
                 return None
             self.proj_path = p
-        Path(self.proj_path).write_text(json.dumps(self.project_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+        text = json.dumps(self.project_dict(), ensure_ascii=False, indent=1)
+        try:
+            json.loads(text)
+            write_text_safely(self.proj_path, text)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("syncdub", f"設定を保存できませんでした。\n{self.proj_path}\n\n{e}")
+            self.proj_path = old_path
+            return None
         self.say(f"保存: {self.proj_path}")
         return self.proj_path
 
@@ -8310,7 +8416,15 @@ class App(_TkBase):
             self.load_project(p)
 
     def load_project(self, p):
-        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        try:
+            d = json.loads(Path(p).read_text(encoding="utf-8"))
+            bad = check_project(d)
+        except (OSError, ValueError) as e:
+            bad = f"読み込めません ({e})"
+        if bad:
+            messagebox.showerror("syncdub", f"この設定ファイルは開けませんでした。\n{p}\n\n{bad}\n\n"
+                                 "ファイルが壊れているか、syncdub の設定ファイルではありません。いまの作業内容は、そのままです。")
+            return
         base = Path(p).parent
         self.proj_path = p
         self.en_var.set(str((base / d["en_video"])))
@@ -8319,7 +8433,10 @@ class App(_TkBase):
         self.out_path.set(str(base / d["output"]) if d.get("output") else "")
         self.items = d.get("items", [])
         self.auto_flags = None
-        self.rebuild()
+        self.rebuild(track=False)
+        self.reset_history()        # 開いた設定が出発点(開く前の状態は、Ctrl+Z で戻らない)
+        # このあと素材を読み込むと、区間はいったん空になる(_loaded)。読み込みが終わったら、この一覧を入れ直す
+        self._proj_items = (json.loads(json.dumps(self.items)), self.en_var.get(), self.jp_var.get())
         if Path(self.en_var.get()).exists() and Path(self.jp_var.get()).exists():
             self.say("設定を読み込みました。素材の波形を読み込んでいます…")
             self._auto_after_load = False
@@ -8389,9 +8506,19 @@ class App(_TkBase):
             except (ValueError, KeyError, SystemExit) as ex:
                 buf.write(f"エラー: {ex}")
                 ok = False
+            except Cancelled:
+                buf.write("合成を中止しました")
+                ok = None
+            except FileNotFoundError as ex:
+                buf.write(f"ffmpeg か、素材のファイルが見つかりません: {ex}")
+                ok = False
+            except Exception as ex:  # noqa: BLE001  想定外のエラーでも、画面を「合成中」のままにしない
+                log_exception("合成", type(ex), ex, ex.__traceback__)
+                buf.write(f"想定外のエラーで合成できませんでした ({type(ex).__name__}: {ex})\n記録: {error_log_path()}")
+                ok = False
             finally:
                 shutil.rmtree(tmpd, ignore_errors=True)
-            self.q.put(lambda: self._render_done(buf.getvalue(), ok))
+                self.q.put(lambda: self._render_done(buf.getvalue(), ok))
         threading.Thread(target=work, daemon=True).start()
 
     def _render_done(self, text, ok):
@@ -8399,6 +8526,10 @@ class App(_TkBase):
         self.rbar.stop()
         self.rbar.config(mode="determinate", value=0)  # 止まっているときは空にする (緑のブロックを残さない)
         self._busy(False)
+        if ok is None:
+            self.easy_done.config(text="合成を中止しました", fg="#b33")
+            self.say("合成を中止しました")
+            return
         if ok:
             self.easy_done.config(text=f"✔ 完成しました: {Path(self.out_path.get()).name}", fg="#1f6f43")
             self.open_btn.pack(side="left", padx=8)
