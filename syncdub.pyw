@@ -224,6 +224,11 @@ def load_segments(proj, en_dur, en_fps, jp_fps):
         fit = d.get("fit", "stretch")
         if fit not in ("stretch", "pad", "trim"):
             raise ValueError(f"segments[{i}]: fit は stretch/pad/trim")
+        if es < 0:        # 映像の先頭より前の部分は使えない(残すと、そのぶん全体が後ろへずれる)
+            if ee <= 0:
+                continue
+            js += -es * ((je - js) / (ee - es) if je is not None else 1.0)
+            es = 0.0
         segs.append(Seg(es, ee, js, je, fit, d.get("note", "")))
     segs.sort(key=lambda s: s.en_start)
     for a, b in zip(segs, segs[1:]):
@@ -260,9 +265,125 @@ def atempo_chain(r):
     return ",".join(parts)
 
 
-def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0):
-    """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。"""
+def _seg_src_end(x):
+    return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
+
+
+def _seg_continuous(a, b):
+    """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
+    if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
+        return False
+    if a.english:
+        return True
+    return abs(_seg_src_end(a) - b.jp_start) < 2e-3
+
+
+def _seg_atempo(x):
+    """この区間は、音の高さを保つ伸び縮み(atempo)で合成するか。"""
+    if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur <= 0.2:
+        return False
+    return abs((x.jp_end - x.jp_start) / x.dur - 1) > STRETCH_RESAMPLE_MAX
+
+
+def stretch_carry(segs, joins):
+    """区間ごとの「日本語の読み出し位置のずらし」(秒)と、それが確定しているか、を返す。
+    音の高さを保つ伸び縮みは、波形を切り貼りして作るので、終わりの位置が元の音と数ミリ秒ずれる。そのまま次の区間をつなぐと
+    波形が続かず、プツッと鳴る。そこで、伸び縮みの終わりの波形が元の音のどこに当たるか(joins[i] = (頭の位置, 終わりのずれ))を測っておき、
+    続きの区間をそのずれの分だけずらして読み出す。重ねたりフェードしたりはしない(切る位置を合わせるだけ)。
+    ずらしは、音がひと続きのあいだだけ引き継ぐ。"""
+    carry, known, out = 0.0, True, []
+    for i, x in enumerate(segs):
+        if x.silent or x.english or not (i > 0 and _seg_continuous(segs[i - 1], x)):
+            carry, known = 0.0, True
+        out.append((carry, known))
+        if not x.silent and not x.english and _seg_atempo(x):
+            if joins is not None and i in joins:
+                carry += joins[i][1]
+            else:
+                known = False
+    return out
+
+
+def measure_stretch_joins(segs, src, a_index, jp_off, sr, layout, tmp=None):
+    """音の高さを保つ伸び縮みの区間について、前後の区間と波形がぴったり続く切り位置を測る。戻り値 {区間の番号: (頭の位置, 終わりのずれ)}。
+    合成と同じ処理で、伸び縮みさせた音を一度だけ作ってみて、頭と終わりの波形を元の音と突き合わせる。"""
+    import tempfile
+    import wave
+    joins = {}
     fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
+    W = int(0.02 * sr)
+
+    def rd(f):
+        with wave.open(f) as w:
+            return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float64)
+
+    def nc(a, b):
+        if len(a) != len(b) or not len(a):
+            return -1.0
+        a, b = a - a.mean(), b - b.mean()
+        d = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float((a * b).sum() / d) if d > 1e-6 else -1.0
+    while True:
+        st = stretch_carry(segs, joins)
+        todo = [i for i, x in enumerate(segs) if not x.silent and not x.english and _seg_atempo(x) and i not in joins and st[i][1]]
+        if not todo:
+            return joins
+        d = tempfile.mkdtemp(prefix="syncdub_join_")
+        files, lines, maps = [], [], []
+        outs = "".join(f"[s{k}_{q}]" for k in range(len(todo)) for q in range(3))
+        lines.append(f"[0:a:{a_index}]{fmt},apad=pad_dur=7200,asplit={3 * len(todo)}{outs}")
+        geo = {}
+        for k, i in enumerate(todo):
+            x = segs[i]
+            js, je = x.jp_start + jp_off + st[i][0], x.jp_end + jp_off + st[i][0]
+            r = (je - js) / x.dur
+            a0 = min(0.1, max(js, 0.0))
+            geo[i] = (a0, r, x.dur)
+            lines.append(f"[s{k}_0]atrim={js - a0:.6f}:{je + 0.1:.6f},asetpts=PTS-STARTPTS,apad=whole_dur={je - js + a0 + 0.1:.6f},{atempo_chain(r)}[y{k}]")
+            lines.append(f"[s{k}_1]atrim={js:.6f}:{js + 0.03:.6f},asetpts=PTS-STARTPTS[h{k}]")
+            lines.append(f"[s{k}_2]atrim={max(je - 0.03, 0.0):.6f}:{je + 0.06:.6f},asetpts=PTS-STARTPTS[t{k}]")
+            for tag in "yht":
+                f = str(Path(d) / f"{tag}{k}.wav")
+                files.append(f)
+                maps += ["-map", f"[{tag}{k}]", "-ac", "1", "-c:a", "pcm_s16le", f]
+        if tmp is not None:
+            tmp.extend(files)
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-vn", "-i", src, "-filter_complex", ";".join(lines)] + maps,
+                           capture_output=True, check=True, **({"creationflags": 0x08000000} if sys.platform == "win32" else {}))
+            for k, i in enumerate(todo):
+                a0, r, D = geo[i]
+                y, hx, tx = (rd(str(Path(d) / f"{tag}{k}.wav")) for tag in "yht")
+                # 頭: 伸び縮みさせた音の中で、元の音の頭(hx)とぴったり合う所
+                c, rad = int(round(a0 / r * sr)), int(0.02 * sr)
+                sc = [nc(y[c + u:c + u + W], hx[:W]) if c + u >= 0 else -1.0 for u in range(-rad, rad + 1)]
+                u = int(np.argmax(sc))
+                h = c + u - rad if sc[u] >= 0.8 else c
+                # 終わり: 伸び縮みさせた音の終わり(のすぐ先)の波形が、元の音のどこに当たるか
+                e = h + int(round(D * sr))
+                sc = [nc(tx[v:v + W], y[e:e + W]) for v in range(0, len(tx) - W)]
+                v = int(np.argmax(sc)) if sc else 0
+                eps = v / sr - 0.03 if sc and sc[v] >= 0.8 else 0.0
+                joins[i] = (h / sr, eps)
+        except (OSError, ValueError, _subprocess.CalledProcessError):
+            for i in todo:      # 測れなければ、そのまま切る(合成は続ける)
+                a0, r, _D = geo.get(i, (0.1, 1.0, 0.0))
+                joins.setdefault(i, (a0 / r, 0.0))
+        finally:
+            for f in files:
+                Path(f).unlink(missing_ok=True)
+            try:
+                Path(d).rmdir()
+            except OSError:
+                pass
+
+
+def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0, joins=None):
+    """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。
+    joins: measure_stretch_joins の結果(音の高さを保つ伸び縮みの区間を、前後とぴったりつなぐための切り位置)。"""
+    fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
+    continuous = _seg_continuous
+    carry = stretch_carry(segs, joins)
     nj = sum(1 for s in segs if not s.silent and not s.english)
     ne = sum(1 for s in segs if s.english)
     if ne and en_idx is None:
@@ -276,17 +397,6 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             pad = fmt + ",apad=pad_dur=7200"
             lines.append(f"[{idx}:a:{ai}]{pad},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{pad}[s{tag}0]")
     warns = []
-
-    def src_end(x):
-        return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
-
-    def continuous(a, b):
-        """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
-        if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
-            return False
-        if a.english:
-            return True
-        return abs(src_end(a) - b.jp_start) < 2e-3
 
     for i, s in enumerate(segs):
         D = s.dur
@@ -304,8 +414,8 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             else:
                 # ffmpegは入力のタイムスタンプをコンテナ開始=0に正規化する。
                 # 指定時刻は映像の先頭=0 なので、その差(jp_off)を足す。
-                js = s.jp_start + jp_off
-                je = (s.jp_end + jp_off) if s.jp_end is not None else js + D
+                js = s.jp_start + jp_off + carry[i][0]      # carry: 手前の伸び縮みと波形を続けるための、数ミリ秒のずらし
+                je = (s.jp_end + jp_off + carry[i][0]) if s.jp_end is not None else js + D
                 jdur = je - js
                 if s.fit == "stretch" and abs(jdur - D) > 1e-6:
                     r = jdur / D
@@ -315,18 +425,19 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                     # 余白ぶんを切り捨てる (これをしないと、区間の境目で「ぶつぶつ」と音が途切れる)
                     a0 = min(0.1, max(js, 0.0))
                     a1 = 0.1
-                    if abs(r - 1) <= 0.03:
-                        # 速さの違いがわずか(3%以内)なら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
-                        # atempo は音の高さを保つかわりに波形をつなぎ直すので、前後の区間と波形がぴったりつながらず、
-                        # 境目で「プツッ」と鳴ることがある。この方法なら波形がそのままつながる(音の高さは最大3%変わる)
+                    if abs(r - 1) <= STRETCH_RESAMPLE_MAX:
+                        # 速さの違いがごくわずかなら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
+                        # 波形がそのままつながるので、境目で鳴らない。音の高さもその割合だけ変わるが、この範囲なら聞き分けられない
                         stretch = f"asetrate={sr * r:.6f},aresample={sr}"
                     else:
+                        # 音の高さを保ったまま、速さだけ変える。前後の区間とは、波形がぴったり続く位置で切ってつなぐ(stretch_carry)
                         stretch = atempo_chain(r)
+                    h0 = joins[i][0] if joins and i in joins and _seg_atempo(s) else a0 / r
                     # 日本語の音がその範囲にない(録画の終わりを越えている)ときも、無音で埋めてから伸縮する。
                     # (埋めないと、伸縮の処理に音が1つも届かず、時刻のおかしい音が出て合成が失敗する)
                     chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS",
                              f"apad=whole_dur={jdur + a0 + a1:.6f}", stretch,
-                             f"atrim={a0 / r:.6f}:{a0 / r + D:.6f}", "asetpts=PTS-STARTPTS"]
+                             f"atrim={h0:.6f}:{h0 + D:.6f}", "asetpts=PTS-STARTPTS"]
                 else:
                     chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
                 src = f"[sj{kj}]"
@@ -534,7 +645,8 @@ def _main(argv, tmp):
         if not segs or c1 - c0 <= 0.05:
             raise ValueError("切り出す範囲が空です")
         segs, pieces = drop_cut_gaps(segs, fps_c)
-        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0)
+        joins = measure_stretch_joins(segs, jp_path, jp_a, jp_off, sr, layout, tmp)
+        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0, joins=joins)
         vchain = None
         if len(pieces) > 1:
             # 日本語版でカットされた(英語版にだけある)部分は、映像も音も飛ばしてつなぐ
@@ -550,9 +662,10 @@ def _main(argv, tmp):
             filt = filt + ";\n" + vchain
             print(f"カット部分を飛ばして {n_} か所をつなぎます: " + ", ".join(f"{a_:.2f}-{b_:.2f}" for a_, b_ in pieces))
     else:
+        joins = measure_stretch_joins(segs, jp_path, jp_a, jp_off, sr, layout, tmp)
         filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
                                    in_idx=0 if single else 1, lead=0.0 if single else en_off,
-                                   en_idx=1 if single else 0, en_off=en_off)
+                                   en_idx=1 if single else 0, en_off=en_off, joins=joins)
 
     print(f"EN映像先頭 +{en_off:.3f}s / JP映像先頭 +{jp_off:.3f}s (コンテナ開始比) / EN長さ {en_dur:.3f}s / 区間 {len(segs)}")
     for i, s in enumerate(segs):
@@ -635,9 +748,9 @@ def _main(argv, tmp):
 import numpy as np
 
 
-APP_VERSION = "2026.11.16.42"
+APP_VERSION = "2026.11.17.43"
 BETA_REVIEW = False  # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 23       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 39       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -713,6 +826,68 @@ def ver_label(info=None):
     if info is None:
         return f"v{APP_VERSION}" + (f" ベータ{BETA_BUILD}" if BETA_REVIEW else "")
     return f"v{info['version']}" + (f" ベータ{info.get('beta', 0)}" if BETA_REVIEW else "")
+
+
+# ---------- 想定外のエラーの記録と、診断情報 ----------
+ERROR_LOG = "syncdub_error.log"
+ERROR_LOG_MAX = 300_000      # これを超えたら、古い方を捨てて後ろ半分だけ残す
+
+
+def error_log_path():
+    return Path(__file__).resolve().parent / ERROR_LOG
+
+
+def log_exception(where, exc_type, exc, tb):
+    """つかまえられなかった例外を、本体と同じフォルダのログに書き足す。書けなくても、ここでは何も起こさない。"""
+    import traceback
+    try:
+        text = (f"\n==== {datetime.now():%Y-%m-%d %H:%M:%S}  {ver_label()}  ({where}) ====\n"
+                + "".join(traceback.format_exception(exc_type, exc, tb)))
+        f = error_log_path()
+        old = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        if len(old) > ERROR_LOG_MAX:
+            old = "(古い記録は省きました)\n" + old[-ERROR_LOG_MAX // 2:]
+        f.write_text(old + text, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sys.__stderr__.write(text)
+    except Exception:  # noqa: BLE001  .pyw には出力先がない
+        pass
+
+
+def install_exception_log():
+    """画面の処理・作業スレッドのどちらで起きた例外も、ログに残るようにする。"""
+    sys.excepthook = lambda t, e, tb: log_exception("本体", t, e, tb)
+    threading.excepthook = lambda a: log_exception(f"作業スレッド {a.thread.name if a.thread else ''}", a.exc_type, a.exc_value, a.exc_traceback)
+
+
+def diagnostic_text(extra=()):
+    """不具合の報告に付ける診断情報(版・環境・設定・直近の警告・エラーの記録)を、1つの文面にする。"""
+    import platform
+    out = [f"syncdub 診断情報  {datetime.now():%Y-%m-%d %H:%M:%S}",
+           f"版: {ver_label()}  (ファイル: {Path(__file__).name})",
+           f"Python: {sys.version.split()[0]}  /  {platform.platform()}"]
+    for tool in ("ffmpeg", "ffprobe"):
+        try:
+            r = subprocess.run([tool, "-version"], capture_output=True, text=True, timeout=15)
+            out.append(f"{tool}: " + ((r.stdout or r.stderr).splitlines() or ["(版が分かりません)"])[0])
+        except Exception as e:  # noqa: BLE001
+            out.append(f"{tool}: 動かせません ({type(e).__name__}: {e})")
+    out.append("\n---- 設定 (syncdub_settings.json) ----")
+    try:
+        out.append((Path(__file__).resolve().parent / "syncdub_settings.json").read_text(encoding="utf-8"))
+    except OSError:
+        out.append("(設定ファイルはありません)")
+    for title, body in extra:
+        out.append(f"\n---- {title} ----")
+        out.append(body or "(なし)")
+    out.append(f"\n---- エラーの記録 ({ERROR_LOG}) の終わりの方 ----")
+    try:
+        out.append(error_log_path().read_text(encoding="utf-8", errors="replace")[-20000:])
+    except OSError:
+        out.append("(エラーの記録はありません)")
+    return "\n".join(out) + "\n"
 
 
 def download_update_source(info, ref):
@@ -1179,6 +1354,147 @@ def _refine_offsets(segs, esl, jsl, fs, rms_thr):
     segs[:] = out
 
 
+def _flux(x, fs):
+    """音の「立ち上がり」の強さ(帯域ごと、1秒に200コマ)。声や音量のちがう吹き替えどうしでも、曲や効果音の出だしは同じ所に出る。"""
+    hop, n = int(round(fs / 200)), 128
+    if len(x) < n + hop:
+        return np.zeros((32, 0))
+    k = (len(x) - n) // hop + 1
+    idx = np.arange(n)[None, :] + hop * np.arange(k)[:, None]
+    mag = np.abs(np.fft.rfft(x[idx] * np.hanning(n), axis=1))[:, 1:65]
+    mag = mag.reshape(len(mag), 32, 2).sum(2)       # 32帯域にまとめる(速くするため)
+    mag = np.log1p(mag / (np.median(mag) * 4 + 1e-9))
+    return np.maximum(np.diff(mag, axis=0), 0.0).T
+
+
+def _recheck_wide(segs, esl, jsl, fs, rms_thr):
+    """時間差が一定の区間を、広い幅(±1.5秒)で測り直し、0.3秒以上ずれたままになっている所を直す。
+    会話ばかりで音の手がかりが弱い場面は、となりのはっきり合う場面の時間差をそのまま当てはめているので、
+    その間に英語版だけ少し長い所があると、1秒近くずれたままになる(波形の一致では弱すぎて見えない)。
+    音の立ち上がり(_flux)の一致を 6秒の窓・3秒おきに測り、同じずれが 5回以上続けて出たときだけ、その範囲の時間差を直す。"""
+    WL, RAD, FPS, TOL = 6.0, 1.5, 200, 0.03
+    n, m = int(WL * FPS), int(RAD * FPS)
+
+    def corr(a, B, k0, k1):
+        """a(帯域×n) を B の中でずらして、ずらし幅ごとの一致を返す。"""
+        a = a - a.mean(1, keepdims=True)
+        na = float(np.linalg.norm(a))
+        out = np.full(k1 - k0, -1.0)
+        if na < 1e-9:
+            return out
+        for q, k in enumerate(range(k0, k1)):
+            if k < 0 or k + a.shape[1] > B.shape[1]:
+                continue
+            b = B[:, k:k + a.shape[1]]
+            b = b - b.mean(1, keepdims=True)
+            out[q] = float((a * b).sum() / (na * float(np.linalg.norm(b)) + 1e-9))
+        return out
+    out = []
+    for sg in segs:
+        d = sg["en_end"] - sg["en_start"]
+        if d < 30.0 or sg.get("jp_end") is not None:
+            out.append(sg)
+            continue
+        o = sg["jp_start"] - sg["en_start"]
+        E = _flux(esl(sg["en_start"], d), fs)
+        J = _flux(jsl(sg["jp_start"] - RAD - 0.5, d + 2 * RAD + 1.0), fs)
+        j0 = int(round((RAD + 0.5) * FPS))              # J の中で、E の先頭に当たる位置
+        smp = []
+        for t in np.arange(0.0, d - WL, 3.0):
+            if float(np.sqrt((esl(sg["en_start"] + t, WL) ** 2).mean())) < rms_thr:
+                continue
+            i0 = int(t * FPS)
+            c = corr(E[:, i0:i0 + n], J, j0 + i0 - m, j0 + i0 + m + 1)
+            k = int(c.argmax())
+            z = (c[k] - np.median(c)) / (c.std() + 1e-9)
+            if z >= 4.0 and 2 <= k <= 2 * m - 2:
+                smp.append((float(t), (k - m) / FPS, float(z)))
+        groups, cur, pend = [], None, []
+        for i, (t, lg, _z) in enumerate(smp):
+            if cur is not None and abs(lg - float(np.median([smp[q][1] for q in cur]))) <= TOL:
+                cur.append(i)
+                pend = []
+            else:
+                pend.append(i)
+                if len(pend) >= 2 and abs(smp[pend[-1]][1] - smp[pend[-2]][1]) <= TOL:
+                    cur = pend[-2:]
+                    groups.append(cur)
+                    pend = []
+        mg = []
+        for g in groups:
+            a_ = float(np.median([smp[q][1] for q in g]))
+            if abs(a_) < 0.3:
+                a_ = 0.0                                # 小さなずれは、ここでは扱わない(_refine_offsets の仕事)
+            else:
+                # 大きなずれは、同じ値が5回以上続けて測れたときだけ信じる。基準は2段:
+                #  きびしい基準(z 5 以上)だけで5回 → 直す
+                #  ゆるい基準(z 4 以上)を混ぜて5回 → いまの時間差が「合っていなさそうな所」に限って直す
+                #    (その範囲に、いまの時間差をきびしい基準で支える測定が1つもなく、ずれのほうにはきびしい基準の測定が2回以上ある)
+                n_strict = sum(1 for q in g if smp[q][2] >= 5.0)
+                t_a, t_b = smp[g[0]][0], smp[g[-1]][0]
+                held = any(z_ >= 5.0 and abs(l_) < 0.3 and t_a <= t_ <= t_b for t_, l_, z_ in smp)
+                if not (n_strict >= 5 or (len(g) >= 5 and n_strict >= 2 and not held)):
+                    continue
+            if mg and abs(a_ - mg[-1]["a"]) < TOL:
+                mg[-1]["t1"] = smp[g[-1]][0]
+            else:
+                mg.append({"a": a_, "t0": smp[g[0]][0], "t1": smp[g[-1]][0]})
+        if not any(g["a"] for g in mg):
+            out.append(sg)
+            continue
+        bnd = [0.0]
+        for g1, g2 in zip(mg, mg[1:]):                  # 切り替わる所: 2秒の窓で、どちらの時間差によく合うかを比べる
+            ts = np.arange(max(g1["t1"], 0.0), min(g2["t0"] + WL, d - 2.0), 0.25)
+            pf = []
+            for t in ts:
+                i0 = int(t * FPS)
+                a = E[:, i0:i0 + 2 * FPS]
+                c1 = corr(a, J, j0 + i0 + int(round(g1["a"] * FPS)), j0 + i0 + int(round(g1["a"] * FPS)) + 1)[0]
+                c2 = corr(a, J, j0 + i0 + int(round(g2["a"] * FPS)), j0 + i0 + int(round(g2["a"] * FPS)) + 1)[0]
+                pf.append(0.0 if max(c1, c2) < 0.1 else c1 - c2)
+            pf = np.array(pf)
+            if not len(pf) or np.abs(pf).max() < 0.05:
+                x = (g1["t1"] + WL + g2["t0"]) / 2
+            else:
+                sc = np.array([pf[:i].sum() - pf[i:].sum() for i in range(len(pf) + 1)])
+                ks = np.flatnonzero(sc >= sc.max() - 1e-9)      # どちらとも言えない所(会話だけ)が続くと、同点が並ぶ → そのまん中
+                k = int((ks[0] + ks[-1]) // 2)                  # (このあと _splice_at_quiet が、近くの音の切れ目へ動かす)
+                x = float(ts[k] + 1.0 if k < len(ts) else ts[-1] + 1.25)     # 窓のまん中あたりで切り替える
+            bnd.append(min(max(x, bnd[-1] + 1.0), d - 1.0))
+        bnd.append(d)
+        prev_je = None
+        for q, (g, x0, x1) in enumerate(zip(mg, bnd, bnd[1:])):
+            es, ee = sg["en_start"] + x0, sg["en_start"] + x1
+            js = es + o + g["a"]
+            if prev_je is not None and js < prev_je:      # 日本語が重なる(英語版のほうが少し長い) → その分、英語側に間をあける
+                es, js = es + (prev_je - js), prev_je
+            if ee - es < 0.5:
+                continue
+            ns = dict(sg, en_start=round(float(es), 4), en_end=round(float(ee), 4), jp_start=round(float(js), 4), jp_end=None)
+            if g["a"]:
+                ns["flag"] = "・".join(x for x in (sg.get("flag", ""), "広く測り直して合わせました") if x)
+            if q > 0:
+                ns.pop("trim_s", None)
+            if q < len(mg) - 1:
+                ns.pop("trim_e", None)
+            out.append(ns)
+            prev_je = js + (ee - es)
+    # 時間差を直した区間が、前後の区間と日本語側で重なったら(同じ音が2回出る)、重なるぶんだけ英語側に間をあける
+    fixed = []
+    for sg in out:
+        p = fixed[-1] if fixed else None
+        if p is not None and "広く測り直して" in (p.get("flag", "") + sg.get("flag", "")):
+            pe = p["jp_end"] if p["jp_end"] is not None else p["jp_start"] + (p["en_end"] - p["en_start"])
+            ov = pe - sg["jp_start"]
+            if 1e-3 < ov < 2.0 and sg["jp_start"] > p["jp_start"]:
+                if "広く測り直して" in p.get("flag", "") and p["jp_end"] is None and p["en_end"] - p["en_start"] > ov + 1.0:
+                    p["en_end"] = round(p["en_end"] - ov, 4)             # 直した区間の終わりを削る
+                elif sg["jp_end"] is None and sg["en_end"] - sg["en_start"] > ov + 1.0:
+                    sg = dict(sg, en_start=round(sg["en_start"] + ov, 4), jp_start=round(sg["jp_start"] + ov, 4))
+        fixed.append(sg)
+    segs[:] = fixed
+
+
 def _refine_edges(segs, esl, jsl, fs, rms_thr):
     """区間の頭と終わりの短い部分(題名の曲など、数秒だけ)が、区間の本体と少しだけ(0.03〜0.3秒)ずれているとき、そこを分ける。
     頭・終わりの3秒を1秒ずらして2回測り、2回とも同じだけずれていて、一致がはっきりしているときだけ直す。"""
@@ -1288,16 +1604,25 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
             continue                                  # もう静かな所で切れている
         # 英語版だけが少し長い所(日本語はつながっている)は、近く(前後10秒)に「英語がその長さぶん無音」の所があれば、そこが本当の場所。
         # (英語版は場面の変わり目の無音が長く、日本語の録画は短い、という形が多い) 見つかれば、間をそこへ移す
-        if esl is not None and en_thr is not None and g_en >= 0.05 and abs(g_jp) < 0.02:
-            lo6 = -min(10.0, p["en_end"] - p["en_start"] - 1.0)
-            hi6 = min(10.0, s["en_end"] - s["en_start"] - 1.0)
+        # 端を詰めた(頭詰め・末尾詰め)せいで、日本語側にも同じだけ間があいている形(g_jp > 0)も、詰める前の形に戻して同じように探す。
+        # ただし、詰めた所のすぐそば(戻すだけになる所)は候補にしない
+        untrim = 0.0
+        if esl is not None and en_thr is not None and not p_str and 0.02 <= g_jp <= 0.6 and g_en - g_jp >= 0.05:
+            untrim = g_jp
+        if esl is not None and en_thr is not None and (untrim or (g_en >= 0.05 and abs(g_jp) < 0.02)):
+            base_en, base_jp, g_en0 = p["en_end"] + untrim, pe + untrim, g_en
+            g_en = g_en - untrim
+            lo6 = -min(10.0, base_en - p["en_start"] - 1.0)
+            hi6 = min(10.0, s["en_end"] - (base_en + g_en) - 1.0)
 
             def rms_of(x_):
                 return float(np.sqrt((x_ ** 2).mean())) if len(x_) else 0.0
             cand = []
             for dd in np.arange(lo6, hi6 + 1e-6, 0.02):
-                x = p["en_end"] + dd
-                jr = rms_of(jsl(pe + dd * rp - 0.03, 0.06))          # 日本語を切る所(前後0.03秒)の音量
+                if untrim and -untrim - 0.3 < dd < 0.3:
+                    continue
+                x = base_en + dd
+                jr = rms_of(jsl(base_jp + dd * rp - 0.03, 0.06))     # 日本語を切る所(前後0.03秒)の音量
                 if jr >= 0.5 * jthr:
                     continue                                          # 日本語が鳴っている最中では切らない
                 er = rms_of(esl(x, g_en))                             # 間にする範囲の、英語の音量
@@ -1308,12 +1633,16 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
                     cand.append((er, abs(dd), float(dd)))
             if cand:
                 dd = min(cand)[2]
-                p["en_end"] = round(p["en_end"] + dd, 4)
+                p["en_end"] = round(base_en + dd, 4)
                 if p_str:
                     p["jp_end"] = round(p["jp_end"] + dd * rp, 4)
-                s["en_start"] = round(s["en_start"] + dd, 4)
-                s["jp_start"] = round(pe + dd * rp + g_jp, 4)
+                s["en_start"] = round(base_en + dd + g_en, 4)
+                s["jp_start"] = round(base_jp + dd * rp + (0.0 if untrim else g_jp), 4)
+                if untrim:
+                    p.pop("trim_e", None)
+                    s.pop("trim_s", None)
                 continue
+            g_en = g_en0
         if p_str:
             continue
         lo = -min(reach, p["en_end"] - p["en_start"] - 1.0)
@@ -1362,6 +1691,70 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
         out += [sg, br]
         if te:
             br["trim_e"] = te
+    segs[:] = out
+
+
+STRETCH_RESAMPLE_MAX = 0.012   # 速さの違いがこの割合までなら、回転数を変える方式(音の高さもこの割合だけ変わる)。超えたら、高さを保つ方式
+STRETCH_GAP_MAX = 0.6      # 英語版だけ長い分がこの秒数までなら、無音を入れずに、日本語の音を伸ばしてつなぐ
+STRETCH_GAP_RATE = 0.029   # 伸ばす割合(3%未満。この範囲なら、合成は回転数を変える方式なので、境目でプツッと鳴らない)
+
+
+def _stretch_small_gaps(segs, jsl, jthr):
+    """英語版だけ少し長い所(日本語はひと続き、または同じ所を2回使っている)で、切れ目が日本語の音の鳴っている最中にあるとき、
+    無音をはさむかわりに、前後の日本語の音を少しだけ(3%未満)遅く再生して、その長さを埋める。
+    日本語のほうが少し長い所(日本語を少し飛ばしている)は、同じように少しだけ速く再生して、飛ばさずにおさめる。
+    切れ目(飛ばす所)が日本語の無音にあるときは、何もしない(間の長さが少し変わるだけで、途切れには聞こえない。口の動きとも合ったまま)。
+    合成では、音の高さを保ったまま速さだけ変える。伸び縮みの範囲では、口の動きとのずれが最大で「長さの差の半分」出る。
+    なので、差が大きいとき(STRETCH_GAP_MAX 超)は行わない。"""
+    def jq(t):
+        return float(np.sqrt((jsl(t - 0.1, 0.2) ** 2).mean()))
+    quiet = 0.5 * jthr
+    out = []
+    for q, sg in enumerate(segs):
+        nx = segs[q + 1] if q + 1 < len(segs) else None
+        if nx is None or sg.get("jp_end") is not None or nx.get("jp_end") is not None:
+            out.append(sg)
+            continue
+        d = sg["en_end"] - sg["en_start"]
+        pe = sg["jp_start"] + d
+        g_en, g_jp = nx["en_start"] - sg["en_end"], nx["jp_start"] - pe
+        net = g_en - g_jp
+        # g_jp < 0 は、英語版の長い分を、日本語の同じ所をもう一度使って埋めている形(同じ音が2回出る)。これも伸ばしてつなぐ
+        longer_en = g_en >= -0.002 and -STRETCH_GAP_MAX <= g_jp <= 0.02 and 0.02 < net <= STRETCH_GAP_MAX
+        # 逆に、日本語のほうが少し長い所(英語はひと続きで、日本語を少し飛ばしている)は、飛ばさずに、前後を少し速くしておさめる
+        longer_jp = -0.002 <= g_en <= 0.02 and g_jp >= -0.002 and 0.02 < -net <= STRETCH_GAP_MAX
+        if not (longer_en or longer_jp):
+            out.append(sg)
+            continue
+        if longer_en:
+            rep_q = g_jp > -0.02 or float(np.sqrt((jsl(nx["jp_start"], -g_jp) ** 2).mean())) < quiet     # くり返す所は無音か
+            if max(jq(pe), jq(nx["jp_start"])) < quiet and rep_q:
+                out.append(sg)                          # 無音の所で切れている → 間が少し長くなるだけ。そのまま
+                continue
+            L = (g_en - (1.0 + STRETCH_GAP_RATE) * g_jp) / STRETCH_GAP_RATE      # 伸ばすのに使う、英語側の長さ(間を除く)
+        else:
+            if float(np.sqrt((jsl(pe, g_jp) ** 2).mean())) < quiet:
+                out.append(sg)                          # 飛ばす所が無音 → 間が少し短くなるだけ。そのまま
+                continue
+            L = (g_jp - (1.0 + STRETCH_GAP_RATE) * g_en) / STRETCH_GAP_RATE
+        room_a, room_b = d - 1.0, (nx["en_end"] - nx["en_start"]) - 1.0
+        a = min(L / 2, room_a)
+        b = min(L - a, room_b)
+        a = min(L - b, room_a)
+        if a < 0 or b < 0 or a + b < L - 1e-6:
+            out.append(sg)                              # 前後の区間が短くて、3%未満では埋めきれない → そのまま
+            continue
+        x0, x1 = round(sg["en_end"] - a, 4), round(nx["en_start"] + b, 4)
+        br = dict(sg, en_start=x0, en_end=x1, jp_start=round(pe - a, 4), jp_end=round(nx["jp_start"] + b, 4))
+        br["flag"] = ""          # 前後の区間の続き。要確認には数えない
+        br.pop("trim_s", None)
+        br.pop("trim_e", None)
+        sg.pop("trim_e", None)
+        sg["en_end"] = x0
+        nx["jp_start"] = round(nx["jp_start"] + (x1 - nx["en_start"]), 4)
+        nx["en_start"] = x1
+        nx.pop("trim_s", None)
+        out += [sg, br]
     segs[:] = out
 
 
@@ -1418,6 +1811,33 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
                 if jrms(j0, j1) >= 0.25 * jthr:
                     sg_["en_start"], sg_["jp_start"] = round(float(run_e), 4), round(float(j1), 4)
                     sg_["trim_s"] = True
+        # いちばん前の区間・CM の直後: 頭に、CM や前の番組の終わりの音が残っていることがある(英語側が無音ではないので、上の規則では落ちない)。
+        #   放送の切り替わりには短い無音があるので、頭から6秒以内に日本語の無音(0.3秒以上)があり、その手前の日本語がそのあとの 4倍以上
+        #   大きく、英語側にはそういう音量の差がない(2倍未満)とき、無音の終わりまで頭を詰める
+        first = not any(x["en_end"] <= sg_["en_start"] + 1e-6 for x in segs if x is not sg_)
+        if (first or _cm_before(sg_)) and d_en > 12.0:
+            q_s, q_e, u = None, None, 0.0
+            while u < 6.0:
+                if jrms(sg_["jp_start"] + u * r_, sg_["jp_start"] + (u + 0.05) * r_) < 0.5 * jthr:
+                    if q_s is None:
+                        q_s = u
+                    q_e = u + 0.05
+                elif q_s is not None:
+                    if q_e - q_s >= 0.3:
+                        break
+                    q_s, q_e = None, None
+                u += 0.05
+            if q_s is not None and q_e - q_s >= 0.3 and q_s >= 0.3:
+                def erms(a_, b_):
+                    return float(np.sqrt((esl(sg_["en_start"] + a_, b_ - a_) ** 2).mean()))
+                j_bef = jrms(sg_["jp_start"], sg_["jp_start"] + q_s * r_)
+                j_aft = jrms(sg_["jp_start"] + q_e * r_, sg_["jp_start"] + (q_e + 4.0) * r_)
+                e_bef, e_aft = erms(0.0, q_s), erms(q_e, q_e + 4.0)
+                if j_bef >= 4.0 * max(j_aft, 0.25 * jthr) and e_bef < 2.0 * max(e_aft, 0.25 * rms_thr):
+                    sg_["en_start"] = round(float(sg_["en_start"] + q_e), 4)
+                    sg_["jp_start"] = round(float(sg_["jp_start"] + q_e * r_), 4)
+                    sg_["trim_s"] = True
+                    d_en = sg_["en_end"] - sg_["en_start"]
         # 先頭: 英語が無音のあいだ進める(日本語に音があるときだけ。最大3秒)
         t_ = sg_["en_start"]
         while t_ - sg_["en_start"] < 3.0 and sg_["en_end"] - t_ > 0.5 and float(np.sqrt((esl(t_, 0.1) ** 2).mean())) < QT * rms_thr:
@@ -1465,7 +1885,7 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
                     sg_["jp_end"] = round(float(j1), 4)
 
 
-def auto_align(en, jp, progress=lambda f, m: None):
+def auto_align(en, jp, progress=lambda f, m: None, stretch_gaps=True):
     """英語版(en)の各時刻に対応する日本語録画(jp)の時刻を自動で見つけ、区間リストを返す。
 
     戻り値: (segs, info)
@@ -1673,7 +2093,11 @@ def auto_align(en, jp, progress=lambda f, m: None):
             runs_ = _runs_pos()
             for i_ in range(len(runs_) - 1):
                 a_, b_ = _span(runs_[i_]), _span(runs_[i_ + 1])
-                if b_[0] < a_[1] - 1.0:
+                # 窓の中心で比べているので、境目をまたぐ窓のぶん、見かけの逆戻りが窓の長さ近くまで出る。
+                # 英語側だけの場面(日本語版でカットされた場面)の前後は、日本語がちょうど続くので、これに当たりやすい。
+                # どちらもしっかりした区間(3窓以上)なら、窓の長さまでの逆戻りは偽の一致とみなさない(重なりは 6.5 で引き直す)
+                solid = min(runs_[i_][2] - runs_[i_][1], runs_[i_ + 1][2] - runs_[i_ + 1][1]) + 1 >= 3
+                if b_[0] < a_[1] - (max(1.0, WL) if solid else 1.0):
                     weak = runs_[i_] if a_[2] < b_[2] else runs_[i_ + 1]
                     lab[weak[1]:weak[2] + 1] = np.where(lab[weak[1]:weak[2] + 1] == weak[0], -1, lab[weak[1]:weak[2] + 1])
                     changed = True
@@ -1984,8 +2408,12 @@ def auto_align(en, jp, progress=lambda f, m: None):
                 where = "、".join(_fmt_t(sg_["jp_start"] - o_) for o_ in others[:2])
                 sg_["flag"] = "・".join(x for x in (sg_["flag"], f"似た場所が他にもあります(英語版 {where})") if x)
 
+    _recheck_wide(segs, esl, jsl, fs, rms_thr)
+    _bridge_same_scene(segs)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr)
     _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
+    if stretch_gaps:       # 音+映像のときは、2つの結果を合わせたあとで行う
+        _stretch_small_gaps(segs, jsl, jthr)
 
     unused = []
     prev_end = jo
@@ -2109,7 +2537,7 @@ def _offset_groups(smp, zs, WL, merge=True):
     return out
 
 
-def video_align(en, jp, progress=lambda f, m: None, ctx=None):
+def video_align(en, jp, progress=lambda f, m: None, ctx=None, stretch_gaps=True):
     """auto_align の映像版。画面の似かたで、英語版の各時刻に当たる日本語録画の時刻を見つける(音が違いすぎて合わないとき用)。
     大まかな位置は画面で決め、細かい位置は音で合わせ直す(音で決められない所は画面で1コマ単位に合わせる)。
     戻り値は auto_align と同じ (segs, info)。"""
@@ -2436,6 +2864,8 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
                     p["jp_end"] = round(p["jp_end"] - cut, 4)
     _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.1)
     _splice_at_quiet(segs, jsl, jthr, esl=esl, en_thr=rms_thr)
+    if stretch_gaps:       # 音+映像のときは、2つの結果を合わせたあとで行う
+        _stretch_small_gaps(segs, jsl, jthr)
     unused = []
     prev_end = jo
     for s in segs:
@@ -2450,13 +2880,48 @@ def video_align(en, jp, progress=lambda f, m: None, ctx=None):
     return segs, {"ok": True, "unused_jp": unused, "msg": ""}
 
 
+def _bridge_same_scene(segs, max_gap=60.0, tol=0.15):
+    """となり合う区間の間が、英語側と日本語側で同じ長さだけ空いている所をつなぐ(note が "A"=音 / "V"=映像 の段階で呼ぶ)。
+    間の長さが同じ = CM やカットではなく、同じ場面が続いている。音で測れなかっただけ(声だけの場面など)なので、空けたままにすると
+    そこが無音になる。音で決めた区間(時間差が一定)のほうを延ばし、映像だけで決めた短い区間は、それに置きかえる。"""
+    def je(g):
+        return g["jp_end"] if g["jp_end"] is not None else g["jp_start"] + (g["en_end"] - g["en_start"])
+
+    def mark(g):
+        if "声だけの場面を推定" not in g.get("flag", ""):
+            g["flag"] = "・".join(x for x in (g.get("flag", ""), "声だけの場面を推定") if x)
+    out = []
+    for g in segs:
+        p = out[-1] if out else None
+        if p is not None:
+            g_en, g_jp = g["en_start"] - p["en_end"], g["jp_start"] - je(p)
+            if 0.5 <= g_en <= max_gap and abs(g_en - g_jp) <= tol:
+                if g["jp_end"] is None and (p["jp_end"] is not None or p.get("note") == "V"):
+                    # 後ろが音で決めた区間 → 後ろを手前へ延ばす。前が映像だけの区間なら、それごと置きかえる
+                    lim = je(out[-2]) if len(out) >= 2 else None
+                    to = p["en_start"] if p.get("note") == "V" else p["en_end"]
+                    if to == p["en_start"] and lim is not None and g["jp_start"] - (g["en_start"] - to) < lim - 1e-3:
+                        to = p["en_end"]
+                    if to == p["en_start"]:
+                        out.pop()
+                    g = dict(g, jp_start=round(g["jp_start"] - (g["en_start"] - to), 4), en_start=to)
+                    g.pop("trim_s", None)
+                    mark(g)
+                elif p["jp_end"] is None:
+                    p["en_end"] = g["en_start"]          # 前が音で決めた区間 → 前を先へ延ばす
+                    p.pop("trim_e", None)
+                    mark(p)
+        out.append(g)
+    segs[:] = out
+
+
 def combined_align(en, jp, progress=lambda f, m: None):
     """音(auto_align)と映像(video_align)の両方で合わせ、場所ごとに確かなほうを採る。
     ・両方が同じ答え → 音の結果(細かい位置が正確)   ・片方しか見つけていない → その結果
     ・答えが違う → 画面がはっきり合っているほう(差が小さければ音)。違っていた所は「要確認」にする。"""
-    A, ia = auto_align(en, jp, lambda f, m: progress(0.35 * f, "(1/2 音) " + m))
+    A, ia = auto_align(en, jp, lambda f, m: progress(0.35 * f, "(1/2 音) " + m), stretch_gaps=False)
     ctx = {}
-    V, iv = video_align(en, jp, lambda f, m: progress(0.35 + 0.6 * f, "(2/2 映像) " + m), ctx)
+    V, iv = video_align(en, jp, lambda f, m: progress(0.35 + 0.6 * f, "(2/2 映像) " + m), ctx, stretch_gaps=False)
     if not iv["ok"] or not V:
         if ia["ok"] and A:
             for s in A:
@@ -2607,14 +3072,18 @@ def combined_align(en, jp, progress=lambda f, m: None):
                             p["jp_end"] = round(p["jp_end"] - cut, 4)
         keep.append(s)
     out = keep
+    _bridge_same_scene(out)
     for s in out:
         s["note"] = "自動(音+映像)"
     # 区間の中で時間差が少しだけ変わる所(0.1秒ほどのずれ)を測り直して、そこで分ける
+    _recheck_wide(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     _refine_offsets(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
+    _bridge_same_scene(out)      # 時間差を直した結果、前の区間とちょうどつながるようになった所
     _refine_edges(out, ctx["trim"][0], ctx["trim"][1], ctx["fs"], ctx["trim"][2])
     # 区間の組み合わせが変わったので、端が英語の無音に掛かる所(CM前のジングルなど)をもう一度詰める
     _trim_to_en_silence(out, *ctx["trim"])
     _splice_at_quiet(out, ctx["trim"][1], ctx["trim"][3], esl=ctx["trim"][0], en_thr=ctx["trim"][2])
+    _stretch_small_gaps(out, ctx["trim"][1], ctx["trim"][3])
     jo, j_end = jp.a_origin, jp.end
     unused, prev_end = [], jo
     for s in out:
@@ -3561,6 +4030,12 @@ def build_from_items(items, en_rng, jp_rng):
         if x1 > jp_rng[1]:
             t1 -= (x1 - jp_rng[1]) / ratio
             x1 = jp_rng[1]
+        # 映像の先頭(0秒)より前には、音を置けない。英語版の音が映像より少し早く始まる素材で、0秒より前の切れ端ができると、
+        # 合成のときにそのぶん全体が後ろへずれてしまう
+        if t0 < 0.0:
+            d0 = min(-t0, t1 - t0)
+            t0 += d0
+            x0 += d0 * ratio
         if t1 - t0 < 0.05:
             continue
         segs.append({"en_start": t0, "en_end": t1, "jp_start": x0,
@@ -3743,6 +4218,12 @@ class Track(tk.Canvas):
         self.selr = None   # ドラッグで選んだ範囲 (開始, 終了)
         self._press = None
         self._pan = None
+        self._grab = None  # つまんで動かしている最中の情報 (つまみ, 押した所のx, 動いたか)
+        self.drag_note = None  # 動かしている最中に、つまみの横に出す文字 (時刻, 文字)
+        self.hover = None      # マウスが乗っている「つまめる線」 (つまみ, 時刻)
+        self.bind("<Leave>", lambda e: self._set_hover(None))
+        self.bind("<Motion>", self.on_hover)
+        self.bind("<Double-Button-1>", self.on_double)
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_motion)
@@ -3752,6 +4233,8 @@ class Track(tk.Canvas):
         self.bind("<Button-5>", lambda e: self.on_wheel(e, -1))
         self.bind("<ButtonPress-3>", self.pan_start)
         self.bind("<B3-Motion>", self.pan_move)
+        self.bind("<ButtonRelease-3>", self.pan_end)
+        self.sbar = None   # 下に付ける横スクロールバー(App が作って渡す)
 
     def x_of(self, t):
         return (t - self.vs) / self.vspan * self.winfo_width()
@@ -3760,12 +4243,64 @@ class Track(tk.Canvas):
         return self.vs + x / max(self.winfo_width(), 1) * self.vspan
 
     # --- マウス: クリック=カーソル / ドラッグ=範囲選択 / ホイール=拡大縮小 / 右ドラッグ=横移動
+    def _handle_at(self, x):
+        """x の近く(5ピクセル以内)にある、つまんで動かせる境目。なければ None。"""
+        best = self._handle_t_at(x)
+        return best[0] if best else None
+
+    def _handle_t_at(self, x):
+        """_handle_at と同じものを (つまみ, 時刻) で返す。"""
+        best = None
+        for t, h in self.app.drag_handles(self.key):
+            d = abs(self.x_of(t) - x)
+            if d <= 5 and (best is None or (h[0] == "pt", -d) > (best[1][0] == "pt", -best[0])):
+                best = (d, h, t)
+        return (best[1], best[2]) if best else None
+
+    def _set_hover(self, ht):
+        if ht != self.hover:
+            self.hover = ht
+            if not self._grab:
+                self.redraw(fast=True)       # 波形は描き直さず、線だけ
+
+    def on_hover(self, e):
+        if self._grab or self._press:
+            return
+        ht = self._handle_t_at(e.x) if e.y < self.winfo_height() - 22 else None
+        h = ht[0] if ht else None
+        self._set_hover(ht)
+        want = "sb_h_double_arrow" if h else ""
+        if self["cursor"] != want:
+            self.config(cursor=want)
+            if h:
+                self.app.say(self.app.drag_hint(h))
+
+    def on_double(self, e):
+        h = self._handle_at(e.x)
+        if h:
+            self._press = self._grab = None
+            self.app.select_item(h[1])
+            self.app.edit_item()
+
     def on_press(self, e):
         self.focus_set()
         self.app.set_active(self.key)
+        h = self._handle_at(e.x) if e.y < self.winfo_height() - 22 else None
+        if h:
+            self._grab = [h, e.x, False]
+            self.hover = None
+            self.app.drag_begin(h)
+            return
         self._press = (e.x, False)
 
     def on_motion(self, e):
+        if self._grab:
+            h, x0, _moved = self._grab
+            if abs(e.x - x0) < 3 and not self._grab[2]:
+                return
+            self._grab[2] = True
+            self.app.drag_move(self.key, h, self.t_of(e.x) - self.t_of(x0), not (e.state & 0x1))   # Shift なし = こちら側だけ
+            return
         if not self._press:
             return
         x0, dragging = self._press
@@ -3777,6 +4312,11 @@ class Track(tk.Canvas):
         self.redraw()
 
     def on_release(self, e):
+        if self._grab:
+            h, _x0, moved = self._grab
+            self._grab = None
+            self.app.drag_end(self.key, h, moved)
+            return
         if not self._press:
             return
         _x0, dragging = self._press
@@ -3800,12 +4340,52 @@ class Track(tk.Canvas):
         self.vspan = new
 
     def pan_start(self, e):
-        self._pan = (e.x, self.vs)
+        self._pan = (e.x, self.vs, False)
 
     def pan_move(self, e):
         if self._pan:
+            if not self._pan[2] and abs(e.x - self._pan[0]) < 4:
+                return                       # ほとんど動いていないうちは、右クリック(メニュー)として扱う
+            self._pan = (self._pan[0], self._pan[1], True)
             self.vs = self._pan[1] - (e.x - self._pan[0]) / self.winfo_width() * self.vspan
             self.redraw()
+
+    def pan_end(self, e):
+        pan, self._pan = self._pan, None
+        if pan and not pan[2]:               # 動かさずに離した = 右クリック → その場所のメニュー
+            self.focus_set()
+            self.app.set_active(self.key)
+            self.app.track_menu(self.key, self.t_of(e.x), self._handle_at(e.x), e.x_root, e.y_root)
+
+    # --- 横スクロールバー
+    def _range(self):
+        m = self.media
+        return (min(0.0, m.a_origin), max(m.end, 1.0)) if m else None
+
+    def xview(self, *args):
+        """スクロールバーからの操作。"""
+        r = self._range()
+        if not r or not args:
+            return
+        lo, hi = r
+        if args[0] == "moveto":
+            self.vs = lo + float(args[1]) * (hi - lo)
+        elif args[0] == "scroll":
+            self.vs += int(args[1]) * self.vspan * (0.9 if args[2] == "pages" else 0.1)
+        self.vs = min(max(self.vs, lo - self.vspan * 0.5), hi - self.vspan * 0.5)
+        self.redraw()
+
+    def _sync_sbar(self):
+        if not self.sbar:
+            return
+        r = self._range()
+        if not r:
+            self.sbar.set(0.0, 1.0)
+            return
+        lo, hi = r
+        a = (self.vs - lo) / (hi - lo)
+        b = (self.vs + self.vspan - lo) / (hi - lo)
+        self.sbar.set(min(max(a, 0.0), 1.0), min(max(b, 0.0), 1.0))
 
     def ensure_visible(self, t):
         if t < self.vs + self.vspan * 0.05 or t > self.vs + self.vspan * 0.95:
@@ -3822,14 +4402,39 @@ class Track(tk.Canvas):
             body = f"{m}:{int(round(sec)):02d}" if not h else f"{h}:{m:02d}:{int(round(sec)):02d}"
         return sign + body
 
-    def redraw(self):
-        self.delete("all")
+    def redraw(self, fast=False):
+        """描き直す。fast=True: 表示範囲が前と同じなら、波形はそのまま残して、帯・線・文字だけ描き直す
+        (境目をつまんで動かしている最中に使う。波形の計算と描画を省くので、動きがなめらかになる)。"""
         W, H = self.winfo_width(), self.winfo_height()
+        key = (self.vs, self.vspan, W, H, id(self.media))
+        keep = bool(fast and getattr(self, "_wave_ids", None) and getattr(self, "_wave_key", None) == key)
+        if keep:
+            wave = set(self._wave_ids)
+            for i in self.find_all():
+                if i not in wave:
+                    self.delete(i)
+        else:
+            self.delete("all")
+            self._wave_ids = []
         if W < 10:
             return
         body = H - 22  # 波形エリアの高さ (下は目盛り)
         mid = body / 2
         v1 = self.vs + self.vspan
+        self._draw_under(W, body, v1)
+        if keep:      # いま描いた下地を、残してある波形の下へ送る(描いた順は保つ)
+            for i in self.find_all():
+                if i not in wave:
+                    self.tag_lower(i, self._wave_ids[0])
+        else:
+            before = set(self.find_all())
+            self._draw_wave(W, H, body, mid, v1)
+            self._wave_ids = [i for i in self.find_all() if i not in before]
+            self._wave_key = key
+        self._draw_over(W, H, body, v1)
+        self._sync_sbar()
+
+    def _draw_under(self, W, body, v1):
         # --- 区間の色帯 (波形の下地)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
@@ -3865,6 +4470,8 @@ class Track(tk.Canvas):
         if self.selr:
             xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
             self.create_rectangle(xa, 0, xb, body, fill="#cfe3ff", outline="#2f6fd0", width=2)
+
+    def _draw_wave(self, W, H, body, mid, v1):
         self.create_line(0, mid, W, mid, fill="#c9cfd8")
         # --- 波形
         m = self.media
@@ -3881,6 +4488,8 @@ class Track(tk.Canvas):
             elif env:
                 _, xs, ys = env
                 self.create_line(np.column_stack([xs, mid - ys * amp]).ravel().tolist(), fill="#3b6ea5")
+
+    def _draw_over(self, W, H, body, v1):
         # --- 区間の境界線・名前 (A, B, C…)
         for a, b, i in self.bands:
             xa, xb = self.x_of(a), self.x_of(b)
@@ -3913,8 +4522,17 @@ class Track(tk.Canvas):
                 self.create_line(x, 0, x, body, fill="#1a9e57", width=2)
                 self.create_rectangle(x, 0, x + 8 + 7 * len(label), 15, fill="#1a9e57", outline="")
                 self.create_text(x + 4, 8, text=label, anchor="w", fill="white", font=("", 8, "bold"))
+        if self.hover and not self._grab:      # マウスが乗っている「つまめる線」を太く
+            x = self.x_of(self.hover[1])
+            self.create_line(x, 0, x, body, fill="#ff8a00", width=4)
         x = self.x_of(self.cursor)
         self.create_line(x, 0, x, body, fill="#e0262d", width=1)
+        if self.drag_note:
+            xn = min(max(self.x_of(self.drag_note[0]) + 8, 4), max(W - 300, 4))
+            tid = self.create_text(xn + 4, 30, text=self.drag_note[1], anchor="w", fill="#0b6b3a", font=("", 9, "bold"))
+            bb = self.bbox(tid)
+            if bb:      # 波形の上でも読めるように、白い下地を敷く
+                self.tag_lower(self.create_rectangle(bb[0] - 4, bb[1] - 2, bb[2] + 4, bb[3] + 2, fill="white", outline="#0b6b3a"), tid)
         if self.selr:
             xa, xb = self.x_of(self.selr[0]), self.x_of(self.selr[1])
             self.create_text((xa + xb) / 2, 24, text=f"選択 {self.selr[1] - self.selr[0]:.2f}秒",
@@ -4092,7 +4710,7 @@ def _mmss(t):
     return f"{int(t // 60)}:{t % 60:04.1f}"
 
 
-def output_check(path, sr=8000, cuts=()):
+def output_check(path, sr=8000, cuts=(), ramps=()):
     """書き出した動画の日本語音声(1本目)と英語音声(2本目)を比べて、おかしそうな所を探す(合成後の自動チェック用)。
     cuts: 区間の切れ目(出力の時刻)。ひと続きの区間の中では日本語の音は切れ目なくつながっているので、
           前後が合っているのに途中の1か所だけずれる、ということは起きない(測定の外れとして扱う)。
@@ -4107,10 +4725,16 @@ def output_check(path, sr=8000, cuts=()):
             raws.append(np.frombuffer(r.stdout, dtype=np.int16))   # 長い動画でもメモリを食わないよう、16ビットのまま持つ(計算する所だけ変換)
     except Exception as ex:  # noqa: BLE001
         return None, [f"出力を読めませんでした: {ex}"]
-    return check_tracks(raws[0], raws[1], sr, cuts)
+    return check_tracks(raws[0], raws[1], sr, cuts, ramps=ramps)
 
 
-def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
+def stretch_ramps(segs):
+    """伸び縮みさせてつないでいる区間の一覧 [(英語の開始, 終了, 長さの差)]。自動チェックで、その範囲のずれを数えないために使う。"""
+    return [(float(x["en_start"]), float(x["en_end"]), abs((x["jp_end"] - x["jp_start"]) - (x["en_end"] - x["en_start"])))
+            for x in segs if x.get("jp_start") is not None and x.get("jp_end") is not None]
+
+
+def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
     """output_check の中身。日本語と英語の音(16ビットの配列)を比べる。stats に辞書を渡すと、数字の結果も入れる。"""
     j, e = j_all, e_all
     n = min(len(j), len(e))
@@ -4152,6 +4776,7 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
     hb = sr // 100
     kb = n // hb
     mxj = np.abs(j[: kb * hb].reshape(kb, hb)).max(1)
+    src_gaps = []
     i = 0
     while i < kb:
         if mxj[i] > 12:
@@ -4170,6 +4795,10 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
             x = x[max(p0, 0): min(p1, n)].astype(np.float32)
             return float(np.sqrt((x ** 2).mean())) if len(x) else 0.0
         if (rms(j, a_ - w, a_) >= 0.15 * pj and rms(j, b_, b_ + w) >= 0.15 * pj and rms(e, a_, b_) >= 0.1 * pe):
+            if cuts and not any(a_ / sr - 0.3 <= c_ <= b_ / sr + 0.3 for c_ in cuts):
+                # 区間のつなぎ目から離れている = 合成でできた途切れではなく、日本語の録画の元の音にある切れ目(台詞の息つぎなど)
+                src_gaps.append(f"{_mmss(a_ / sr)}({ln:.2f}秒)")
+                continue
             issues.append(f"{_mmss(a_ / sr)} あたり ({ln:.2f}秒): 日本語の音が、鳴っている最中に一瞬途切れています")
     # 2) ずれ: 6秒ごとに、日本語を前後3秒動かしていちばん合う位置を見る(BGM・効果音が同じ所でだけ分かる)
     W, R = 6 * sr, 3 * sr
@@ -4192,6 +4821,8 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
         w0 = int(0.04 * sr)
         near0 = float(c[max(i0 - w0, 0): i0 + w0 + 1].max()) if 0 <= i0 < len(c) else 0.0
         lags.append((s0 / sr, (i - i0) / sr, float(c[i]), near0))
+    if src_gaps:
+        notes.append("日本語の録画の元の音にある短い無音(区間のつなぎ目ではないので、合成でできたものではありません): " + " ".join(src_gaps[:30]))
     good = [x for x in lags if x[2] >= 0.25]
     bad = [x for x in good if abs(x[1]) > 0.1 and x[3] < 0.7 * x[2]]
     amb = [x for x in good if abs(x[1]) > 0.1 and x[3] >= 0.7 * x[2]]
@@ -4208,6 +4839,9 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
         if near or same_seg:
             bad.remove(x)
             iso.append(x)
+    # 音を伸び縮みさせてつないでいる範囲は、その途中で「長さの差」の分までずれるのが正しい。ずれとは数えない
+    ramp = [x for x in bad if any(a - 6.0 < x[0] < b and abs(x[1]) <= dl + 0.1 for a, b, dl in ramps)]
+    bad = [x for x in bad if x not in ramp]
     cur = None
     for t, lg, c, c0 in bad + [(None, None, None, None)]:
         if cur and t is not None and abs(t - cur[1] - 6.0) < 0.01 and abs(lg - cur[2]) <= 0.05:
@@ -4217,7 +4851,10 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None):
             issues.append(f"{_mmss(cur[0])}〜{_mmss(cur[1] + 6)}: 日本語の音が {abs(cur[2]):.2f}秒 {'遅れて' if cur[2] > 0 else '早く'}入っているようです (一致 {cur[3]:.2f})")
         cur = [t, t, lg, c] if t is not None else None
     if good:
-        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1) + len(amb)
+        ok_n = sum(1 for x in good if abs(x[1]) <= 0.1) + len(amb) + len(ramp)
+        if ramp:
+            notes.append("音を少し伸び縮みさせてつないでいる所(その途中は少しずれます。ずれとは数えていません): "
+                         + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in ramp[:20]))
         if iso:
             notes.append("1か所だけ外れた測定(前後は合っているので、ずれとは数えていません): "
                          + " ".join(f"{_mmss(x[0])}={x[1]:+.2f}" for x in iso[:20]))
@@ -4281,7 +4918,7 @@ def measure_segs(en, jp, segs):
     j, e = virtual_tracks(en, jp, segs)
     cuts = sorted({round(float(v), 3) for x in segs for v in (x["en_start"], x["en_end"])})
     stats = {}
-    issues, _notes = check_tracks(j, e, SR, cuts, stats)
+    issues, _notes = check_tracks(j, e, SR, cuts, stats, ramps=stretch_ramps(segs))
     return {"issues": issues if issues is not None else ["(測れませんでした)"], "stats": stats}
 
 
@@ -4742,8 +5379,8 @@ class App(_TkBase):
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
-                 "Shift+ホイール・右ドラッグ: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 一覧で選んで←→(または Alt+←→): 線を1コマ動かす(Shift: 0.1秒) / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+                 "Shift+ホイール・右ドラッグ・下のバー: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
         def _toggle_keys(btn):
             if self.keys_lbl.winfo_ismapped():
                 self.keys_lbl.pack_forget()
@@ -4760,8 +5397,11 @@ class App(_TkBase):
 
         self.tr = {"en": Track(self.manual, self, "en", "英語版 (基準の映像)"),
                    "jp": Track(self.manual, self, "jp", "日本語の録画")}
-        self.tr["en"].pack(fill="x", padx=6, pady=(2, 2))
-        self.tr["jp"].pack(fill="x", padx=6, pady=(2, 2))
+        for k in ("en", "jp"):
+            t = self.tr[k]
+            t.pack(fill="x", padx=6, pady=(2, 0))
+            t.sbar = ttk.Scrollbar(self.manual, orient="horizontal", command=t.xview)   # 波形の横スクロール
+            t.sbar.pack(fill="x", padx=6, pady=(0, 2))
 
         mid = ttk.Frame(self.manual, padding=4)
         mid.pack(fill="x")
@@ -4794,7 +5434,7 @@ class App(_TkBase):
         ttk.Button(r1, text="A 音で探して合わせる", width=20, command=self.auto_snap).pack(side="left")
         ttk.Button(r1, text="S この2つは『同じ場面』", width=22, command=self.add_point).pack(side="left", padx=6, ipady=3)
         self.refine_v = tk.BooleanVar(value=True)
-        ttk.Checkbutton(g1, text="登録するとき、音で微調整する",
+        ttk.Checkbutton(g1, text="登録するとき・線をドラッグしたとき、音で微調整する",
                         variable=self.refine_v).pack(anchor="w", padx=8, pady=(0, 4))
         g2 = ttk.LabelFrame(ctr, text=" ② 特別な部分 (先に波形をドラッグして範囲を選ぶ) ")
         g2.pack(fill="x")
@@ -4888,6 +5528,8 @@ class App(_TkBase):
         m.add_separator()
         m.add_command(label="記録と比べる (回帰チェック)", command=self._regress_window)
         m.add_command(label="記録のフォルダを開く", command=self._open_records)
+        m.add_separator()
+        m.add_command(label="診断情報を保存… (不具合の報告用)", command=self._save_diagnostic)
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
@@ -6419,12 +7061,13 @@ class App(_TkBase):
         cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
         segs_now = [dict(x) for x in self.segs]
+        ramps = stretch_ramps(segs_now)
         med = dict(self.media)
         self._beta_virtual = None
 
         def work():
             try:
-                issues, notes = output_check(out, cuts=cuts)
+                issues, notes = output_check(out, cuts=cuts, ramps=ramps)
             except Exception as ex:  # noqa: BLE001
                 issues, notes = None, [f"チェック中にエラー: {ex}"]
             try:      # 記録用: 合成せずに測った数字も取っておく(回帰チェックは、この数字と比べる)
@@ -6599,8 +7242,53 @@ class App(_TkBase):
         cur.update(kw)
         try:
             f.write_text(json.dumps(cur), encoding="utf-8")
-        except OSError:
+        except OSError as e:
+            if not getattr(self, "_settings_warned", False):      # 知らせるのは、起動している間に1回だけ
+                self._settings_warned = True
+                msg = (f"設定を保存できませんでした。次に起動したとき、設定が元に戻ります。\n\n場所: {f}\n理由: {e}\n\n"
+                       "本体を、書き込みのできるフォルダ(デスクトップやドキュメントなど)に置いてください。")
+                self.after(100, lambda: messagebox.showwarning("syncdub", msg))
+
+    # ---------- 想定外のエラーの記録・診断情報 ----------
+    def report_callback_exception(self, exc, val, tb):
+        """画面の操作の途中で起きた、想定外のエラー(tkinter がここに知らせてくる)。"""
+        log_exception("画面の操作", exc, val, tb)
+        try:
+            self.say(f"想定外のエラーが起きました ({exc.__name__}: {val})。記録: {error_log_path()}")
+        except Exception:  # noqa: BLE001
             pass
+
+    def _notify_error_log(self):
+        """前回までに記録されたエラーがあって、まだ知らせていなければ、1回だけ知らせる。"""
+        f = error_log_path()
+        try:
+            mark = f"{f.stat().st_size}"
+        except OSError:
+            return
+        if self._setting("error_log_seen", "") == mark:
+            return
+        self._save_settings(error_log_seen=mark)
+        messagebox.showinfo("syncdub", "前回、想定外のエラーが記録されました。\n\n"
+                            f"記録: {f}\n\n不具合を報告するときは、「更新・設定」→「診断情報を保存」でできるファイルを付けてください。")
+
+    def _save_diagnostic(self):
+        last = getattr(self, "_beta_last", None) or {}
+        extra = [("読み込んでいる素材", "\n".join(f"{k}: {v}" for k, v in (("英語版", self.en_var.get()), ("日本語の録画", self.jp_var.get()),
+                                                                    ("保存先", self.out_path.get())) if v)),
+                 ("直近の警告", "\n".join(self.warns)),
+                 ("直近の自動チェック", "\n".join([str(last.get("out", ""))] + [str(i) for i in last.get("issues", [])]
+                                                + [str(n) for n in last.get("notes", [])]).strip())]
+        p = filedialog.asksaveasfilename(title="診断情報を保存", defaultextension=".txt", filetypes=[("テキスト", "*.txt")],
+                                         initialfile=f"syncdub_診断情報_{datetime.now():%Y%m%d_%H%M%S}.txt")
+        if not p:
+            return
+        try:
+            Path(p).write_text(diagnostic_text(extra), encoding="utf-8")
+        except OSError as e:
+            messagebox.showerror("syncdub", f"保存できませんでした: {e}")
+            return
+        messagebox.showinfo("syncdub", f"保存しました。\n{p}\n\nファイルの場所(番組名が入ることがあります)が書かれています。"
+                            "人に送る前に、中身を確かめてください。")
 
     def _save_auto(self):
         self._save_settings(auto_update=self.auto_upd.get())
@@ -6829,8 +7517,17 @@ class App(_TkBase):
             return
         ks = ev.keysym
         k = self.active
+        alt = bool(ev.state & 0x20008)      # Alt (Windows は 0x20000、X11 は 0x8)
+        if ks in ("Left", "Right") and (alt or w is getattr(self, "itree", None)) and self.nudge_target() is not None:
+            d = -1 if ks == "Left" else 1    # 選んでいる『同じ場面』の線を、少しだけ動かす
+            fps = self.fps(k)
+            self.nudge(d * (0.1 if ev.state & 0x1 else 10 / fps if ev.state & 0x4 else 1 / fps))
+            return "break"
         if isinstance(w, ttk.Treeview) and ks in ("Up", "Down", "Left", "Right"):
             return  # 一覧の操作中は矢印キーを一覧に任せる
+        if ks == "Escape" and getattr(self, "_drag0", None):
+            self.drag_cancel()
+            return "break"
         if ks in ("Left", "Right"):
             d = -1 if ks == "Left" else 1
             if ev.state & 0x1:
@@ -6992,6 +7689,322 @@ class App(_TkBase):
         except Exception:  # noqa: BLE001
             pass
 
+    # ---------- 波形の上で、境目をつまんで動かす ----------
+    LINK = 0.03   # これより近い端どうしは「同じ境目」として一緒に動かす
+
+    def _linked(self, items, pt):
+        """『同じ場面』の点 pt に、終わりがくっついているカット・CM(= 区間の境目を作っている組)。"""
+        cuts = [i for i in items if i["k"] == "cut" and abs(i["en1"] - pt["en"]) < self.LINK]
+        cms = [i for i in items if i["k"] == "cm" and abs(i["jp1"] - pt["jp"]) < self.LINK]
+        return cuts, cms
+
+    def drag_handles(self, k):
+        """波形 k (en / jp) の上で、つまんで動かせる境目の一覧 [(時刻, つまみ)]。
+        つまみ = ("pt", 番号) / ("edge", 番号, 項目名)"""
+        out = []
+        pts = [i for i in self.items if i["k"] == "pt"]
+        for n, it in enumerate(self.items):
+            kind = it["k"]
+            if kind == "pt":
+                out.append((it[k], ("pt", n)))
+            elif kind == "dim":
+                out += [(it[k + "0"], ("edge", n, k + "0")), (it[k + "1"], ("edge", n, k + "1"))]
+            elif (kind == "cut" and k == "en") or (kind == "cm" and k == "jp"):
+                # 終わりが『同じ場面』の点にくっついている(自動でできた境目)ときは、点のほうをつまんで動かす
+                if not any(abs(it[k + "1"] - p[k]) < self.LINK for p in pts):
+                    out += [(it[k + "0"], ("edge", n, k + "0")), (it[k + "1"], ("edge", n, k + "1"))]
+        return out
+
+    def drag_hint(self, h):
+        if h[0] == "pt":
+            return "ドラッグ: この線だけ動かす(合わせる位置を直す) / Shift+ドラッグ: 上下の線を一緒に動かす(区間の境目だけ動かす) / ダブルクリック: 数字で直す / 右クリック: メニュー"
+        return "ドラッグ: この範囲の端を動かす / ダブルクリック: 数字で直す / 右クリック: メニュー"
+
+    # ---------- 波形の上の右クリックメニュー ----------
+    def _pair_of(self, it):
+        """CM(またはカット)と同じ境目にある、相方のカット(またはCM)。自動合わせは、見つからなかった場面を
+        「英語側のカット + 日本語側のCM」の組にすることがある。"""
+        for p in (i for i in self.items if i["k"] == "pt"):
+            cuts, cms = self._linked(self.items, p)
+            if any(c is it for c in cuts + cms):
+                return [c for c in (cms if it["k"] == "cut" else cuts)]
+        return []
+
+    def track_menu(self, k, t, h, x_root, y_root):
+        n = h[1] if h else None
+        if n is None:      # 線の上でなければ、その時刻にかかっている範囲(CM・カット・暗転)
+            for q, it in enumerate(self.items):
+                a, b = (("en0", "en1") if k == "en" else ("jp0", "jp1"))
+                if a in it and min(it[a], it[b]) <= t <= max(it[a], it[b]):
+                    n = q
+                    break
+        mnu = tk.Menu(self, tearoff=0)
+        if n is not None:
+            it = self.items[n]
+            self.select_item(n)
+            kind = it["k"]
+
+            def remove(extra=()):
+                ids = {id(it)} | {id(x) for x in extra}
+                self.items = [i for i in self.items if id(i) not in ids]
+                self.auto_flags = None
+                self.rebuild()
+                msg = f"{self.KIND_JA[kind]}の指定を消しました (Ctrl+Z で元に戻せます)"
+                if self.warns:
+                    msg += "。前後のつながりを確かめてください"
+                self.say(msg)
+            if kind == "cm":
+                pair = self._pair_of(it)
+                mnu.add_command(label="CMではない (この範囲も使う)" + ("  ※英語側のカットも一緒に消します" if pair else ""),
+                                command=lambda: remove(pair))
+            elif kind == "cut":
+                pair = self._pair_of(it)
+                mnu.add_command(label="カットではない (ここにも日本語の音を入れる)" + ("  ※日本語側のCMも一緒に消します" if pair else ""),
+                                command=lambda: remove(pair))
+                eng = it.get("audio") == "english"
+
+                def toggle():
+                    it["audio"] = "silence" if eng else "english"
+                    self.auto_flags = None
+                    self.rebuild()
+                mnu.add_command(label="この範囲の音声: 無音にする" if eng else "この範囲の音声: 英語版の音声を流す", command=toggle)
+            elif kind == "pt":
+                mnu.add_command(label="この『同じ場面』の点を消す", command=remove)
+            else:
+                mnu.add_command(label="この「暗転・長さ違い」の指定を消す", command=remove)
+            mnu.add_command(label="数字で直す…", command=self.edit_item)
+            mnu.add_separator()
+        tr = self.tr[k]
+        if all(self.media.values()):
+            o = "日本語" if k == "en" else "英語"
+
+            def add_here():
+                self.set_cursor(k, t)
+                self.add_point()
+            mnu.add_command(label=f"ここに『同じ場面』を追加 ({o}側は赤いカーソルの位置)", command=add_here)
+        mnu.add_command(label="ここを拡大", command=lambda: self.zoom(k, 0.4, t))
+        mnu.add_command(label="全体を表示", command=self.fit_all)
+        mnu.add_command(label="ここに赤いカーソルを置く", command=lambda: self.set_cursor(k, t))
+        if tr.selr:
+            mnu.add_command(label="範囲の選択を解除", command=lambda: (setattr(tr, "selr", None), tr.redraw()))
+        try:
+            mnu.tk_popup(x_root, y_root)
+        finally:
+            mnu.grab_release()
+
+    def select_item(self, n):
+        try:
+            self.itree.selection_set(str(n))
+            self.itree.see(str(n))
+        except tk.TclError:
+            pass
+
+    def _drag_apply(self, base, k, h, d, solo):
+        """base(動かす前の指定)に、つまみ h を d 秒動かした結果を返す。成り立たない形(範囲が裏返るなど)なら None。"""
+        import copy
+        items = copy.deepcopy(base)
+        it = items[h[1]]
+        if h[0] == "edge":
+            it[h[2]] += d
+        else:
+            cuts, cms = self._linked(items, it)
+            if not solo:        # 境目を動かす: 英語側も日本語側も同じだけ動かす(時間差は変えない)
+                first_en = min(i["en"] for i in items if i["k"] == "pt")
+                first_jp = min(i["jp"] for i in items if i["k"] == "pt")
+                for c in cuts:
+                    if c["en0"] > first_en - self.LINK:   # 前に区間があるカットは、始まりも一緒に動かす(前の区間の終わりが動く)
+                        c["en0"] += d
+                    c["en1"] += d
+                for c in cms:
+                    if c["jp0"] > first_jp - self.LINK:
+                        c["jp0"] += d
+                    c["jp1"] += d
+                it["en"] += d
+                it["jp"] += d
+            else:
+                # こちら側だけ動かす = この点から始まる区間の時間差を変える(音のずれを直す)。
+                # 区間の終わり(次の境目)も、伸び縮みが起きないように合わせて動かす
+                later = sorted((i for i in items if i["k"] == "pt" and i["en"] > it["en"] + 1e-6), key=lambda i: i["en"])
+                n_cuts, n_cms = self._linked(items, later[0]) if later else ([], [])
+                if k == "jp":     # 日本語側: 直前のCMの終わりがついてくる
+                    for c in cms:
+                        c["jp1"] += d
+                    it["jp"] += d
+                    for c in n_cms:           # 次がCM: 使う日本語の終わりが、同じだけ動く
+                        c["jp0"] += d
+                    if not n_cms:
+                        for c in n_cuts:      # 次が「英語だけ長い所」: 日本語の終わりは次の区間で決まっているので、英語側の終わりを動かす
+                            c["en0"] -= d
+                else:             # 英語側: 直前のカットの終わりと、CMの始まり(前の区間の終わり)がついてくる
+                    for c in cuts:
+                        c["en1"] += d
+                    for c in cms:
+                        c["jp0"] += d
+                    it["en"] += d
+                    for c in n_cms:
+                        c["jp0"] -= d
+                    if not n_cms:
+                        for c in n_cuts:
+                            c["en0"] += d
+        m = self.media
+        lim = {"en": (min(0.0, m["en"].a_origin), m["en"].end), "jp": (min(0.0, m["jp"].a_origin), m["jp"].end)} if all(m.values()) else None
+        for i, i0 in zip(items, base):
+            for a, b in (("en0", "en1"), ("jp0", "jp1")):
+                # 範囲を0.02秒より短くはしない(はじめからそれより短い範囲は、そのままならよい)
+                if a in i and i[b] - i[a] < min(0.02, i0[b] - i0[a]) - 1e-9:
+                    return None
+            if lim:
+                for key, kk in (("en", "en"), ("jp", "jp"), ("en0", "en"), ("en1", "en"), ("jp0", "jp"), ("jp1", "jp")):
+                    if key in i and not (lim[kk][0] - 1e-6 <= i[key] <= lim[kk][1] + 1e-6):
+                        return None
+        pts = sorted((i for i in items if i["k"] == "pt"), key=lambda i: i["en"])
+        if any(b["en"] - a["en"] < 0.05 or b["jp"] - a["jp"] < 0.0 for a, b in zip(pts, pts[1:])):
+            return None        # 『同じ場面』の点の順番が入れ替わる所までは動かさない
+        return items
+
+    def drag_begin(self, h):
+        import copy
+        self.select_item(h[1])
+        self._drag0 = (copy.deepcopy(self.items), self._last)
+        self._drag_pending = None
+
+    def drag_move(self, k, h, d, solo):
+        self._drag_args = (k, h, d, solo)
+        if self._drag_pending is None:          # マウスの動きが続いても、描き直しは1回にまとめる
+            self._drag_pending = self.after_idle(self._drag_flush)
+
+    def _drag_flush(self):
+        self._drag_pending = None
+        if not getattr(self, "_drag0", None):
+            return
+        k, h, d, solo = self._drag_args
+        new = self._drag_apply(self._drag0[0], k, h, d, solo)
+        if new is None:
+            return                               # それ以上は動かせない → 直前の位置のまま
+        self.items = new
+        it = new[h[1]]
+        t_now = it[k] if h[0] == "pt" else it[h[2]]
+        what = ("この線を" if solo else "上下一緒に") if h[0] == "pt" else "端を"
+        note = f"{what} {d:+.2f}秒"
+        if h[0] == "pt" and solo:        # この線から始まる区間の時間差(日本語 − 英語)がどう変わるか
+            b0 = self._drag0[0][h[1]]
+            note += f"  (時間差 {b0['jp'] - b0['en']:+.2f} → {it['jp'] - it['en']:+.2f}秒)"
+        for kk, tr in self.tr.items():
+            tr.drag_note = (t_now, note) if kk == k else None
+        m = self.media
+        if all(m.values()):
+            self.segs, self.extra_segs, self.warns = build_from_items(
+                self.items, (min(0.0, m["en"].a_origin), m["en"].end), (min(0.0, m["jp"].a_origin), m["jp"].end))
+        # 赤いカーソルを境目に合わせる(下のプレビュー画面で、境目の場面を見ながら動かせる)
+        moved = {"en": it["en"], "jp": it["jp"]} if h[0] == "pt" else {k: t_now}
+        for kk, t in moved.items():
+            self.tr[kk].cursor = t
+        # 動かしている最中は、波形はそのままにして、帯と線だけを描き直す(一覧の作り直しは、離したときに1回だけ)
+        self._refresh_tracks(fast=True)
+        for kk in moved:
+            self.schedule_preview(kk)
+        self.status.config(text=f"{note} 動かしています (離すと決まります。Esc で取り消し)")
+
+    def drag_end(self, k, h, moved):
+        if getattr(self, "_drag_pending", None) is not None:
+            self.after_cancel(self._drag_pending)
+            self._drag_flush()
+        base = getattr(self, "_drag0", None)
+        self._drag0 = None
+        for tr in self.tr.values():
+            tr.drag_note = None
+        if not base:
+            return
+        if not moved or self.items == base[0]:
+            self.items = base[0]
+            self.refresh()
+            self.select_item(h[1])
+            return
+        snap = ""
+        args = getattr(self, "_drag_args", None)
+        if h[0] == "pt" and args and args[1] == h and args[3] and self.refine_v.get() and all(self.media.values()):
+            snap = self._drag_snap(base[0], k, h)
+        self._last = base[1]                     # 元に戻す(Ctrl+Z)で、動かす前に戻れるようにする(音での微調整も込みで1回)
+        self.auto_flags = None
+        self.rebuild()
+        self.select_item(h[1])
+        it = self.items[h[1]]
+        for kk in (("en", "jp") if h[0] == "pt" else (k,)):      # 時刻の表示欄も、動かした先に合わせる
+            self.set_cursor(kk, it[kk] if h[0] == "pt" else it[h[2]])
+        self.say("線を動かしました" + snap + " (Ctrl+Z で元に戻せます)")
+
+    def _drag_snap(self, base, k, h):
+        """こちら側だけ動かして離したとき、動かした側を音で微調整する(±0.3秒の中で、はっきり合う所があるときだけ)。
+        戻り値はステータスに足す文字。"""
+        it = self.items[h[1]]
+        o = "jp" if k == "en" else "en"
+        try:
+            r = xcorr_find(self.media[o], it[o], self.media[k], it[k], 2.0, 0.3)
+        except Exception:
+            r = None
+        # 探す幅が ±0.3秒と狭いので、突出度は当てにならない(正しい位置でも 3 前後)。相関の高さだけで決める
+        if not (r and r[1] >= 0.35):
+            return "。音では寄せられませんでした(無音・声だけの場面など)"
+        dd = r[0] - it[k]
+        if abs(dd) < 0.002:
+            return "。音とも合っています"
+        new = self._drag_apply(base, k, h, it[k] - base[h[1]][k] + dd, True)
+        if new is None:
+            return "。音では寄せられませんでした"
+        self.items = new
+        return f"。音で {dd:+.2f}秒 寄せました"
+
+    def drag_cancel(self):
+        """動かしている最中の Esc: 動かす前に戻してやめる。"""
+        if getattr(self, "_drag_pending", None) is not None:
+            self.after_cancel(self._drag_pending)
+            self._drag_pending = None
+        base, self._drag0 = self._drag0, None
+        for tr in self.tr.values():
+            tr.drag_note = None
+            tr._grab = None
+        self.items = base[0]
+        self.refresh()
+        self.say("動かすのをやめました")
+
+    # ---------- 選んでいる『同じ場面』の線を、キーで少しずつ動かす ----------
+    def nudge_target(self):
+        if len(self.itree.selection()) != 1 or not all(self.media.values()):
+            return None
+        n = self.item_idx()
+        return n if n is not None and n < len(self.items) and self.items[n]["k"] == "pt" else None
+
+    def nudge(self, d):
+        import copy, time
+        n, k = self.nudge_target(), self.active
+        h = ("pt", n)
+        now = time.time()
+        g = getattr(self, "_nudge", None)
+        # 同じ線・同じ側を2秒以内に続けて動かしたら、Ctrl+Z では1回分として戻る
+        cont = bool(g and g["key"] == (n, k) and now - g["t"] < 2.0 and g["after"] == self.items)
+        if not cont:
+            g = {"key": (n, k), "base": copy.deepcopy(self.items), "d": 0.0}
+        new = self._drag_apply(g["base"], k, h, g["d"] + d, True)
+        if new is None:
+            self.say("これ以上は動かせません")
+            return
+        g["d"] += d
+        self.items = new
+        self.auto_flags = None
+        self.rebuild(track=not cont)
+        g["after"], g["t"] = copy.deepcopy(self.items), now
+        self._nudge = g
+        self.select_item(n)
+        try:
+            self.itree.focus(str(n))
+        except tk.TclError:
+            pass
+        it, b0 = self.items[n], g["base"][n]
+        self.tr[k].cursor = it[k]
+        self.set_cursor(k, it[k])
+        side = "英語" if k == "en" else "日本語"
+        self.say(f"{side}側の線を {g['d']:+.3f}秒  (時間差 {b0['jp'] - b0['en']:+.2f} → {it['jp'] - it['en']:+.2f}秒)  Tab で動かす側を切り替え")
+
     def add_point(self):
         if not all(self.media.values()):
             self.say("先に映像と録画を読み込んでください")
@@ -7108,7 +8121,11 @@ class App(_TkBase):
             self.itree.insert("", "end", iid=str(i), tags=(k,), values=(self.KIND_JA[k], en, jp, note))
         more = f"  (ほか {len(self.warns) - 1} 件)" if len(self.warns) > 1 else ""
         self.warn_lbl.config(text=("⚠ " + self.warns[0] + more) if self.warns else "")
-        # 波形上の表示
+        self._refresh_tracks()
+        self.refresh_easy()
+
+    def _refresh_tracks(self, fast=False):
+        """波形の上の表示(帯・範囲・点)を、いまの指定と区間から作り直す。"""
         en_pts, jp_pts, n = [], [], 0
         for it in self.items:
             if it["k"] == "pt":
@@ -7128,8 +8145,7 @@ class App(_TkBase):
                     for i, s in enumerate(self.segs)]
         for t in self.tr.values():
             t.sel = None
-            t.redraw()
-        self.refresh_easy()
+            t.redraw(fast)
 
     def undo(self):
         if not self.undo_st:
@@ -7156,6 +8172,8 @@ class App(_TkBase):
         return int(s[0]) if s else None
 
     def on_item_select(self, _):
+        if getattr(self, "_drag0", None):
+            return                 # 境目を動かしている最中は、表示位置を勝手に動かさない
         if len(self.itree.selection()) != 1:
             return
         i = self.item_idx()
@@ -7322,6 +8340,18 @@ class App(_TkBase):
             if not self.out_path.get():
                 return
         out = Path(self.out_path.get())
+        # 保存先が、いま使っている英語版・日本語の録画そのものなら、合成しない(元のファイルを壊さないため)
+        for src, what in ((self.en_var.get(), "英語版の映像"), (self.jp_var.get(), "日本語の録画")):
+            try:
+                same = bool(src) and os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(str(out)))
+                same = same or (bool(src) and out.exists() and os.path.samefile(src, out))
+            except OSError:
+                same = False
+            if same:
+                messagebox.showwarning("保存先を使えません",
+                                       f"保存先が、{what}と同じファイルになっています。\n元のファイルを上書きしてしまうので、合成できません。\n\n"
+                                       "「変更」で、別の名前か別のフォルダにしてください。")
+                return
         if out.exists() and not messagebox.askyesno("上書き確認", f"{out.name} は既にあります。上書きしますか?"):
             return
         if out.exists():      # 前に作った動画をプレーヤーなどで開いたままだと、上書きできずに失敗する → 始める前に知らせる
@@ -7385,8 +8415,10 @@ class App(_TkBase):
 
 
 if __name__ == "__main__":
+    install_exception_log()
     set_taskbar_identity()
     app = App()
+    app.after(800, app._notify_error_log)
     app.after(500, lambda: set_window_taskbar_identity(app))
     if len(sys.argv) > 1:
         app.load_project(sys.argv[1])
