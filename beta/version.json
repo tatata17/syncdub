@@ -1,1 +1,1 @@
-{"version": "2026.11.17.43", "beta": 40, "file": "beta/syncdub_beta.pyw", "sha256": "67785260406c6f321db97b4683f157f90b078e2e50f8a4caf3213a14001d9e0a", "notes": "正式版 v2026.11.17.43 と同じ内容です"}
+{"version": "2026.11.17.43", "beta": 41, "file": "beta/syncdub_beta.pyw", "sha256": "ebeda11ea2c296ca6cbf60fd3dc7a19b8931513df9e945a741f329c2795e1aa0", "notes": "合成の途中で思わぬエラーが起きても、画面が「合成中」のまま止まらないようにしました。設定の保存を壊れにくくし、開けない設定ファイルは理由を出すようにしました"}

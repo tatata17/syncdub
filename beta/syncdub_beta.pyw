@@ -750,7 +750,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.17.43"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 40       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 41       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -833,6 +833,18 @@ ERROR_LOG = "syncdub_error.log"
 ERROR_LOG_MAX = 300_000      # これを超えたら、古い方を捨てて後ろ半分だけ残す
 
 
+def write_text_safely(path, text):
+    """ファイルを書きかえる。いったん別の名前で書いてから置きかえるので、途中で止まっても、元のファイルは壊れない。"""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def error_log_path():
     return Path(__file__).resolve().parent / ERROR_LOG
 
@@ -890,16 +902,40 @@ def diagnostic_text(extra=()):
     return "\n".join(out) + "\n"
 
 
+def check_project(d):
+    """設定ファイル(プロジェクト)の中身を確かめる。問題があれば、その説明を返す。なければ None。"""
+    if not isinstance(d, dict):
+        return "中身の形が違います"
+    for k in ("en_video", "jp_media"):
+        if not isinstance(d.get(k), str) or not d[k]:
+            return f"「{k}」(素材のファイル名)がありません"
+    items = d.get("items", [])
+    if not isinstance(items, list):
+        return "「items」(指定の一覧)の形が違います"
+    need = {"pt": ("en", "jp"), "cm": ("jp0", "jp1"), "cut": ("en0", "en1"), "dim": ("en0", "en1", "jp0", "jp1")}
+    for n, it in enumerate(items, 1):
+        if not isinstance(it, dict) or it.get("k") not in need:
+            return f"指定の一覧の {n} 番目が、知らない種類です"
+        for k in need[it["k"]]:
+            v = it.get(k)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or abs(v) > 1e7:
+                return f"指定の一覧の {n} 番目の時刻「{k}」が、数字ではありません"
+    return None
+
+
 def download_update_source(info, ref):
     base = TEST_BASE or f"https://raw.githubusercontent.com/{REPO}/{ref}"
     raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
-    if info.get("sha256"):     # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる
-        # 改行を LF にそろえてから比べる(tools/release.py と同じ計算。改行コードの違いだけで更新が止まらないように)
-        got = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
-        if got != str(info["sha256"]).lower():
-            raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。\n"
-                             "公開直後なら、数分待つと直ります。しばらく待っても同じときは、待っても直りません。"
-                             "配布ページから新しいファイルを入れ直してください")
+    # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる。確かめるための値がなければ、更新しない
+    if not info.get("sha256"):
+        raise ValueError("配布元の記録に、ファイルを確かめるための値(SHA-256)がありません。安全のため、更新をやめました。\n"
+                         "しばらく待っても同じときは、配布ページから新しいファイルを入れ直してください")
+    # 改行を LF にそろえてから比べる(tools/release.py と同じ計算。改行コードの違いだけで更新が止まらないように)
+    got = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    if got != str(info["sha256"]).lower():
+        raise ValueError("ダウンロードしたファイルが、配布元の記録(SHA-256)と一致しません。\n"
+                         "公開直後なら、数分待つと直ります。しばらく待っても同じときは、待っても直りません。"
+                         "配布ページから新しいファイルを入れ直してください")
     code = raw.decode("utf-8").replace("\r\n", "\n")   # 保存のときに改行が二重にならないように、LF にそろえておく
     m = re.search(r'^APP_VERSION = "([^"]+)"', code, re.M)
     if BETA_REVIEW:
@@ -7241,7 +7277,7 @@ class App(_TkBase):
             cur = {}
         cur.update(kw)
         try:
-            f.write_text(json.dumps(cur), encoding="utf-8")
+            write_text_safely(f, json.dumps(cur))
         except OSError as e:
             if not getattr(self, "_settings_warned", False):      # 知らせるのは、起動している間に1回だけ
                 self._settings_warned = True
@@ -8294,13 +8330,21 @@ class App(_TkBase):
                 "segments": segs, "items": self.items}
 
     def save_project(self, ask=True):
+        old_path = self.proj_path
         if ask or not self.proj_path:
             p = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("プロジェクト", "*.json")],
                                              initialfile=Path(self.proj_path).name if self.proj_path else "project.json")
             if not p:
                 return None
             self.proj_path = p
-        Path(self.proj_path).write_text(json.dumps(self.project_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+        text = json.dumps(self.project_dict(), ensure_ascii=False, indent=1)
+        try:
+            json.loads(text)
+            write_text_safely(self.proj_path, text)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("syncdub", f"設定を保存できませんでした。\n{self.proj_path}\n\n{e}")
+            self.proj_path = old_path
+            return None
         self.say(f"保存: {self.proj_path}")
         return self.proj_path
 
@@ -8310,7 +8354,15 @@ class App(_TkBase):
             self.load_project(p)
 
     def load_project(self, p):
-        d = json.loads(Path(p).read_text(encoding="utf-8"))
+        try:
+            d = json.loads(Path(p).read_text(encoding="utf-8"))
+            bad = check_project(d)
+        except (OSError, ValueError) as e:
+            bad = f"読み込めません ({e})"
+        if bad:
+            messagebox.showerror("syncdub", f"この設定ファイルは開けませんでした。\n{p}\n\n{bad}\n\n"
+                                 "ファイルが壊れているか、syncdub の設定ファイルではありません。いまの作業内容は、そのままです。")
+            return
         base = Path(p).parent
         self.proj_path = p
         self.en_var.set(str((base / d["en_video"])))
@@ -8389,9 +8441,19 @@ class App(_TkBase):
             except (ValueError, KeyError, SystemExit) as ex:
                 buf.write(f"エラー: {ex}")
                 ok = False
+            except Cancelled:
+                buf.write("合成を中止しました")
+                ok = None
+            except FileNotFoundError as ex:
+                buf.write(f"ffmpeg か、素材のファイルが見つかりません: {ex}")
+                ok = False
+            except Exception as ex:  # noqa: BLE001  想定外のエラーでも、画面を「合成中」のままにしない
+                log_exception("合成", type(ex), ex, ex.__traceback__)
+                buf.write(f"想定外のエラーで合成できませんでした ({type(ex).__name__}: {ex})\n記録: {error_log_path()}")
+                ok = False
             finally:
                 shutil.rmtree(tmpd, ignore_errors=True)
-            self.q.put(lambda: self._render_done(buf.getvalue(), ok))
+                self.q.put(lambda: self._render_done(buf.getvalue(), ok))
         threading.Thread(target=work, daemon=True).start()
 
     def _render_done(self, text, ok):
@@ -8399,6 +8461,10 @@ class App(_TkBase):
         self.rbar.stop()
         self.rbar.config(mode="determinate", value=0)  # 止まっているときは空にする (緑のブロックを残さない)
         self._busy(False)
+        if ok is None:
+            self.easy_done.config(text="合成を中止しました", fg="#b33")
+            self.say("合成を中止しました")
+            return
         if ok:
             self.easy_done.config(text=f"✔ 完成しました: {Path(self.out_path.get()).name}", fg="#1f6f43")
             self.open_btn.pack(side="left", padx=8)
