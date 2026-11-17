@@ -265,35 +265,126 @@ def atempo_chain(r):
     return ",".join(parts)
 
 
-def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0):
-    """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。"""
+def _seg_src_end(x):
+    return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
+
+
+def _seg_continuous(a, b):
+    """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
+    if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
+        return False
+    if a.english:
+        return True
+    return abs(_seg_src_end(a) - b.jp_start) < 2e-3
+
+
+def _seg_atempo(x):
+    """この区間は、音の高さを保つ伸び縮み(atempo)で合成するか。"""
+    if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur <= 0.2:
+        return False
+    return abs((x.jp_end - x.jp_start) / x.dur - 1) > STRETCH_RESAMPLE_MAX
+
+
+def stretch_carry(segs, joins):
+    """区間ごとの「日本語の読み出し位置のずらし」(秒)と、それが確定しているか、を返す。
+    音の高さを保つ伸び縮みは、波形を切り貼りして作るので、終わりの位置が元の音と数ミリ秒ずれる。そのまま次の区間をつなぐと
+    波形が続かず、プツッと鳴る。そこで、伸び縮みの終わりの波形が元の音のどこに当たるか(joins[i] = (頭の位置, 終わりのずれ))を測っておき、
+    続きの区間をそのずれの分だけずらして読み出す。重ねたりフェードしたりはしない(切る位置を合わせるだけ)。
+    ずらしは、音がひと続きのあいだだけ引き継ぐ。"""
+    carry, known, out = 0.0, True, []
+    for i, x in enumerate(segs):
+        if x.silent or x.english or not (i > 0 and _seg_continuous(segs[i - 1], x)):
+            carry, known = 0.0, True
+        out.append((carry, known))
+        if not x.silent and not x.english and _seg_atempo(x):
+            if joins is not None and i in joins:
+                carry += joins[i][1]
+            else:
+                known = False
+    return out
+
+
+def measure_stretch_joins(segs, src, a_index, jp_off, sr, layout, tmp=None):
+    """音の高さを保つ伸び縮みの区間について、前後の区間と波形がぴったり続く切り位置を測る。戻り値 {区間の番号: (頭の位置, 終わりのずれ)}。
+    合成と同じ処理で、伸び縮みさせた音を一度だけ作ってみて、頭と終わりの波形を元の音と突き合わせる。"""
+    import tempfile
+    import wave
+    joins = {}
     fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
+    W = int(0.02 * sr)
 
-    def src_end(x):
-        return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
+    def rd(f):
+        with wave.open(f) as w:
+            return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float64)
 
-    def continuous(a, b):
-        """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
-        if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
-            return False
-        if a.english:
-            return True
-        return abs(src_end(a) - b.jp_start) < 2e-3
+    def nc(a, b):
+        if len(a) != len(b) or not len(a):
+            return -1.0
+        a, b = a - a.mean(), b - b.mean()
+        d = float(np.linalg.norm(a) * np.linalg.norm(b))
+        return float((a * b).sum() / d) if d > 1e-6 else -1.0
+    while True:
+        st = stretch_carry(segs, joins)
+        todo = [i for i, x in enumerate(segs) if not x.silent and not x.english and _seg_atempo(x) and i not in joins and st[i][1]]
+        if not todo:
+            return joins
+        d = tempfile.mkdtemp(prefix="syncdub_join_")
+        files, lines, maps = [], [], []
+        outs = "".join(f"[s{k}_{q}]" for k in range(len(todo)) for q in range(3))
+        lines.append(f"[0:a:{a_index}]{fmt},apad=pad_dur=7200,asplit={3 * len(todo)}{outs}")
+        geo = {}
+        for k, i in enumerate(todo):
+            x = segs[i]
+            js, je = x.jp_start + jp_off + st[i][0], x.jp_end + jp_off + st[i][0]
+            r = (je - js) / x.dur
+            a0 = min(0.1, max(js, 0.0))
+            geo[i] = (a0, r, x.dur)
+            lines.append(f"[s{k}_0]atrim={js - a0:.6f}:{je + 0.1:.6f},asetpts=PTS-STARTPTS,apad=whole_dur={je - js + a0 + 0.1:.6f},{atempo_chain(r)}[y{k}]")
+            lines.append(f"[s{k}_1]atrim={js:.6f}:{js + 0.03:.6f},asetpts=PTS-STARTPTS[h{k}]")
+            lines.append(f"[s{k}_2]atrim={max(je - 0.03, 0.0):.6f}:{je + 0.06:.6f},asetpts=PTS-STARTPTS[t{k}]")
+            for tag in "yht":
+                f = str(Path(d) / f"{tag}{k}.wav")
+                files.append(f)
+                maps += ["-map", f"[{tag}{k}]", "-ac", "1", "-c:a", "pcm_s16le", f]
+        if tmp is not None:
+            tmp.extend(files)
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-vn", "-i", src, "-filter_complex", ";".join(lines)] + maps,
+                           capture_output=True, check=True, **({"creationflags": 0x08000000} if sys.platform == "win32" else {}))
+            for k, i in enumerate(todo):
+                a0, r, D = geo[i]
+                y, hx, tx = (rd(str(Path(d) / f"{tag}{k}.wav")) for tag in "yht")
+                # 頭: 伸び縮みさせた音の中で、元の音の頭(hx)とぴったり合う所
+                c, rad = int(round(a0 / r * sr)), int(0.02 * sr)
+                sc = [nc(y[c + u:c + u + W], hx[:W]) if c + u >= 0 else -1.0 for u in range(-rad, rad + 1)]
+                u = int(np.argmax(sc))
+                h = c + u - rad if sc[u] >= 0.8 else c
+                # 終わり: 伸び縮みさせた音の終わり(のすぐ先)の波形が、元の音のどこに当たるか
+                e = h + int(round(D * sr))
+                sc = [nc(tx[v:v + W], y[e:e + W]) for v in range(0, len(tx) - W)]
+                v = int(np.argmax(sc)) if sc else 0
+                eps = v / sr - 0.03 if sc and sc[v] >= 0.8 else 0.0
+                joins[i] = (h / sr, eps)
+        except (OSError, ValueError, _subprocess.CalledProcessError):
+            for i in todo:      # 測れなければ、そのまま切る(合成は続ける)
+                a0, r, _D = geo.get(i, (0.1, 1.0, 0.0))
+                joins.setdefault(i, (a0 / r, 0.0))
+        finally:
+            for f in files:
+                Path(f).unlink(missing_ok=True)
+            try:
+                Path(d).rmdir()
+            except OSError:
+                pass
 
-    XF = 0.03      # 音の高さを保って伸び縮みさせた区間と、前後の区間とを重ねてつなぐ長さ(秒)
 
-    def xfade(i):
-        """区間 i が「音の高さを保つ伸び縮み」(atempo)のとき、前・後ろと重ねてつなぐ長さ (前, 後ろ)。それ以外は (0, 0)。
-        atempo は波形をつなぎ直すので、前後の区間と波形がぴったりは続かない。境目の 0.03秒を、前後の元の音と
-        重ねて入れ替える(クロスフェード)ことで、プツッと鳴らないようにする。"""
-        x = segs[i]
-        if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur < 4 * XF:
-            return 0.0, 0.0
-        if abs((x.jp_end - x.jp_start) / x.dur - 1) <= STRETCH_RESAMPLE_MAX:
-            return 0.0, 0.0
-        return (XF if i > 0 and continuous(segs[i - 1], x) else 0.0,
-                XF if i + 1 < len(segs) and continuous(x, segs[i + 1]) else 0.0)
-    nj = sum(1 for s in segs if not s.silent and not s.english) + sum(sum(1 for v in xfade(i) if v) for i in range(len(segs)))
+def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0, joins=None):
+    """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。
+    joins: measure_stretch_joins の結果(音の高さを保つ伸び縮みの区間を、前後とぴったりつなぐための切り位置)。"""
+    fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
+    continuous = _seg_continuous
+    carry = stretch_carry(segs, joins)
+    nj = sum(1 for s in segs if not s.silent and not s.english)
     ne = sum(1 for s in segs if s.english)
     if ne and en_idx is None:
         ne = 0  # 英語版が入力にない時は無音にする
@@ -308,7 +399,6 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
     warns = []
 
     for i, s in enumerate(segs):
-        extra = []      # 重ねてつなぐための、前後の元の音
         D = s.dur
         f = min(fade, D / 2)
         f_in = 0.0 if i > 0 and continuous(segs[i - 1], s) else f
@@ -324,8 +414,8 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             else:
                 # ffmpegは入力のタイムスタンプをコンテナ開始=0に正規化する。
                 # 指定時刻は映像の先頭=0 なので、その差(jp_off)を足す。
-                js = s.jp_start + jp_off
-                je = (s.jp_end + jp_off) if s.jp_end is not None else js + D
+                js = s.jp_start + jp_off + carry[i][0]      # carry: 手前の伸び縮みと波形を続けるための、数ミリ秒のずらし
+                je = (s.jp_end + jp_off + carry[i][0]) if s.jp_end is not None else js + D
                 jdur = je - js
                 if s.fit == "stretch" and abs(jdur - D) > 1e-6:
                     r = jdur / D
@@ -340,19 +430,14 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                         # 波形がそのままつながるので、境目で鳴らない。音の高さもその割合だけ変わるが、この範囲なら聞き分けられない
                         stretch = f"asetrate={sr * r:.6f},aresample={sr}"
                     else:
-                        # 音の高さを保ったまま、速さだけ変える。境目は xfade() のとおり、前後の元の音と重ねてつなぐ
+                        # 音の高さを保ったまま、速さだけ変える。前後の区間とは、波形がぴったり続く位置で切ってつなぐ(stretch_carry)
                         stretch = atempo_chain(r)
-                        xh, xt = xfade(i)
-                        if xh:
-                            extra.append((f"atrim={js:.6f}:{js + xh:.6f},asetpts=PTS-STARTPTS,afade=t=out:d={xh:.4f}:curve=tri", "h", xh))
-                        if xt:
-                            extra.append((f"atrim={je - xt:.6f}:{je:.6f},asetpts=PTS-STARTPTS,afade=t=in:d={xt:.4f}:curve=tri,"
-                                          f"adelay=delays={int(round((D - xt) * sr))}S:all=1", "t", xt))
+                    h0 = joins[i][0] if joins and i in joins and _seg_atempo(s) else a0 / r
                     # 日本語の音がその範囲にない(録画の終わりを越えている)ときも、無音で埋めてから伸縮する。
                     # (埋めないと、伸縮の処理に音が1つも届かず、時刻のおかしい音が出て合成が失敗する)
                     chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS",
                              f"apad=whole_dur={jdur + a0 + a1:.6f}", stretch,
-                             f"atrim={a0 / r:.6f}:{a0 / r + D:.6f}", "asetpts=PTS-STARTPTS"]
+                             f"atrim={h0:.6f}:{h0 + D:.6f}", "asetpts=PTS-STARTPTS"]
                 else:
                     chain = [f"atrim={js:.6f}:{je:.6f}", "asetpts=PTS-STARTPTS"]
                 src = f"[sj{kj}]"
@@ -364,18 +449,7 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                 chain.append(f"afade=t=in:d={f_in:.4f}:curve=hsin")
             if f_out > 0:
                 chain.append(f"afade=t=out:st={D - f_out:.6f}:d={f_out:.4f}:curve=hsin")
-            if extra:
-                for _c, side, x in extra:
-                    chain.append(f"afade=t=in:d={x:.4f}:curve=tri" if side == "h" else f"afade=t=out:st={D - x:.6f}:d={x:.4f}:curve=tri")
-                lines.append(src + ",".join(chain) + f"[m{i}]")
-                ins = f"[m{i}]"
-                for c, side, _x in extra:
-                    lines.append(f"[sj{kj}]{c}[x{side}{i}]")
-                    kj += 1
-                    ins += f"[x{side}{i}]"
-                lines.append(f"{ins}amix=inputs={len(extra) + 1}:normalize=0:duration=first[o{i}]")
-            else:
-                lines.append(src + ",".join(chain) + f"[o{i}]")
+            lines.append(src + ",".join(chain) + f"[o{i}]")
         labels.append(f"[o{i}]")
     if lead > 1e-6:  # 英語版の映像先頭がコンテナ開始より遅い分だけ、先頭に無音を置く
         lines.append(f"anullsrc=r={sr}:cl={layout},atrim=0:{lead:.6f},asetpts=PTS-STARTPTS[olead]")
@@ -571,7 +645,8 @@ def _main(argv, tmp):
         if not segs or c1 - c0 <= 0.05:
             raise ValueError("切り出す範囲が空です")
         segs, pieces = drop_cut_gaps(segs, fps_c)
-        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0)
+        joins = measure_stretch_joins(segs, jp_path, jp_a, jp_off, sr, layout, tmp)
+        filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade, in_idx=1, lead=0.0, en_idx=0, en_off=0.0, joins=joins)
         vchain = None
         if len(pieces) > 1:
             # 日本語版でカットされた(英語版にだけある)部分は、映像も音も飛ばしてつなぐ
@@ -587,9 +662,10 @@ def _main(argv, tmp):
             filt = filt + ";\n" + vchain
             print(f"カット部分を飛ばして {n_} か所をつなぎます: " + ", ".join(f"{a_:.2f}-{b_:.2f}" for a_, b_ in pieces))
     else:
+        joins = measure_stretch_joins(segs, jp_path, jp_a, jp_off, sr, layout, tmp)
         filt, warns = build_filter(segs, jp_off, jp_a, sr, layout, fade,
                                    in_idx=0 if single else 1, lead=0.0 if single else en_off,
-                                   en_idx=1 if single else 0, en_off=en_off)
+                                   en_idx=1 if single else 0, en_off=en_off, joins=joins)
 
     print(f"EN映像先頭 +{en_off:.3f}s / JP映像先頭 +{jp_off:.3f}s (コンテナ開始比) / EN長さ {en_dur:.3f}s / 区間 {len(segs)}")
     for i, s in enumerate(segs):
@@ -674,7 +750,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 38       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 39       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
