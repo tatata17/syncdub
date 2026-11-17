@@ -268,7 +268,32 @@ def atempo_chain(r):
 def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en_idx=None, en_off=0.0):
     """en_idx: 英語版の音声を使う区間(type=english)がある場合の、英語版ファイルの入力番号。"""
     fmt = f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={layout}"
-    nj = sum(1 for s in segs if not s.silent and not s.english)
+
+    def src_end(x):
+        return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
+
+    def continuous(a, b):
+        """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
+        if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
+            return False
+        if a.english:
+            return True
+        return abs(src_end(a) - b.jp_start) < 2e-3
+
+    XF = 0.03      # 音の高さを保って伸び縮みさせた区間と、前後の区間とを重ねてつなぐ長さ(秒)
+
+    def xfade(i):
+        """区間 i が「音の高さを保つ伸び縮み」(atempo)のとき、前・後ろと重ねてつなぐ長さ (前, 後ろ)。それ以外は (0, 0)。
+        atempo は波形をつなぎ直すので、前後の区間と波形がぴったりは続かない。境目の 0.03秒を、前後の元の音と
+        重ねて入れ替える(クロスフェード)ことで、プツッと鳴らないようにする。"""
+        x = segs[i]
+        if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur < 4 * XF:
+            return 0.0, 0.0
+        if abs((x.jp_end - x.jp_start) / x.dur - 1) <= STRETCH_RESAMPLE_MAX:
+            return 0.0, 0.0
+        return (XF if i > 0 and continuous(segs[i - 1], x) else 0.0,
+                XF if i + 1 < len(segs) and continuous(x, segs[i + 1]) else 0.0)
+    nj = sum(1 for s in segs if not s.silent and not s.english) + sum(sum(1 for v in xfade(i) if v) for i in range(len(segs)))
     ne = sum(1 for s in segs if s.english)
     if ne and en_idx is None:
         ne = 0  # 英語版が入力にない時は無音にする
@@ -282,18 +307,8 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
             lines.append(f"[{idx}:a:{ai}]{pad},asplit={n}{outs}" if n > 1 else f"[{idx}:a:{ai}]{pad}[s{tag}0]")
     warns = []
 
-    def src_end(x):
-        return x.jp_end if x.jp_end is not None else x.jp_start + x.dur
-
-    def continuous(a, b):
-        """a の直後に b が来て、元の音も途切れずつながっているか (つながっているなら、境目にフェードは不要)。"""
-        if a is None or a.silent or b.silent or a.english != b.english or abs(a.en_end - b.en_start) > 2e-3:
-            return False
-        if a.english:
-            return True
-        return abs(src_end(a) - b.jp_start) < 2e-3
-
     for i, s in enumerate(segs):
+        extra = []      # 重ねてつなぐための、前後の元の音
         D = s.dur
         f = min(fade, D / 2)
         f_in = 0.0 if i > 0 and continuous(segs[i - 1], s) else f
@@ -320,13 +335,19 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                     # 余白ぶんを切り捨てる (これをしないと、区間の境目で「ぶつぶつ」と音が途切れる)
                     a0 = min(0.1, max(js, 0.0))
                     a1 = 0.1
-                    if abs(r - 1) <= 0.03:
-                        # 速さの違いがわずか(3%以内)なら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
-                        # atempo は音の高さを保つかわりに波形をつなぎ直すので、前後の区間と波形がぴったりつながらず、
-                        # 境目で「プツッ」と鳴ることがある。この方法なら波形がそのままつながる(音の高さは最大3%変わる)
+                    if abs(r - 1) <= STRETCH_RESAMPLE_MAX:
+                        # 速さの違いがごくわずかなら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
+                        # 波形がそのままつながるので、境目で鳴らない。音の高さもその割合だけ変わるが、この範囲なら聞き分けられない
                         stretch = f"asetrate={sr * r:.6f},aresample={sr}"
                     else:
+                        # 音の高さを保ったまま、速さだけ変える。境目は xfade() のとおり、前後の元の音と重ねてつなぐ
                         stretch = atempo_chain(r)
+                        xh, xt = xfade(i)
+                        if xh:
+                            extra.append((f"atrim={js:.6f}:{js + xh:.6f},asetpts=PTS-STARTPTS,afade=t=out:d={xh:.4f}:curve=tri", "h", xh))
+                        if xt:
+                            extra.append((f"atrim={je - xt:.6f}:{je:.6f},asetpts=PTS-STARTPTS,afade=t=in:d={xt:.4f}:curve=tri,"
+                                          f"adelay=delays={int(round((D - xt) * sr))}S:all=1", "t", xt))
                     # 日本語の音がその範囲にない(録画の終わりを越えている)ときも、無音で埋めてから伸縮する。
                     # (埋めないと、伸縮の処理に音が1つも届かず、時刻のおかしい音が出て合成が失敗する)
                     chain = [f"atrim={js - a0:.6f}:{je + a1:.6f}", "asetpts=PTS-STARTPTS",
@@ -343,7 +364,18 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                 chain.append(f"afade=t=in:d={f_in:.4f}:curve=hsin")
             if f_out > 0:
                 chain.append(f"afade=t=out:st={D - f_out:.6f}:d={f_out:.4f}:curve=hsin")
-            lines.append(src + ",".join(chain) + f"[o{i}]")
+            if extra:
+                for _c, side, x in extra:
+                    chain.append(f"afade=t=in:d={x:.4f}:curve=tri" if side == "h" else f"afade=t=out:st={D - x:.6f}:d={x:.4f}:curve=tri")
+                lines.append(src + ",".join(chain) + f"[m{i}]")
+                ins = f"[m{i}]"
+                for c, side, _x in extra:
+                    lines.append(f"[sj{kj}]{c}[x{side}{i}]")
+                    kj += 1
+                    ins += f"[x{side}{i}]"
+                lines.append(f"{ins}amix=inputs={len(extra) + 1}:normalize=0:duration=first[o{i}]")
+            else:
+                lines.append(src + ",".join(chain) + f"[o{i}]")
         labels.append(f"[o{i}]")
     if lead > 1e-6:  # 英語版の映像先頭がコンテナ開始より遅い分だけ、先頭に無音を置く
         lines.append(f"anullsrc=r={sr}:cl={layout},atrim=0:{lead:.6f},asetpts=PTS-STARTPTS[olead]")
@@ -642,7 +674,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.16.42"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 37       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 38       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1586,16 +1618,18 @@ def _splice_at_quiet(segs, jsl, jthr, reach=2.0, esl=None, en_thr=None):
     segs[:] = out
 
 
+STRETCH_RESAMPLE_MAX = 0.012   # 速さの違いがこの割合までなら、回転数を変える方式(音の高さもこの割合だけ変わる)。超えたら、高さを保つ方式
 STRETCH_GAP_MAX = 0.6      # 英語版だけ長い分がこの秒数までなら、無音を入れずに、日本語の音を伸ばしてつなぐ
 STRETCH_GAP_RATE = 0.029   # 伸ばす割合(3%未満。この範囲なら、合成は回転数を変える方式なので、境目でプツッと鳴らない)
 
 
 def _stretch_small_gaps(segs, jsl, jthr):
-    """英語版だけ少し長い所(日本語はひと続き、または同じ所を2回使っている)で、切れ目が日本語の音の鳴っている最中にあるとき、無音をはさむかわりに、
-    前後の日本語の音を少しだけ(3%未満)遅く再生して、その長さを埋める。
-    切れ目が日本語の無音の所にあるときは、何もしない(間が少し長くなるだけで、途切れには聞こえない。口の動きとも合ったまま)。
-    伸ばす範囲では、音の高さがわずかに下がり、口の動きとのずれが最大で「長い分の半分」出る。なので、長い分が大きいとき
-    (STRETCH_GAP_MAX 超)は伸ばさない。"""
+    """英語版だけ少し長い所(日本語はひと続き、または同じ所を2回使っている)で、切れ目が日本語の音の鳴っている最中にあるとき、
+    無音をはさむかわりに、前後の日本語の音を少しだけ(3%未満)遅く再生して、その長さを埋める。
+    日本語のほうが少し長い所(日本語を少し飛ばしている)は、同じように少しだけ速く再生して、飛ばさずにおさめる。
+    切れ目(飛ばす所)が日本語の無音にあるときは、何もしない(間の長さが少し変わるだけで、途切れには聞こえない。口の動きとも合ったまま)。
+    合成では、音の高さを保ったまま速さだけ変える。伸び縮みの範囲では、口の動きとのずれが最大で「長さの差の半分」出る。
+    なので、差が大きいとき(STRETCH_GAP_MAX 超)は行わない。"""
     def jq(t):
         return float(np.sqrt((jsl(t - 0.1, 0.2) ** 2).mean()))
     quiet = 0.5 * jthr
@@ -1610,14 +1644,23 @@ def _stretch_small_gaps(segs, jsl, jthr):
         g_en, g_jp = nx["en_start"] - sg["en_end"], nx["jp_start"] - pe
         net = g_en - g_jp
         # g_jp < 0 は、英語版の長い分を、日本語の同じ所をもう一度使って埋めている形(同じ音が2回出る)。これも伸ばしてつなぐ
-        if not (g_en >= -0.002 and -STRETCH_GAP_MAX <= g_jp <= 0.02 and 0.02 < net <= STRETCH_GAP_MAX):
+        longer_en = g_en >= -0.002 and -STRETCH_GAP_MAX <= g_jp <= 0.02 and 0.02 < net <= STRETCH_GAP_MAX
+        # 逆に、日本語のほうが少し長い所(英語はひと続きで、日本語を少し飛ばしている)は、飛ばさずに、前後を少し速くしておさめる
+        longer_jp = -0.002 <= g_en <= 0.02 and g_jp >= -0.002 and 0.02 < -net <= STRETCH_GAP_MAX
+        if not (longer_en or longer_jp):
             out.append(sg)
             continue
-        rep_q = g_jp > -0.02 or float(np.sqrt((jsl(nx["jp_start"], -g_jp) ** 2).mean())) < quiet     # くり返す所は無音か
-        if max(jq(pe), jq(nx["jp_start"])) < quiet and rep_q:
-            out.append(sg)                              # 無音の所で切れている → 間が少し長くなるだけ。そのまま
-            continue
-        L = (g_en - (1.0 + STRETCH_GAP_RATE) * g_jp) / STRETCH_GAP_RATE      # 伸ばすのに使う、英語側の長さ(間を除く)
+        if longer_en:
+            rep_q = g_jp > -0.02 or float(np.sqrt((jsl(nx["jp_start"], -g_jp) ** 2).mean())) < quiet     # くり返す所は無音か
+            if max(jq(pe), jq(nx["jp_start"])) < quiet and rep_q:
+                out.append(sg)                          # 無音の所で切れている → 間が少し長くなるだけ。そのまま
+                continue
+            L = (g_en - (1.0 + STRETCH_GAP_RATE) * g_jp) / STRETCH_GAP_RATE      # 伸ばすのに使う、英語側の長さ(間を除く)
+        else:
+            if float(np.sqrt((jsl(pe, g_jp) ** 2).mean())) < quiet:
+                out.append(sg)                          # 飛ばす所が無音 → 間が少し短くなるだけ。そのまま
+                continue
+            L = (g_jp - (1.0 + STRETCH_GAP_RATE) * g_en) / STRETCH_GAP_RATE
         room_a, room_b = d - 1.0, (nx["en_end"] - nx["en_start"]) - 1.0
         a = min(L / 2, room_a)
         b = min(L - a, room_b)
@@ -1692,6 +1735,33 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
                 if jrms(j0, j1) >= 0.25 * jthr:
                     sg_["en_start"], sg_["jp_start"] = round(float(run_e), 4), round(float(j1), 4)
                     sg_["trim_s"] = True
+        # いちばん前の区間・CM の直後: 頭に、CM や前の番組の終わりの音が残っていることがある(英語側が無音ではないので、上の規則では落ちない)。
+        #   放送の切り替わりには短い無音があるので、頭から6秒以内に日本語の無音(0.3秒以上)があり、その手前の日本語がそのあとの 4倍以上
+        #   大きく、英語側にはそういう音量の差がない(2倍未満)とき、無音の終わりまで頭を詰める
+        first = not any(x["en_end"] <= sg_["en_start"] + 1e-6 for x in segs if x is not sg_)
+        if (first or _cm_before(sg_)) and d_en > 12.0:
+            q_s, q_e, u = None, None, 0.0
+            while u < 6.0:
+                if jrms(sg_["jp_start"] + u * r_, sg_["jp_start"] + (u + 0.05) * r_) < 0.5 * jthr:
+                    if q_s is None:
+                        q_s = u
+                    q_e = u + 0.05
+                elif q_s is not None:
+                    if q_e - q_s >= 0.3:
+                        break
+                    q_s, q_e = None, None
+                u += 0.05
+            if q_s is not None and q_e - q_s >= 0.3 and q_s >= 0.3:
+                def erms(a_, b_):
+                    return float(np.sqrt((esl(sg_["en_start"] + a_, b_ - a_) ** 2).mean()))
+                j_bef = jrms(sg_["jp_start"], sg_["jp_start"] + q_s * r_)
+                j_aft = jrms(sg_["jp_start"] + q_e * r_, sg_["jp_start"] + (q_e + 4.0) * r_)
+                e_bef, e_aft = erms(0.0, q_s), erms(q_e, q_e + 4.0)
+                if j_bef >= 4.0 * max(j_aft, 0.25 * jthr) and e_bef < 2.0 * max(e_aft, 0.25 * rms_thr):
+                    sg_["en_start"] = round(float(sg_["en_start"] + q_e), 4)
+                    sg_["jp_start"] = round(float(sg_["jp_start"] + q_e * r_), 4)
+                    sg_["trim_s"] = True
+                    d_en = sg_["en_end"] - sg_["en_start"]
         # 先頭: 英語が無音のあいだ進める(日本語に音があるときだけ。最大3秒)
         t_ = sg_["en_start"]
         while t_ - sg_["en_start"] < 3.0 and sg_["en_end"] - t_ > 0.5 and float(np.sqrt((esl(t_, 0.1) ** 2).mean())) < QT * rms_thr:
@@ -4630,6 +4700,7 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
     hb = sr // 100
     kb = n // hb
     mxj = np.abs(j[: kb * hb].reshape(kb, hb)).max(1)
+    src_gaps = []
     i = 0
     while i < kb:
         if mxj[i] > 12:
@@ -4648,6 +4719,10 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
             x = x[max(p0, 0): min(p1, n)].astype(np.float32)
             return float(np.sqrt((x ** 2).mean())) if len(x) else 0.0
         if (rms(j, a_ - w, a_) >= 0.15 * pj and rms(j, b_, b_ + w) >= 0.15 * pj and rms(e, a_, b_) >= 0.1 * pe):
+            if cuts and not any(a_ / sr - 0.3 <= c_ <= b_ / sr + 0.3 for c_ in cuts):
+                # 区間のつなぎ目から離れている = 合成でできた途切れではなく、日本語の録画の元の音にある切れ目(台詞の息つぎなど)
+                src_gaps.append(f"{_mmss(a_ / sr)}({ln:.2f}秒)")
+                continue
             issues.append(f"{_mmss(a_ / sr)} あたり ({ln:.2f}秒): 日本語の音が、鳴っている最中に一瞬途切れています")
     # 2) ずれ: 6秒ごとに、日本語を前後3秒動かしていちばん合う位置を見る(BGM・効果音が同じ所でだけ分かる)
     W, R = 6 * sr, 3 * sr
@@ -4670,6 +4745,8 @@ def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
         w0 = int(0.04 * sr)
         near0 = float(c[max(i0 - w0, 0): i0 + w0 + 1].max()) if 0 <= i0 < len(c) else 0.0
         lags.append((s0 / sr, (i - i0) / sr, float(c[i]), near0))
+    if src_gaps:
+        notes.append("日本語の録画の元の音にある短い無音(区間のつなぎ目ではないので、合成でできたものではありません): " + " ".join(src_gaps[:30]))
     good = [x for x in lags if x[2] >= 0.25]
     bad = [x for x in good if abs(x[1]) > 0.1 and x[3] < 0.7 * x[2]]
     amb = [x for x in good if abs(x[1]) > 0.1 and x[3] >= 0.7 * x[2]]
