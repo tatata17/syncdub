@@ -1,1 +1,1 @@
-{"version": "2026.11.18.44", "beta": 45, "file": "beta/syncdub_beta.pyw", "sha256": "70bf55210159104badd381c65d5ff908d943aaeff70b11576a1da2bfef42820d", "notes": "正式版 v2026.11.18.44 と同じ内容です"}
+{"version": "2026.11.18.44", "beta": 46, "file": "beta/syncdub_beta.pyw", "sha256": "4584757ad930a5e9ef1c595dc33ef1863b26a4279b9c144615b8f0d4a1823083", "notes": "手動調整: 「P 前後2秒を試聴」を追加。出来上がりの音を、英語側のカーソルの前後2秒だけ再生します。つなぎ目や、線を動かした結果を、合成せずに確かめられます"}

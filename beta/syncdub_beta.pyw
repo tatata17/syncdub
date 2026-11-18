@@ -304,7 +304,7 @@ def stretch_carry(segs, joins):
     return out
 
 
-def measure_stretch_joins(segs, src, a_index, jp_off, sr, layout, tmp=None):
+def measure_stretch_joins(segs, src, a_index, jp_off, sr, layout, tmp=None, pre=()):
     """音の高さを保つ伸び縮みの区間について、前後の区間と波形がぴったり続く切り位置を測る。戻り値 {区間の番号: (頭の位置, 終わりのずれ)}。
     合成と同じ処理で、伸び縮みさせた音を一度だけ作ってみて、頭と終わりの波形を元の音と突き合わせる。"""
     import tempfile
@@ -349,7 +349,7 @@ def measure_stretch_joins(segs, src, a_index, jp_off, sr, layout, tmp=None):
         if tmp is not None:
             tmp.extend(files)
         try:
-            subprocess.run(["ffmpeg", "-v", "error", "-y", "-vn", "-i", src, "-filter_complex", ";".join(lines)] + maps,
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-vn", *pre, "-i", src, "-filter_complex", ";".join(lines)] + maps,
                            capture_output=True, check=True, **({"creationflags": 0x08000000} if sys.platform == "win32" else {}))
             for k, i in enumerate(todo):
                 a0, r, D = geo[i]
@@ -474,6 +474,36 @@ def clip_segments(segs, c0, c1):
                 n.jp_end = s.jp_start + (b - s.en_start) * r
         out.append(n)
     return out
+
+
+def render_preview(proj, c0, c1, wav):
+    """出来上がりの日本語の音声のうち、英語版の c0〜c1 秒の部分だけを wav に作る(手動調整の「前後を試聴」用)。
+    合成と同じ処理(load_segments → build_filter)を使うので、つなぎ目の聞こえ方は、合成したものと同じになる。
+    速くするため、素材は必要な所の少し手前から読む。"""
+    en_path, jp_path = proj["en_video"], proj["jp_media"]
+    en, jp = probe(en_path), probe(jp_path)
+    segs = load_segments(proj, fmt_duration(en), proj.get("en_fps") or video_fps(en), proj.get("jp_fps") or video_fps(jp))
+    segs = clip_segments(segs, c0, c1)
+    if not segs:
+        raise ValueError("この位置には、区間がありません")
+    sr, layout = 48000, "stereo"
+    fade = float(proj.get("fade_ms", 3)) / 1000
+    jp_a = int(proj.get("jp_audio_stream", 0))
+    jp_off, en_off = video_start_offset(jp), video_start_offset(en)
+    js = [x.jp_start for x in segs if not x.silent and not x.english]
+    sj = max(0.0, min(js) + jp_off - 2.0) if js else 0.0        # 日本語の録画を読み始める位置
+    se = max(0.0, c0 + en_off)                                  # 英語版を読み始める位置(英語版の音声を使う区間のため)
+    pre_j = ["-ss", f"{sj:.6f}"] if sj > 0 else []
+    joins = measure_stretch_joins(segs, jp_path, jp_a, jp_off - sj, sr, layout, pre=pre_j)
+    filt, _w = build_filter(segs, jp_off - sj, jp_a, sr, layout, fade, in_idx=0, lead=0.0, en_idx=1, en_off=c0 + en_off - se, joins=joins)
+    fd, script = tempfile.mkstemp(prefix="syncdub_", suffix=".filter.txt")
+    os.close(fd)
+    try:
+        Path(script).write_text(filt, encoding="utf-8")
+        run(["ffmpeg", "-y", "-v", "error", "-vn", *pre_j, "-i", jp_path, "-vn", "-ss", f"{se:.6f}", "-i", en_path,
+             "-filter_complex_script", script, "-map", "[aout]", "-c:a", "pcm_s16le", wav], timeout=120, stdin=subprocess.DEVNULL)
+    finally:
+        Path(script).unlink(missing_ok=True)
 
 
 _ENC_OK = {}
@@ -750,7 +780,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 45       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 46       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4191,6 +4221,7 @@ TIPS = {
     "拡大 ↑": "波形を拡大して、細かく見ます。(↑ キー / ホイール)",
     "▶ 再生": "カーソルの位置から、約20秒の音を再生します。もう一度押すと止まります。(Space)",
     "A 音で探して合わせる": "上(英語)のカーソル付近の音を、下(日本語)から探して、自動でカーソルを合わせます。",
+    "P 前後2秒を試聴": "出来上がりの音(合成したときに入る日本語の音)を、上(英語)のカーソルの前後2秒だけ再生します。線を動かしたあとや、つなぎ目を、合成せずに耳で確かめられます。(P)",
     "S この2つは『同じ場面』": "上下のカーソルの位置は同じ場面(同じフレーム)、と登録します。音合わせの基準になります。(S キー)",
     "登録するとき、音で微調整する": "登録した位置のわずかなずれを、音の照合で自動的に直します。通常はオンのままで構いません。",
     "CM": "波形で選んだ下(日本語)の範囲を『CM』として、使わない部分にします。",
@@ -5357,7 +5388,7 @@ class App(_TkBase):
         self._setup_dnd()
         if self.auto_upd.get():
             self.after(1500, lambda: self.check_update(False))
-        for k in ("s", "a", "space", "Left", "Right", "Tab", "Up", "Down", "Escape", "Home"):
+        for k in ("s", "a", "p", "space", "Left", "Right", "Tab", "Up", "Down", "Escape", "Home"):
             self.bind_all(f"<KeyPress-{k}>" if len(k) > 1 else f"<Key-{k}>", self._key)
         # ボタンを押したあと、フォーカスが残って Space/Enter で再実行されないようにする
         self.bind_class("TButton", "<ButtonRelease-1>", lambda e: self.after(50, self._unfocus), add="+")
@@ -5418,7 +5449,7 @@ class App(_TkBase):
                  ).pack(fill="x", padx=6, pady=(2, 0))
         hr = ttk.Frame(self.manual)
         hr.pack(fill="x", padx=6, pady=(2, 0))
-        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 一覧で選んで←→(または Alt+←→): 線を1コマ動かす(Shift: 0.1秒) / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
+        self.keys_lbl = tk.Label(self.manual, fg="#777", font=("", 8), justify="left", anchor="w", text="ドラッグ: 範囲を選ぶ / 緑の線・範囲の端をドラッグ: その線を動かす(Shift+ドラッグ: 上下一緒に) / 一覧で選んで←→(または Alt+←→): 線を1コマ動かす(Shift: 0.1秒) / P: 出来上がりの音を、英語カーソルの前後2秒だけ試聴 / 右クリック: メニュー / クリック: カーソルを置く / ホイール・↑↓キー: 拡大縮小 / "
                  "Shift+ホイール・右ドラッグ・下のバー: 横にずらす / ←→: 1コマ移動 / Space: 再生 / Esc: 選択を解除\nCtrl+Z: 元に戻す / Ctrl+Y: やり直し / Ctrl+S: 設定を保存 / Ctrl+O: 設定を開く / Ctrl+A: 一覧を全選択 / Delete: 選択を削除 / Ctrl++ Ctrl+- Ctrl+0: 拡大・縮小・全体表示")
         def _toggle_keys(btn):
             if self.keys_lbl.winfo_ismapped():
@@ -5476,6 +5507,7 @@ class App(_TkBase):
         r1.pack(fill="x", padx=8, pady=(6, 2))
         ttk.Button(r1, text="A 音で探して合わせる", width=20, command=self.auto_snap).pack(side="left")
         ttk.Button(r1, text="S この2つは『同じ場面』", width=22, command=self.add_point).pack(side="left", padx=6, ipady=3)
+        ttk.Button(r1, text="P 前後2秒を試聴", width=16, command=self.play_join).pack(side="left")
         self.refine_v = tk.BooleanVar(value=True)
         ttk.Checkbutton(g1, text="登録するとき・線をドラッグしたとき、音で微調整する",
                         variable=self.refine_v).pack(anchor="w", padx=8, pady=(0, 4))
@@ -7607,6 +7639,8 @@ class App(_TkBase):
             self.add_point()
         elif ks == "a":
             self.auto_snap()
+        elif ks == "p":
+            self.play_join()
         elif ks == "Escape":
             self.clear_ranges()
         elif ks == "space":
@@ -7668,22 +7702,53 @@ class App(_TkBase):
         self.pv_img[k] = img
         self.pv[k].config(image=img, text="", width=img.width(), height=img.height())
 
-    def play(self, k):
-        """カーソル位置から約20秒の音を再生 (もう一度押すと停止)。"""
+    def _stop_sound(self):
+        """再生中(または再生の準備中)なら止めて True を返す。"""
         if os.name == "nt" and time.time() < getattr(self, "_sound_until", 0):
             import winsound
             winsound.PlaySound(None, winsound.SND_PURGE)
             self._sound_until = 0
-            self.say("再生を止めました")
-            return
-        if self.play_proc and self.play_proc.poll() is None:
+        elif self.play_proc and self.play_proc.poll() is None:
             self.play_proc.terminate()
             self.play_proc = None
-            self.say("再生を止めました")
-            return
-        if getattr(self, "_playing", False):
+        elif getattr(self, "_playing", False):
             self._playing = False
-            self.say("再生を止めました")
+        else:
+            return False
+        self.say("再生を止めました")
+        return True
+
+    def play_join(self, t=None, span=2.0):
+        """出来上がりの音(合成したときに入る日本語の音)を、英語側のカーソルの前後2秒だけ再生する。
+        線を動かしたあと・つなぎ目を、合成せずに耳で確かめるためのもの (もう一度押すと停止)。"""
+        if self._stop_sound():
+            return
+        if not all(self.media.values()) or not self.segs:
+            self.say("先に、自動で合わせるか、『同じ場面』を登録してください")
+            return
+        if t is None:
+            t = self.tr["en"].cursor
+        c0, c1 = max(0.0, t - span), min(self.media["en"].end, t + span)
+        if c1 - c0 < 0.2:
+            return
+        proj = self.project_dict()
+        wav = str(Path(tempfile.gettempdir()) / "syncdub_play_join.wav")
+        self.say(f"出来上がりの音を作っています… ({tc(c0)[3:]} 〜 {tc(c1)[3:]})")
+        self._playing = True
+
+        def work():
+            try:
+                render_preview(proj, c0, c1, wav)
+                ok, err = True, ""
+            except Exception as ex:  # noqa: BLE001
+                ok, err = False, str(getattr(ex, "stderr", "") or ex)[-80:]
+            self.q.put(lambda: (self._play_ready(ok, wav, err, c1 - c0 + 0.3),
+                                self.say(f"出来上がりの音を再生中… 英語版の {tc(c0)[3:]} 〜 {tc(c1)[3:]} (P でもう一度 / 再生中に押すと止まります)") if ok else None))
+        threading.Thread(target=work, daemon=True).start()
+
+    def play(self, k):
+        """カーソル位置から約20秒の音を再生 (もう一度押すと停止)。"""
+        if self._stop_sound():
             return
         m = self.media[k]
         if not m:
@@ -7704,7 +7769,7 @@ class App(_TkBase):
             self.q.put(lambda: self._play_ready(ok, wav, err))
         threading.Thread(target=work, daemon=True).start()
 
-    def _play_ready(self, ok, wav, err):
+    def _play_ready(self, ok, wav, err, dur=20.0):
         """再生用の音ができたあと、メインスレッドで再生を始める (別スレッドからの再生で固まるのを避ける)。"""
         playing, self._playing = self._playing, False
         if not playing:
@@ -7715,7 +7780,7 @@ class App(_TkBase):
         try:
             if os.name == "nt":
                 import winsound
-                self._sound_until = time.time() + 20
+                self._sound_until = time.time() + dur
                 winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
             else:
                 self.play_proc = subprocess.Popen(["ffplay", "-v", "quiet", "-nodisp", "-autoexit", wav], **NOWIN)
@@ -7844,6 +7909,9 @@ class App(_TkBase):
                 self.set_cursor(k, t)
                 self.add_point()
             mnu.add_command(label=f"ここに『同じ場面』を追加 ({o}側は赤いカーソルの位置)", command=add_here)
+        t_en = self.items[n]["en"] if n is not None and self.items[n]["k"] == "pt" else (t if k == "en" else None)
+        if t_en is not None and self.segs:
+            mnu.add_command(label="この前後2秒を試聴 (出来上がりの音)", command=lambda: self.play_join(t_en))
         mnu.add_command(label="ここを拡大", command=lambda: self.zoom(k, 0.4, t))
         mnu.add_command(label="全体を表示", command=self.fit_all)
         mnu.add_command(label="ここに赤いカーソルを置く", command=lambda: self.set_cursor(k, t))
