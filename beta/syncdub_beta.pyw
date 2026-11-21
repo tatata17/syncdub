@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 53       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 54       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -1958,6 +1958,29 @@ def _trim_to_en_silence(segs, esl, jsl, rms_thr, jthr, min_tail=0.3):
             if jrms(j0, j1) >= 0.25 * jthr:
                 sg_["en_start"], sg_["jp_start"] = round(float(t_), 4), round(float(j1), 4)
                 sg_["trim_s"] = True
+        # いちばん後ろの区間: 日本語の放送は、エンディングを途中で終わらせて、少し間をおいて次の番組や CM に移ることがある。
+        #   終わりの15秒以内に、日本語の無音が3秒以上続き(そのあいだ英語側には音がある)、そのあとにまた日本語の音があるなら、
+        #   その音は別の番組のものなので、無音の頭まで詰める
+        last = not any(x["en_start"] >= sg_["en_end"] - 1e-6 for x in segs if x is not sg_)
+        if last and d_en > 30.0:
+            u, q_s, q_e, found = max(d_en - 15.0, 0.0), None, None, None
+            while u < d_en - 0.05:
+                if jrms(sg_["jp_start"] + u * r_, sg_["jp_start"] + (u + 0.1) * r_) < 0.5 * jthr:
+                    if q_s is None:
+                        q_s = u
+                    q_e = u + 0.1
+                else:
+                    if q_s is not None and q_e - q_s >= 3.0:
+                        found = (q_s, q_e)
+                        break
+                    q_s, q_e = None, None
+                u += 0.1
+            if found and float(np.sqrt((esl(sg_["en_start"] + found[0], found[1] - found[0]) ** 2).mean())) >= rms_thr:
+                sg_["en_end"] = round(float(sg_["en_start"] + found[0] + 0.1), 4)
+                if sg_["jp_end"] is not None:
+                    sg_["jp_end"] = round(float(sg_["jp_start"] + (found[0] + 0.1) * r_), 4)
+                sg_["trim_e"] = True
+                d_en = sg_["en_end"] - sg_["en_start"]
         # CM(日本語にだけある所)の直前: 末尾から4秒以内に英語の無音(0.4秒以上)があって、そこに日本語の音があるなら、無音の頭まで詰める
         #   (CMに入る前のジングルなどが、英語の暗転・無音に重なるのを防ぐ)
         if _cm_after(sg_):

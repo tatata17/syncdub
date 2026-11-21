@@ -1,1 +1,1 @@
-{"version": "2026.11.18.44", "beta": 53, "file": "beta/syncdub_beta.pyw", "sha256": "d1bb8a7a7bf16abc58058428afbb9f31d5e1fecad3ce227fb688488d72786183", "notes": "報告の画面の言い回しを直しました"}
+{"version": "2026.11.18.44", "beta": 54, "file": "beta/syncdub_beta.pyw", "sha256": "4d5f40b0d6fa9aea5dc650f17f6f14a32f8a9f52d193b5b1ab8070fdcf649880", "notes": "録画の最後に、次の番組やCMの頭の音が少しだけ入ってしまうことがあったのを直しました(日本語の放送が、エンディングを途中で終わらせている動画)"}
