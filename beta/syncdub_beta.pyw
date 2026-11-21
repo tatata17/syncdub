@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 51       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 52       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -922,17 +922,25 @@ def install_exception_log():
     threading.excepthook = lambda a: log_exception(f"作業スレッド {a.thread.name if a.thread else ''}", a.exc_type, a.exc_value, a.exc_traceback)
 
 
-def report_url():
-    """不具合の報告のページ(GitHub の入力フォーム)の場所。版とパソコンの環境は、あらかじめ入れておく。"""
+REPORT_FORM = "https://docs.google.com/forms/d/e/1FAIpQLSeDEg1vt7aIWJxcsnap5GY1SO2O8uXHnblUWv2THUctDcV7Vg/viewform"      # 不具合・要望の報告フォーム(Google フォーム。アカウント不要、作者だけが読める)
+
+
+def report_env():
+    """報告に書く、版とパソコンの環境(1行)。"""
     import platform
-    import urllib.parse
     env = f"{platform.system()} {platform.release()} / Python {sys.version.split()[0]}"
     try:
         r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10, **NOWIN)
         env += " / " + " ".join(((r.stdout or "").splitlines() or [""])[0].split()[:3])
     except Exception:  # noqa: BLE001
         env += " / ffmpeg: 動かせません"
-    q = urllib.parse.urlencode({"template": "bug_report.yml", "version": ver_label(), "env": env})
+    return env
+
+
+def report_url():
+    """GitHub の不具合の報告のページ(入力フォーム)の場所。版とパソコンの環境は、あらかじめ入れておく。"""
+    import urllib.parse
+    q = urllib.parse.urlencode({"template": "bug_report.yml", "version": ver_label(), "env": report_env()})
     return f"https://github.com/{REPO}/issues/new?{q}"
 
 
@@ -5784,7 +5792,7 @@ class App(_TkBase):
         m.add_command(label="記録のフォルダを開く", command=self._open_records)
         m.add_separator()
         m.add_command(label="診断情報を保存… (不具合の報告用)", command=self._save_diagnostic)
-        m.add_command(label="不具合を報告…", command=self.report_bug)
+        m.add_command(label="不具合・要望を報告…", command=self.report_bug)
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
@@ -7598,30 +7606,39 @@ class App(_TkBase):
                             f"記録: {f}\n\n不具合を報告するときは、「更新・設定」→「診断情報を保存」でできるファイルを付けてください。")
 
     def report_bug(self):
-        """不具合の報告: 手順を見せて、報告のページ(入力フォーム)をブラウザで開く。"""
+        """不具合・要望の報告: 手順を見せて、報告フォームをブラウザで開く。"""
+        import webbrowser
         d = tk.Toplevel(self)
-        d.title("不具合を報告")
+        d.title("不具合・要望を報告")
         d.transient(self)
         d.resizable(False, False)
-        tk.Label(d, justify="left", wraplength=480, padx=16, pady=12, text=(
-            "報告のページ(入力フォーム)を、ブラウザで開きます。版とパソコンの環境は、自動で入ります。\n\n"
-            "書くとよいこと:\n"
+        tk.Label(d, justify="left", wraplength=500, padx=16, pady=12, text=(
+            "報告フォームを、ブラウザで開きます。書くとよいこと:\n"
             "・何をしたら、どうなったか(出来上がった動画のことなら、おかしい所の時刻も)\n"
-            "・合成のあとに出る「自動チェック報告」の文(そのまま貼れます)\n"
-            "・下の「診断情報を保存」でできるファイル(フォームにドラッグ&ドロップで付けられます)\n\n"
-            "※ 報告のページは、だれでも見られます。番組名や放送局の名前は書かないでください。"
-            "診断情報と報告文には、動画のファイル名と場所が入ります。気になるときは、その部分を消してから貼ってください。\n"
-            "※ 報告には、GitHub のアカウント(無料)が要ります。")).pack()
+            "・syncdub の版とパソコンの環境(下の「版と環境をコピー」を押して、貼り付けてください)\n"
+            "・合成のあとに出る「自動チェック報告」の文や、エラーの文面(そのまま貼れます)\n\n"
+            "報告のしかたは、2つあります。\n"
+            "① フォームで報告 … アカウントは要りません。書いた内容は、作者だけが読めます。\n"
+            "② GitHub で報告 … GitHub のアカウント(無料)が要ります。だれでも見られるので、番組名や放送局の名前は書かないで"
+            "ください。「診断情報を保存」でできるファイルを付けられます(動画のファイル名と場所が入ります)。")).pack()
         bf = ttk.Frame(d)
-        bf.pack(pady=(0, 12))
+        bf.pack(pady=(0, 6))
+        b2 = ttk.Frame(d)
+        b2.pack(pady=(0, 12))
 
-        def go():
-            import webbrowser
-            webbrowser.open(report_url())
-            self.say("報告のページを、ブラウザで開きました")
-        ttk.Button(bf, text="診断情報を保存…", command=self._save_diagnostic).pack(side="left", padx=4)
-        ttk.Button(bf, text="報告のページを開く", command=go).pack(side="left", padx=4)
-        ttk.Button(bf, text="閉じる", command=d.destroy).pack(side="left", padx=4)
+        def copy_env():
+            self.clipboard_clear()
+            self.clipboard_append(f"syncdub {ver_label()} / {report_env()}")
+            self.say("版と環境をコピーしました。フォームに貼り付けてください")
+
+        def go(url, what):
+            webbrowser.open(url)
+            self.say(f"{what}を、ブラウザで開きました")
+        ttk.Button(bf, text="版と環境をコピー", command=copy_env).pack(side="left", padx=4)
+        ttk.Button(bf, text="① フォームで報告 (アカウント不要)", command=lambda: go(REPORT_FORM, "報告フォーム")).pack(side="left", padx=4)
+        ttk.Button(b2, text="診断情報を保存…", command=self._save_diagnostic).pack(side="left", padx=4)
+        ttk.Button(b2, text="② GitHub で報告", command=lambda: go(report_url(), "GitHub の報告のページ")).pack(side="left", padx=4)
+        ttk.Button(b2, text="閉じる", command=d.destroy).pack(side="left", padx=4)
         d.bind("<Escape>", lambda e: d.destroy())
 
     def _save_diagnostic(self):

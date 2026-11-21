@@ -3,3 +3,6 @@ contact_links:
   - name: 使い方のページ
     url: https://tatata17.github.io/syncdub/
     about: 困ったときの対処は、まずこちらの「困ったとき」を見てください
+  - name: アカウントなしで報告する(フォーム)
+    url: https://docs.google.com/forms/d/e/1FAIpQLSeDEg1vt7aIWJxcsnap5GY1SO2O8uXHnblUWv2THUctDcV7Vg/viewform
+    about: GitHub のアカウントがなくても送れます。書いた内容は、作者だけが読めます

@@ -1,1 +1,1 @@
-{"version": "2026.11.18.44", "beta": 51, "file": "beta/syncdub_beta.pyw", "sha256": "5a681065efee295f0b59f809de521ddd1d14f897bdc3f6a44e376187df8b9971", "notes": "「更新・設定」に「不具合を報告…」を追加しました。報告のページ(入力フォーム)が開きます"}
+{"version": "2026.11.18.44", "beta": 52, "file": "beta/syncdub_beta.pyw", "sha256": "6715fd77b71907974e5cb8c5416280b024c89d0da07ef241694ca7423ebc2368", "notes": "「不具合・要望を報告…」で、アカウントの要らない報告フォームも選べるようにしました"}
