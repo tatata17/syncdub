@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 49       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 50       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4836,24 +4836,14 @@ def stretch_ramps(segs, q=1.0):
     return out
 
 
-def detect_speed(en, jp):
-    """2本の速さの関係を、音から調べる。戻り値 (キー, 説明用の点数)。キーは SPEED_MODES のもの("" = 同じ速さ)。はっきりしなければ None。
-    音の立ち上がりの並び(1秒に100コマ)を、同じ速さ・英語版が PAL・日本語が PAL の3通りで照らし合わせ、
-    40秒の窓がいちばんはっきり一致する速さを選ぶ。速さが 4% 違うと、40秒のあいだに 1.7秒ずれるので、一致の山がつぶれる。
-    1位が 2位よりはっきり高いときだけ決める(まぎらわしいときは決めない)。"""
-    hop = SR // 100
-
-    def onset(x):
-        n = len(x) // hop
-        if n < 2000:
-            return None
-        e = np.log1p(np.sqrt((x[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(1)) * 200.0)
-        d = np.maximum(np.diff(e), 0.0)
-        return d - d.mean()
-    E, J = onset(en.x), onset(jp.x)
+def _speed_decide(E, J, rate):
+    """E・J = 英語版・日本語の「できごとの並び」(平均0。1秒に rate コマ)。3通りの速さで照らし合わせて決める。
+    戻り値 (キー, 点数)。キーは SPEED_MODES のもの("" = 同じ速さ)。はっきりしなければ None。
+    40秒の窓(最大24個)を、日本語の全体の中から探し、一致の山の高さを見る。速さが 4% 違うと、40秒のあいだに 1.7秒ずれるので、
+    山がつぶれる。声だけの場面・片方にしかない場面の窓は合わないので、よく合った3分の1の平均を点数にする。"""
     if E is None or J is None:
         return None, {}
-    W = int(min(4000, max(1500, len(E) // 2)))     # 40秒(短い動画では、長さの半分。15秒より短くはしない)
+    W = int(min(40 * rate, max(15 * rate, len(E) // 2)))
     if len(E) <= W or len(J) <= W:
         return None, {}
     starts = [int(f * (len(E) - W)) for f in np.linspace(0.03, 0.97, int(min(24, max(5, 2 * len(E) // W))))]
@@ -4868,10 +4858,10 @@ def detect_speed(en, jp):
         FJ = np.fft.rfft(Jq, N)
         zs = []
         for w in wins:
-            c = np.fft.irfft(FJ * np.conj(np.fft.rfft(w, N)), N)[: len(Jq)]
+            c = np.fft.irfft(FJ * np.conj(np.fft.rfft(w - w.mean(), N)), N)[: len(Jq)]
             zs.append(float((c.max() - c.mean()) / (c.std() + 1e-12)))
         zs.sort()
-        score[key] = float(np.mean(zs[-max(2, len(zs) // 3):]))     # 声だけの場面・片方にしかない場面の窓は合わないので、よく合った3分の1で見る
+        score[key] = float(np.mean(zs[-max(2, len(zs) // 3):]))
     order = sorted(score, key=score.get, reverse=True)
     best, second = order[0], order[1]
     if best == "":
@@ -4880,6 +4870,55 @@ def detect_speed(en, jp):
     if score[best] >= 10.0 and score[best] >= 2.0 * score[second]:
         return best, score
     return None, score
+
+
+def detect_speed(en, jp):
+    """2本の速さの関係を、音から調べる(音の立ち上がりの並び。1秒に100コマ)。戻り値は _speed_decide と同じ。"""
+    hop = SR // 100
+
+    def onset(x):
+        n = len(x) // hop
+        if n < 2000:
+            return None
+        e = np.log1p(np.sqrt((x[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(1)) * 200.0)
+        d = np.maximum(np.diff(e), 0.0)
+        return d - d.mean()
+    return _speed_decide(onset(en.x), onset(jp.x), 100)
+
+
+def detect_speed_video(en, jp):
+    """2本の速さの関係を、映像から調べる(画面の変わり方の並び。1秒に10コマ)。会話ばかりで、音では決められないとき用。
+    場面の切り替わりは、言葉や音が違っても同じ所に出る。動画を最後まで読むので、時間がかかる。戻り値は _speed_decide と同じ。"""
+    F = 12
+
+    def change(m):
+        if not any(x.get("codec_type") == "video" for x in m.info.get("streams", [])):
+            return None
+        X, ok = _thumbs_box(m.path, F, None)       # 全体を読む(使えれば GPU で速くする)
+        if len(X) < 20 * F:
+            return None
+        c = 1.0 - (X[1:] * X[:-1]).mean(1)         # となりのコマとの似かた(0 = 同じ絵、1 = まったく別の絵 = 場面の切り替わり)
+        c[~(ok[1:] & ok[:-1])] = 0.0               # 真っ黒・単色の画面は使わない
+        k = 2 * F + 1                              # 動きによるゆるやかな変化を引いて、切り替わりの「とがり」だけを残す
+        pad = np.pad(c, k // 2, mode="edge")
+        base = np.array([np.median(pad[i:i + k]) for i in range(len(c))])
+        d = np.maximum(c - base, 0.0)
+        d = np.convolve(d, [0.25, 0.5, 0.25], mode="same")      # 1コマのずれは許す
+        return (d - d.mean()).astype(np.float64)
+    return _speed_decide(change(en), change(jp), F)
+
+
+def detect_speed_any(en, jp, progress=lambda f, m: None):
+    """まず音で調べ、はっきりしなければ映像でも調べる。戻り値 (キー("" / "en_pal" / "jp_pal")またはNone, 何で決めたか)。"""
+    k, _sc = detect_speed(en, jp)
+    if k is not None:
+        return k, "音"
+    progress(0.0, "2本の速さが同じかどうかを、映像で調べています…(音では決められなかったため。少し時間がかかります)")
+    try:
+        k, _sc = detect_speed_video(en, jp)
+    except Exception:  # noqa: BLE001  映像を読めないときは、決めない
+        k = None
+    return k, "映像"
 
 
 def make_speed_proxy(path, astream, q, out):
@@ -7141,7 +7180,9 @@ class App(_TkBase):
                 mode = mode0
                 if auto_speed:
                     prog(0.0, "2本の速さが同じかどうかを調べています…")
-                    mode = detect_speed(en, jp)[0] or ""
+                    mode, by = detect_speed_any(en, jp, prog)
+                    mode = mode or ""
+                    self._speed_by = by
 
                 def note(mode=mode):
                     self._speed_resolved = mode if auto_speed else ""
@@ -7202,7 +7243,8 @@ class App(_TkBase):
         lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
         if self.speed_key():
             lines.append(f"・{SPEED_MODES[self.speed_key()][0]} として合わせました"
-                         + ("(音から自動で判定。違っていたら、「詳細設定」で選び直してください)" if self.speed_mode.get() == SPEED_AUTO else "") + "。")
+                         + (f"({getattr(self, '_speed_by', '音')}から自動で判定。違っていたら、「詳細設定」で選び直してください)"
+                            if self.speed_mode.get() == SPEED_AUTO else "") + "。")
         for a, b in info["unused_jp"][:5]:
             lines.append(f"・日本語の録画の {self.short(a)} 〜 {self.short(b)} (約{int(b - a)}秒) は使いません (CMなど)。")
         if len(info["unused_jp"]) > 5:
