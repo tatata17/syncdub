@@ -1,1 +1,1 @@
-{"version": "2026.11.18.44", "beta": 47, "file": "beta/syncdub_beta.pyw", "sha256": "7ee5725c98d05aabc44af440a1818d2920ae51a5bebe8ed7eb42f88f2f0ca3f8", "notes": "速さの違う版(PAL版。約4%速い)どうしを合わせられるようにしました。「詳細設定」で、どちらが PAL版かを選んでから、自動で合わせます"}
+{"version": "2026.11.18.44", "beta": 48, "file": "beta/syncdub_beta.pyw", "sha256": "e62563205f4d40a5391bc03852d1fbdb163ec2577f8b8b19c26553a000b490b0", "notes": "「更新・設定」から、正式版とベータ版を切り替えられるようにしました(切り替え先の最新版に置きかえます)"}

@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 47       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 48       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -846,9 +846,10 @@ def vkey(v):
     return tuple(int(x) for x in re.findall(r"\d+", v))
 
 
-def fetch_update_info():
-    """戻り値: (info, ref)。ref はコミットID(取れなければ 'main')。ベータ版は beta/version.json を見る。"""
-    vj = "beta/version.json" if BETA_REVIEW else "version.json"
+def fetch_update_info(beta=None):
+    """戻り値: (info, ref)。ref はコミットID(取れなければ 'main')。ベータ版は beta/version.json を見る。
+    beta: どちらの版の記録を見るか(省くと、いま動いている版と同じほう。版の切り替えのときだけ指定する)。"""
+    vj = "beta/version.json" if (BETA_REVIEW if beta is None else beta) else "version.json"
     if TEST_BASE:
         return json.loads(_http(f"{TEST_BASE}/{vj}")), ""
     ref = "main"
@@ -970,9 +971,10 @@ def check_project(d):
     return None
 
 
-def download_update_source(info, ref):
+def download_update_source(info, ref, beta=None):
+    beta = BETA_REVIEW if beta is None else beta
     base = TEST_BASE or f"https://raw.githubusercontent.com/{REPO}/{ref}"
-    raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if BETA_REVIEW else APP_FILE)}")
+    raw = _http_bytes(f"{base}/{info.get('file', BETA_FILE if beta else APP_FILE)}")
     # 配布ファイルが途中で壊れたり、別の版と入れ違ったりしていないかを確かめる。確かめるための値がなければ、更新しない
     if not info.get("sha256"):
         raise ValueError("配布元の記録に、ファイルを確かめるための値(SHA-256)がありません。安全のため、更新をやめました。\n"
@@ -985,7 +987,10 @@ def download_update_source(info, ref):
                          "配布ページから新しいファイルを入れ直してください")
     code = raw.decode("utf-8").replace("\r\n", "\n")   # 保存のときに改行が二重にならないように、LF にそろえておく
     m = re.search(r'^APP_VERSION = "([^"]+)"', code, re.M)
-    if BETA_REVIEW:
+    mr = re.search(r"^BETA_REVIEW = (True|False)", code, re.M)
+    if not mr or (mr.group(1) == "True") != beta:      # 正式版のつもりでベータ版が(またはその逆が)入らないように
+        raise ValueError("ダウンロードしたファイルが、選んだ版(正式版 / ベータ版)のものではありません。少し待って再試行してください")
+    if beta:
         mb = re.search(r"^BETA_BUILD = (\d+)", code, re.M)
         if not mb or int(mb.group(1)) != int(info.get("beta", 0)):
             raise ValueError(f"ベータの番号が一致しません (version.json {info.get('beta')} / 本体 {mb.group(1) if mb else '?'})。"
@@ -5671,6 +5676,7 @@ class App(_TkBase):
         m = tk.Menu(mb, tearoff=0)
         m.add_command(label="更新を確認", command=lambda: self.check_update(True))
         m.add_command(label="更新前の版に戻す", command=self.rollback)
+        m.add_command(label="正式版に切り替える…" if BETA_REVIEW else "ベータ版に切り替える…", command=self.switch_channel)
         m.add_separator()
         m.add_checkbutton(label="起動時に更新を確認", variable=self.auto_upd, command=self._save_auto)
         m.add_separator()
@@ -5681,7 +5687,7 @@ class App(_TkBase):
         mb["menu"] = m
         mb.pack(side="right", padx=2)
         self.upd_menu = mb
-        Tooltip(mb, "新しい版の確認、更新前の版に戻す、起動時の自動確認のオン/オフを選べます。")
+        Tooltip(mb, "新しい版の確認、更新前の版に戻す、正式版とベータ版の切り替え、起動時の自動確認のオン/オフを選べます。")
 
     def _build_easy(self):
         f = self.easy
@@ -7524,6 +7530,45 @@ class App(_TkBase):
             messagebox.showerror("更新失敗", str(ex))
             return
         self._restart(me)
+
+    def switch_channel(self):
+        """正式版 ⇔ ベータ版 の切り替え。切り替え先の、その時点でいちばん新しい版をダウンロードして、このファイルを置きかえる。
+        そのあとの更新は、切り替えた先の版(正式版は正式版、ベータ版はベータ版)を追いかける。"""
+        to_beta = not BETA_REVIEW
+        name = "ベータ版" if to_beta else "正式版"
+        note = ("ベータ版は、試している途中の新しい機能が先に入る版です。正式版より不安定なことがあります。"
+                if to_beta else "正式版は、確認の済んだ機能だけが入った版です。ベータ版だけにある新しい機能は、使えなくなります。")
+        if not messagebox.askyesno(f"{name}に切り替える", f"{name}の最新版をダウンロードして、切り替えますか?\n\n{note}\n\n"
+                                   "・設定や、保存した作業のファイルは、そのまま使えます\n"
+                                   "・切り替えたあとの更新は、" + name + "の新しい版を確認します\n"
+                                   "・元の版に戻したいときは、同じメニューからもう一度切り替えられます\n\n"
+                                   "切り替えると、ソフトを再起動します(いまの作業内容は、先に「設定を保存」で保存してください)。"):
+            return
+        self.say(f"{name}をダウンロードしています…")
+
+        def work():
+            try:
+                info, ref = fetch_update_info(beta=to_beta)
+                code = download_update_source(info, ref, beta=to_beta)
+            except Exception as ex:  # noqa: BLE001
+                self.q.put(lambda ex=ex: (self.say("切り替えできませんでした"), messagebox.showwarning("切り替えできません", str(ex))))
+                return
+            self.q.put(lambda: done(code))
+
+        def done(code):
+            me = Path(__file__).resolve()
+            if "def switch_channel" not in code and not messagebox.askyesno(
+                    f"{name}に切り替える", f"いまの{name}には、まだ「切り替える」のメニューがありません。\n"
+                    "切り替えたあとで元の版に戻すには、配布ページからファイルを入れ直す必要があります。\n\nそれでも切り替えますか?"):
+                self.say("切り替えをやめました")
+                return
+            try:
+                install_update(code, me)        # いまの版は、バックアップに残る
+            except OSError as ex:
+                messagebox.showerror("切り替えできません", str(ex))
+                return
+            self._restart(me)
+        threading.Thread(target=work, daemon=True).start()
 
     def rollback(self):
         me = Path(__file__).resolve()
