@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 48       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 49       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -4819,6 +4819,7 @@ def output_check(path, sr=8000, cuts=(), ramps=()):
 
 
 SPEED_PAL = 25.0 / (24000.0 / 1001.0)      # PAL版の速さ(約 1.0427 倍)
+SPEED_AUTO = "自動で判定する"
 SPEED_MODES = {"": ("同じ速さ", 1.0), "en_pal": ("英語版が PAL版(約4%速い)", SPEED_PAL), "jp_pal": ("日本語の録画が PAL版(約4%速い)", 1.0 / SPEED_PAL)}
 
 
@@ -4833,6 +4834,52 @@ def stretch_ramps(segs, q=1.0):
         if dl > 0.01:
             out.append((float(x["en_start"]), float(x["en_end"]), dl))
     return out
+
+
+def detect_speed(en, jp):
+    """2本の速さの関係を、音から調べる。戻り値 (キー, 説明用の点数)。キーは SPEED_MODES のもの("" = 同じ速さ)。はっきりしなければ None。
+    音の立ち上がりの並び(1秒に100コマ)を、同じ速さ・英語版が PAL・日本語が PAL の3通りで照らし合わせ、
+    40秒の窓がいちばんはっきり一致する速さを選ぶ。速さが 4% 違うと、40秒のあいだに 1.7秒ずれるので、一致の山がつぶれる。
+    1位が 2位よりはっきり高いときだけ決める(まぎらわしいときは決めない)。"""
+    hop = SR // 100
+
+    def onset(x):
+        n = len(x) // hop
+        if n < 2000:
+            return None
+        e = np.log1p(np.sqrt((x[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(1)) * 200.0)
+        d = np.maximum(np.diff(e), 0.0)
+        return d - d.mean()
+    E, J = onset(en.x), onset(jp.x)
+    if E is None or J is None:
+        return None, {}
+    W = int(min(4000, max(1500, len(E) // 2)))     # 40秒(短い動画では、長さの半分。15秒より短くはしない)
+    if len(E) <= W or len(J) <= W:
+        return None, {}
+    starts = [int(f * (len(E) - W)) for f in np.linspace(0.03, 0.97, int(min(24, max(5, 2 * len(E) // W))))]
+    wins = [E[a:a + W] for a in starts if float(np.abs(E[a:a + W]).sum()) > 1e-6]
+    if len(wins) < 3:
+        return None, {}
+    score = {}
+    for key, (_name, q) in SPEED_MODES.items():
+        n = int(len(J) / q)                        # 日本語を、英語版と同じ速さの時間軸に直す
+        Jq = np.interp(np.arange(n) * q, np.arange(len(J)), J)
+        N = 1 << int(np.ceil(np.log2(len(Jq) + W)))
+        FJ = np.fft.rfft(Jq, N)
+        zs = []
+        for w in wins:
+            c = np.fft.irfft(FJ * np.conj(np.fft.rfft(w, N)), N)[: len(Jq)]
+            zs.append(float((c.max() - c.mean()) / (c.std() + 1e-12)))
+        zs.sort()
+        score[key] = float(np.mean(zs[-max(2, len(zs) // 3):]))     # 声だけの場面・片方にしかない場面の窓は合わないので、よく合った3分の1で見る
+    order = sorted(score, key=score.get, reverse=True)
+    best, second = order[0], order[1]
+    if best == "":
+        return ("" if score[best] >= 8.0 and score[best] >= 1.5 * score[second] else None), score
+    # 速さが違うと決めるのは、とくにはっきりしているときだけ(まちがって決めると、全体が合わなくなる)
+    if score[best] >= 10.0 and score[best] >= 2.0 * score[second]:
+        return best, score
+    return None, score
 
 
 def make_speed_proxy(path, astream, q, out):
@@ -5736,20 +5783,22 @@ class App(_TkBase):
         Tooltip(cbv, "音で合わせたあと、画面の似かたでも合わせて、場所ごとに確かなほうを採ります。\n"
                      "音が違いすぎてうまく合わない動画や、しっかり確かめたいときに入れてください。時間は長めにかかります。\n"
                      "入れたあと、もう一度「自動で合わせる」を押してください。")
-        self.speed_mode = tk.StringVar(value=SPEED_MODES[""][0])
+        self.speed_mode = tk.StringVar(value=SPEED_AUTO)
+        self._speed_resolved = ""      # 「自動で判定する」のとき、自動合わせで決まった速さ
         self._speed_cache = {}
         import atexit
         atexit.register(lambda: [Path(v.path).unlink(missing_ok=True) for v in self._speed_cache.values()])   # 作業用の動画を消す
         ast2 = ttk.Frame(c1)
         ttk.Label(ast2, text="速さの違う版どうしを合わせるとき:").pack(side="left")
-        cbs = ttk.Combobox(ast2, textvariable=self.speed_mode, values=[v[0] for v in SPEED_MODES.values()], state="readonly", width=34)
+        cbs = ttk.Combobox(ast2, textvariable=self.speed_mode, values=[SPEED_AUTO] + [v[0] for v in SPEED_MODES.values()], state="readonly", width=34)
         cbs.pack(side="left", padx=6)
         Tooltip(cbs, "欧州向けの版(PAL版)は、約4%速く再生されるように作られていることがあります(長さが約4%短い)。\n"
-                     "そのままでは自動で合わせられないので、どちらが速い版かを選んでから「自動で合わせる」を押してください。\n"
+                     "「自動で判定する」のままなら、自動で合わせるときに音から調べます(はっきりしないときは、同じ速さとして合わせます)。\n"
+                     "うまく判定されないときは、どちらが速い版かをここで選んでから、もう一度「自動で合わせる」を押してください。\n"
                      "出来上がりの長さは英語版の映像のままで、日本語の音声の速さを合わせます。\n"
                      "・英語版が PAL版: 日本語の音声を約4%速くします(音の高さはそのまま)\n"
                      "・日本語の録画が PAL版: 日本語の音声を約4%遅くします(速さと一緒に高さも下がり、元の高さに戻ります)\n"
-                     "ふつうの版どうしなら「同じ速さ」のままにしてください。")
+                     "ふつうの版どうしなのに速さが違うと判定されてしまうときは、「同じ速さ」を選んでください。")
         _tg0 = _tg
 
         def _tg():      # 詳細設定の開け閉めで、この行も一緒に出し入れする
@@ -7076,11 +7125,10 @@ class App(_TkBase):
         self.pbar.config(value=0)
         by_video = bool(self.easy_video.get())
         self._align_mode = "音+映像" if by_video else "音"
-        mode = self.speed_key()
-        q = SPEED_MODES[mode][1]
-        self._align_speed = mode
-        if mode:
-            self._align_mode += f" / {SPEED_MODES[mode][0]}"
+        auto_speed = self.speed_mode.get() == SPEED_AUTO
+        self._speed_resolved = ""
+        mode0 = "" if auto_speed else self.speed_key()
+        base_mode = self._align_mode
         self.auto_msg.config(text=("音と画面の両方で、対応する場所を探しています…(長い動画は10分以上かかることがあります)" if by_video
                                    else "音を照合して、対応する場所を探しています…(長い動画は数分かかります)"), fg="#333")
         self.easy_done.config(text="")
@@ -7090,8 +7138,17 @@ class App(_TkBase):
 
         def work():
             try:
+                mode = mode0
+                if auto_speed:
+                    prog(0.0, "2本の速さが同じかどうかを調べています…")
+                    mode = detect_speed(en, jp)[0] or ""
+
+                def note(mode=mode):
+                    self._speed_resolved = mode if auto_speed else ""
+                    self._align_mode = base_mode + (f" / {SPEED_MODES[mode][0]}" + ("(自動で判定)" if auto_speed else "") if mode else "")
+                self.q.put(note)
                 if mode:
-                    segs, info = align_speed(en, jp, by_video, q, prog, self._speed_cache)
+                    segs, info = align_speed(en, jp, by_video, SPEED_MODES[mode][1], prog, self._speed_cache)
                 else:
                     segs, info = (combined_align if by_video else auto_align)(en, jp, prog)
             except Exception as ex:  # noqa: BLE001
@@ -7102,7 +7159,7 @@ class App(_TkBase):
     def _speed_hint(self):
         """読み込んだ2本のコマ数から、片方だけ PAL版(25コマ)らしいときに知らせる。"""
         m = self.media
-        if not all(m.values()) or self.speed_key():
+        if not all(m.values()) or self.speed_mode.get() != SPEED_MODES[""][0]:
             return
         pal = {k: any(abs(m[k].fps - f) < 0.01 for f in (25.0, 50.0)) for k in ("en", "jp")}
         if pal["en"] != pal["jp"]:
@@ -7111,7 +7168,9 @@ class App(_TkBase):
                                       "「詳細設定」の「速さの違う版どうしを合わせるとき」で選んでから、自動で合わせてください。", fg="#a60")
 
     def speed_key(self):
-        """「速さの違う版」の選択を、設定のキー("" / "en_pal" / "jp_pal")で返す。"""
+        """いま使う「速さの違い」を、設定のキー("" / "en_pal" / "jp_pal")で返す。「自動で判定する」のときは、自動合わせで決まったもの。"""
+        if self.speed_mode.get() == SPEED_AUTO:
+            return self._speed_resolved
         return next((k for k, v in SPEED_MODES.items() if v[0] == self.speed_mode.get()), "")
 
     def _auto_done(self, segs, info):
@@ -7141,6 +7200,9 @@ class App(_TkBase):
         self.pbar.config(value=100)
         warn = len(self.auto_flags)
         lines = [f"✔ 自動で合わせました (区間 {len(segs)} 個)。"]
+        if self.speed_key():
+            lines.append(f"・{SPEED_MODES[self.speed_key()][0]} として合わせました"
+                         + ("(音から自動で判定。違っていたら、「詳細設定」で選び直してください)" if self.speed_mode.get() == SPEED_AUTO else "") + "。")
         for a, b in info["unused_jp"][:5]:
             lines.append(f"・日本語の録画の {self.short(a)} 〜 {self.short(b)} (約{int(b - a)}秒) は使いません (CMなど)。")
         if len(info["unused_jp"]) > 5:
@@ -7702,6 +7764,7 @@ class App(_TkBase):
     def _loaded(self, m):
         self.media = m
         self.items, self.auto_flags = [], None      # 前のファイルの結果は残さない
+        self._speed_resolved = ""
         keep, self._proj_items = getattr(self, "_proj_items", None), None
         if keep:        # 設定ファイルを開いて読み込んだとき: その設定の「指定の一覧」を使う(同じファイルのときだけ)
             same = lambda a, b: os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))  # noqa: E731
