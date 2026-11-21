@@ -797,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 52       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 53       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -7619,8 +7619,8 @@ class App(_TkBase):
             "・合成のあとに出る「自動チェック報告」の文や、エラーの文面(そのまま貼れます)\n\n"
             "報告のしかたは、2つあります。\n"
             "① フォームで報告 … アカウントは要りません。書いた内容は、作者だけが読めます。\n"
-            "② GitHub で報告 … GitHub のアカウント(無料)が要ります。だれでも見られるので、番組名や放送局の名前は書かないで"
-            "ください。「診断情報を保存」でできるファイルを付けられます(動画のファイル名と場所が入ります)。")).pack()
+            "② GitHub で報告 … GitHub のアカウント(無料)が要ります。だれでも見られるので、番組名や放送局の名前は書かないことを"
+            "おすすめします。「診断情報を保存」でできるファイルを付けられます(動画のファイル名と場所が入ります)。")).pack()
         bf = ttk.Frame(d)
         bf.pack(pady=(0, 6))
         b2 = ttk.Frame(d)

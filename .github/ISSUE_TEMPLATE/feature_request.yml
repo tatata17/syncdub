@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **このページは、だれでも見られます。** 番組名・放送局名・個人の名前などは、書かないでください。
+        **このページは、だれでも見られます。** 番組名・放送局名・個人の名前などは、書かないことをおすすめします。
   - type: textarea
     id: what
     attributes:
