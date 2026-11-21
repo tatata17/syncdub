@@ -1,0 +1,62 @@
+name: 不具合の報告
+description: うまく動かない・結果がおかしい、というときはこちら
+title: "[不具合] "
+labels: ["不具合"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。分かる範囲で書いてください。空欄があってもかまいません。
+
+        **このページは、だれでも見られます。** 番組名・放送局名・個人の名前などは、書かないでください。
+        ソフトが作る「診断情報」や「自動チェックの報告文」には、動画のファイル名と場所が入ります。気になるときは、その部分を消してから貼ってください。
+  - type: input
+    id: version
+    attributes:
+      label: syncdub の版
+      description: ウィンドウのいちばん上、または「更新・設定」→「更新を確認」で分かります
+      placeholder: "例: v2026.11.18.44 / v2026.11.18.44 ベータ50"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: どこで起きましたか
+      options:
+        - 読み込み(動画を開く)
+        - 自動で合わせる
+        - 手動調整
+        - 合成(動画を作る)
+        - 自動チェック
+        - 録画から探す・切り出し
+        - 更新・設定
+        - 起動しない・途中で閉じる
+        - そのほか
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 何が起きましたか
+      description: 何をしたら、どうなったか。本当はどうなってほしかったか。出来上がった動画のことなら、おかしい所の時刻(例 12分34秒あたり)も書いてください
+      placeholder: |
+        例: 「自動で合わせる」を押して合成したら、12分34秒あたりから日本語の音が1秒ほど遅れている。
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: 自動チェックの報告文・エラーの文面
+      description: 合成のあとに出る「自動チェック報告」や、エラーの画面の文を、そのまま貼ってください(ファイル名は消してかまいません)
+      render: text
+  - type: textarea
+    id: files
+    attributes:
+      label: 診断情報のファイル・画面の写真
+      description: 「更新・設定」→「診断情報を保存」でできるファイルや、画面の写真を、この欄にドラッグ&ドロップで付けられます
+  - type: input
+    id: env
+    attributes:
+      label: パソコンの環境
+      description: 分かる範囲で(ソフトの「不具合を報告」から開いたときは、自動で入ります)
+      placeholder: "例: Windows 11 / Python 3.12 / ffmpeg 7.1"

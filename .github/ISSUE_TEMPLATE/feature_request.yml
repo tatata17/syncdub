@@ -1,0 +1,21 @@
+name: 要望・質問
+description: こうなると便利、使い方が分からない、というときはこちら
+title: "[要望] "
+labels: ["要望"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **このページは、だれでも見られます。** 番組名・放送局名・個人の名前などは、書かないでください。
+  - type: textarea
+    id: what
+    attributes:
+      label: 内容
+      description: どんな場面で、何ができるとよいか。質問のときは、分からないことを書いてください
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: syncdub の版
+      placeholder: "例: v2026.11.18.44"
