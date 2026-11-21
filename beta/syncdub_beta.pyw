@@ -194,6 +194,7 @@ class Seg:
         self.jp_start, self.jp_end = jp_start, jp_end
         self.fit, self.note = fit, note
         self.english = english  # True: この区間は英語版の音声をそのまま使う
+        self.resample = False   # True: 伸び縮みを、回転数を変える方式で行う(速さと一緒に音の高さも変わる。PAL版の録画を元の速さに戻すとき)
 
     @property
     def silent(self):
@@ -237,6 +238,21 @@ def load_segments(proj, en_dur, en_fps, jp_fps):
     for s in segs:
         if s.dur <= 0:
             raise ValueError(f"区間の長さが0以下: {s.en_start}-{s.en_end}")
+    # ひと続きで、速さの割合も同じ伸び縮みの区間は、1つにまとめる(速さの違う版(PAL版)では、全部の区間が伸び縮みになる。
+    # 細かく分かれたままだと、つなぎ目ごとに切り位置を測ることになり、時間がかかる)
+    merged = []
+    for s in segs:
+        p = merged[-1] if merged else None
+        if (p is not None and not p.english and not s.english and p.fit == s.fit == "stretch" and p.jp_end is not None
+                and s.jp_end is not None and abs(p.en_end - s.en_start) < 2e-3 and abs(p.jp_end - s.jp_start) < 2e-3
+                and abs((p.jp_end - p.jp_start) / p.dur - (s.jp_end - s.jp_start) / s.dur) < 2e-5):
+            p.en_end, p.jp_end = s.en_end, s.jp_end
+        else:
+            merged.append(s)
+    segs = merged
+    if proj.get("jp_pitch") == "follow":
+        for s in segs:
+            s.resample = True
     # 隙間と末尾を無音で埋める
     full, t = [], 0.0
     for s in segs:
@@ -280,7 +296,7 @@ def _seg_continuous(a, b):
 
 def _seg_atempo(x):
     """この区間は、音の高さを保つ伸び縮み(atempo)で合成するか。"""
-    if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur <= 0.2:
+    if x.silent or x.english or x.fit != "stretch" or x.jp_end is None or x.dur <= 0.2 or x.resample:
         return False
     return abs((x.jp_end - x.jp_start) / x.dur - 1) > STRETCH_RESAMPLE_MAX
 
@@ -425,7 +441,7 @@ def build_filter(segs, jp_off, a_index, sr, layout, fade, in_idx=0, lead=0.0, en
                     # 余白ぶんを切り捨てる (これをしないと、区間の境目で「ぶつぶつ」と音が途切れる)
                     a0 = min(0.1, max(js, 0.0))
                     a1 = 0.1
-                    if abs(r - 1) <= STRETCH_RESAMPLE_MAX:
+                    if abs(r - 1) <= STRETCH_RESAMPLE_MAX or s.resample:
                         # 速さの違いがごくわずかなら、テープの回転を少し変えるのと同じ方法(サンプリング周波数の変換)で合わせる。
                         # 波形がそのままつながるので、境目で鳴らない。音の高さもその割合だけ変わるが、この範囲なら聞き分けられない
                         stretch = f"asetrate={sr * r:.6f},aresample={sr}"
@@ -466,6 +482,7 @@ def clip_segments(segs, c0, c1):
         if b - a <= 1e-6:
             continue
         n = Seg(a - c0, b - c0, s.jp_start, s.jp_end, s.fit, s.note, s.english)
+        n.resample = s.resample
         if s.jp_start is not None and s.dur > 0:
             je = s.jp_end if s.jp_end is not None else s.jp_start + s.dur
             r = (je - s.jp_start) / s.dur  # 日本語側は、切り詰めた分だけ(速度比をかけて)進める
@@ -780,7 +797,7 @@ import numpy as np
 
 APP_VERSION = "2026.11.18.44"
 BETA_REVIEW = True   # ベータ版かどうか。True: 更新先が beta/version.json、表示に「ベータ」、「録画から探す」の確認ウインドウ。正式版では False
-BETA_BUILD = 46       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
+BETA_BUILD = 47       # ベータ版の通し番号(直すたびに上げる)。ベータ版は beta/version.json を見て、自分で更新する
 BETA_FILE = "beta/syncdub_beta.pyw"
 REPO = "tatata17/syncdub"
 APP_FILE = "syncdub.pyw"
@@ -3995,12 +4012,13 @@ def find_short_versions(en, jp, cl, pieces, phits, vcache, keep, dropped, cap=40
     return out
 
 
-def build_from_items(items, en_rng, jp_rng):
+def build_from_items(items, en_rng, jp_rng, speed=1.0):
     """指定(同じ場面/CM/暗転・長さ違い/カット)から、エンジン用の区間リストを組み立てる。
 
     考え方: 英語側から「カット(英語にしかない所)」を、日本語側から「CM(日本語にしかない所)」を
     取り除いた軸の上で、「同じ場面」の点を直線でつなぐ。そのあと取り除いた所を元に戻して区間にする。
     戻り値: (segs, extra, warns)  extra = 英語の音声をそのまま使う区間
+    speed: 版による速さの違い(日本語の時間 ÷ 英語の時間。PAL版のとき 1 以外)。「同じ場面」の点の外側は、この割合で延ばす。
     """
     pts = [(i["en"], i["jp"]) for i in items if i["k"] == "pt"]
     dims = [i for i in items if i["k"] == "dim"]
@@ -4039,7 +4057,7 @@ def build_from_items(items, en_rng, jp_rng):
             continue
         knots.append((u, q))
     L = 1e7
-    ext = [(knots[0][0] - L, knots[0][1] - L)] + knots + [(knots[-1][0] + L, knots[-1][1] + L)]
+    ext = [(knots[0][0] - L, knots[0][1] - L * speed)] + knots + [(knots[-1][0] + L, knots[-1][1] + L * speed)]
 
     def qmap(u):
         for (ua, qa), (ub, qb) in zip(ext, ext[1:]):
@@ -4085,7 +4103,7 @@ def build_from_items(items, en_rng, jp_rng):
             if d["en0"] - 1e-3 <= t0 and t1 <= d["en1"] + 1e-3:
                 fit, in_dim = d.get("fit", "stretch"), True
         ratio = (x1 - x0) / (t1 - t0)
-        if not in_dim and abs(ratio - 1) > 0.02:
+        if not in_dim and abs(ratio / speed - 1) > 0.02:
             warns.append(f"英語 {t0:.1f}〜{t1:.1f}秒: 音の速さが {ratio:.3f} 倍になります。"
                          "「同じ場面」の位置がずれている可能性があります。暗転などの長さ違いなら「暗転・長さ違い」で指定してください")
         # 日本語録画の範囲外にはみ出す分は詰める
@@ -4795,10 +4813,63 @@ def output_check(path, sr=8000, cuts=(), ramps=()):
     return check_tracks(raws[0], raws[1], sr, cuts, ramps=ramps)
 
 
-def stretch_ramps(segs):
-    """伸び縮みさせてつないでいる区間の一覧 [(英語の開始, 終了, 長さの差)]。自動チェックで、その範囲のずれを数えないために使う。"""
-    return [(float(x["en_start"]), float(x["en_end"]), abs((x["jp_end"] - x["jp_start"]) - (x["en_end"] - x["en_start"])))
-            for x in segs if x.get("jp_start") is not None and x.get("jp_end") is not None]
+SPEED_PAL = 25.0 / (24000.0 / 1001.0)      # PAL版の速さ(約 1.0427 倍)
+SPEED_MODES = {"": ("同じ速さ", 1.0), "en_pal": ("英語版が PAL版(約4%速い)", SPEED_PAL), "jp_pal": ("日本語の録画が PAL版(約4%速い)", 1.0 / SPEED_PAL)}
+
+
+def stretch_ramps(segs, q=1.0):
+    """伸び縮みさせてつないでいる区間の一覧 [(英語の開始, 終了, 長さの差)]。自動チェックで、その範囲のずれを数えないために使う。
+    q: 版による速さの違い(日本語の時間 ÷ 英語の時間)。全体にかかっている分は、差に数えない。"""
+    out = []
+    for x in segs:
+        if x.get("jp_start") is None or x.get("jp_end") is None:
+            continue
+        dl = abs((x["jp_end"] - x["jp_start"]) / q - (x["en_end"] - x["en_start"]))
+        if dl > 0.01:
+            out.append((float(x["en_start"]), float(x["en_end"]), dl))
+    return out
+
+
+def make_speed_proxy(path, astream, q, out):
+    """速さの違う版(PAL版)を合わせるための、作業用の小さな動画を作る。
+    日本語の録画を、英語版と同じ速さに直したもの(時間が 1/q 倍。音は回転数を変える方式なので、高さも一緒に変わる)。
+    これを日本語の録画のかわりに自動合わせにかけ、出てきた日本語の時刻を q 倍して、元の録画の時刻に戻す。"""
+    has_v = any(x.get("codec_type") == "video" for x in probe(path).get("streams", []))
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", path]
+    if has_v:
+        cmd += ["-map", "0:v:0", "-vf", f"scale=320:-2,setpts=PTS/{q:.9f},fps=30000/1001",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p"]
+    cmd += ["-map", f"0:a:{astream}", "-af", f"aresample=48000,asetrate={48000 * q:.4f},aresample=16000", "-ac", "1",
+            "-c:a", "pcm_s16le", "-sn", "-dn", out]
+    subprocess.run(cmd, capture_output=True, check=True, stdin=subprocess.DEVNULL, **NOWIN)
+
+
+def align_speed(en, jp, by_video, q, progress=lambda f, m: None, cache=None):
+    """速さの違う版どうしの自動合わせ。q = 日本語の時間 ÷ 英語の時間 (英語版が PAL版なら 1.0427、日本語の録画が PAL版なら 0.959)。
+    戻り値は auto_align と同じ形。日本語の時刻は元の録画のもので、区間はすべて伸び縮み(jp_end あり)になる。"""
+    import tempfile
+    key = (jp.path, jp.astream, round(q, 6))
+    px = (cache or {}).get(key)
+    if px is None or not os.path.exists(px.path):
+        progress(0.01, "速さをそろえた作業用の動画を作っています…(1〜数分かかります)")
+        fd, tmpf = tempfile.mkstemp(prefix="syncdub_speed_", suffix=".mkv")
+        os.close(fd)
+        make_speed_proxy(jp.path, jp.astream, q, tmpf)
+        px = Media(tmpf)
+        if cache is not None:
+            for old in list(cache.values()):        # 前の作業用の動画は消す
+                Path(old.path).unlink(missing_ok=True)
+            cache.clear()
+            cache[key] = px
+    segs, info = (combined_align if by_video else auto_align)(en, px, lambda f, m: progress(0.1 + 0.9 * f, m))
+    for sg in segs:
+        d = sg["en_end"] - sg["en_start"]
+        je = sg["jp_end"] if sg.get("jp_end") is not None else sg["jp_start"] + d
+        sg["jp_start"], sg["jp_end"], sg["fit"] = round(sg["jp_start"] * q, 4), round(je * q, 4), "stretch"
+    info["unused_jp"] = [(a * q, b * q) for a, b in (info.get("unused_jp") or [])]
+    if cache is None:
+        Path(px.path).unlink(missing_ok=True)
+    return segs, info
 
 
 def check_tracks(j_all, e_all, sr, cuts=(), stats=None, ramps=()):
@@ -5659,6 +5730,29 @@ class App(_TkBase):
         Tooltip(cbv, "音で合わせたあと、画面の似かたでも合わせて、場所ごとに確かなほうを採ります。\n"
                      "音が違いすぎてうまく合わない動画や、しっかり確かめたいときに入れてください。時間は長めにかかります。\n"
                      "入れたあと、もう一度「自動で合わせる」を押してください。")
+        self.speed_mode = tk.StringVar(value=SPEED_MODES[""][0])
+        self._speed_cache = {}
+        import atexit
+        atexit.register(lambda: [Path(v.path).unlink(missing_ok=True) for v in self._speed_cache.values()])   # 作業用の動画を消す
+        ast2 = ttk.Frame(c1)
+        ttk.Label(ast2, text="速さの違う版どうしを合わせるとき:").pack(side="left")
+        cbs = ttk.Combobox(ast2, textvariable=self.speed_mode, values=[v[0] for v in SPEED_MODES.values()], state="readonly", width=34)
+        cbs.pack(side="left", padx=6)
+        Tooltip(cbs, "欧州向けの版(PAL版)は、約4%速く再生されるように作られていることがあります(長さが約4%短い)。\n"
+                     "そのままでは自動で合わせられないので、どちらが速い版かを選んでから「自動で合わせる」を押してください。\n"
+                     "出来上がりの長さは英語版の映像のままで、日本語の音声の速さを合わせます。\n"
+                     "・英語版が PAL版: 日本語の音声を約4%速くします(音の高さはそのまま)\n"
+                     "・日本語の録画が PAL版: 日本語の音声を約4%遅くします(速さと一緒に高さも下がり、元の高さに戻ります)\n"
+                     "ふつうの版どうしなら「同じ速さ」のままにしてください。")
+        _tg0 = _tg
+
+        def _tg():      # 詳細設定の開け閉めで、この行も一緒に出し入れする
+            _tg0()
+            if ast.winfo_ismapped():
+                ast2.pack(fill="x", padx=14, pady=(0, 8), after=o)
+            else:
+                ast2.pack_forget()
+        tgb.config(command=_tg)
         self.en_var.trace_add("write", lambda *a: self._zone_update())
         self.jp_var.trace_add("write", lambda *a: self._zone_update())
 
@@ -6976,6 +7070,11 @@ class App(_TkBase):
         self.pbar.config(value=0)
         by_video = bool(self.easy_video.get())
         self._align_mode = "音+映像" if by_video else "音"
+        mode = self.speed_key()
+        q = SPEED_MODES[mode][1]
+        self._align_speed = mode
+        if mode:
+            self._align_mode += f" / {SPEED_MODES[mode][0]}"
         self.auto_msg.config(text=("音と画面の両方で、対応する場所を探しています…(長い動画は10分以上かかることがあります)" if by_video
                                    else "音を照合して、対応する場所を探しています…(長い動画は数分かかります)"), fg="#333")
         self.easy_done.config(text="")
@@ -6985,11 +7084,29 @@ class App(_TkBase):
 
         def work():
             try:
-                segs, info = (combined_align if by_video else auto_align)(en, jp, prog)
+                if mode:
+                    segs, info = align_speed(en, jp, by_video, q, prog, self._speed_cache)
+                else:
+                    segs, info = (combined_align if by_video else auto_align)(en, jp, prog)
             except Exception as ex:  # noqa: BLE001
                 segs, info = [], {"ok": False, "unused_jp": [], "msg": f"解析中にエラーが起きました: {ex}"}
             self.q.put(lambda: self._auto_done(segs, info))
         threading.Thread(target=work, daemon=True).start()
+
+    def _speed_hint(self):
+        """読み込んだ2本のコマ数から、片方だけ PAL版(25コマ)らしいときに知らせる。"""
+        m = self.media
+        if not all(m.values()) or self.speed_key():
+            return
+        pal = {k: any(abs(m[k].fps - f) < 0.01 for f in (25.0, 50.0)) for k in ("en", "jp")}
+        if pal["en"] != pal["jp"]:
+            who = "英語版" if pal["en"] else "日本語の録画"
+            self.auto_msg.config(text=f"※ {who}は25コマの動画(PAL版)のようです。長さが約4%違う(速さが違う)版なら、"
+                                      "「詳細設定」の「速さの違う版どうしを合わせるとき」で選んでから、自動で合わせてください。", fg="#a60")
+
+    def speed_key(self):
+        """「速さの違う版」の選択を、設定のキー("" / "en_pal" / "jp_pal")で返す。"""
+        return next((k for k, v in SPEED_MODES.items() if v[0] == self.speed_mode.get()), "")
 
     def _auto_done(self, segs, info):
         # このファイルで、すでに何か作業をしていたか。区間があるか、区間は全部消してあっても履歴が残っていれば「していた」。
@@ -7145,7 +7262,7 @@ class App(_TkBase):
         cuts = sorted({round(float(v), 3) for x in self.segs for v in (x["en_start"], x["en_end"])})
 
         segs_now = [dict(x) for x in self.segs]
-        ramps = stretch_ramps(segs_now)
+        ramps = stretch_ramps(segs_now, SPEED_MODES[self.speed_key()][1])
         med = dict(self.media)
         self._beta_virtual = None
 
@@ -7573,6 +7690,7 @@ class App(_TkBase):
         else:
             self.pbar.config(value=0)
             self.auto_msg.config(text="読み込みました。「自動で合わせる」を押すと、自動で合わせます。\n(手動で合わせる場合は「手動調整」タブへ)", fg="#333")
+            self._speed_hint()
 
     # ---------- カーソル ----------
     def fps(self, k):
@@ -8024,7 +8142,8 @@ class App(_TkBase):
         m = self.media
         if all(m.values()):
             self.segs, self.extra_segs, self.warns = build_from_items(
-                self.items, (min(0.0, m["en"].a_origin), m["en"].end), (min(0.0, m["jp"].a_origin), m["jp"].end))
+                self.items, (min(0.0, m["en"].a_origin), m["en"].end), (min(0.0, m["jp"].a_origin), m["jp"].end),
+                SPEED_MODES[self.speed_key()][1])
         # 赤いカーソルを境目に合わせる(下のプレビュー画面で、境目の場面を見ながら動かせる)
         moved = {"en": it["en"], "jp": it["jp"]} if h[0] == "pt" else {k: t_now}
         for kk, t in moved.items():
@@ -8245,7 +8364,7 @@ class App(_TkBase):
         else:
             en_rng = jp_rng = (0.0, 1e6)
         if self.items and all(m.values()):
-            self.segs, self.extra_segs, self.warns = build_from_items(self.items, en_rng, jp_rng)
+            self.segs, self.extra_segs, self.warns = build_from_items(self.items, en_rng, jp_rng, SPEED_MODES[self.speed_key()][1])
         else:
             self.segs, self.extra_segs, self.warns = [], [], []
         self.refresh()
@@ -8454,10 +8573,15 @@ class App(_TkBase):
         for e in self.extra_segs:
             segs.append({"type": "english", "en_start": round(e["en_start"], 4), "en_end": round(e["en_end"], 4)})
         segs.sort(key=lambda x: x["en_start"])
-        return {"en_video": self.en_var.get(), "jp_media": self.jp_var.get(),
-                "jp_audio_stream": self.jp_ast.get(), "output": self.out_path.get(),
-                "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
-                "segments": segs, "items": self.items}
+        d = {"en_video": self.en_var.get(), "jp_media": self.jp_var.get(),
+             "jp_audio_stream": self.jp_ast.get(), "output": self.out_path.get(),
+             "keep_en_audio": True, "audio_codec": "aac", "audio_bitrate": "256k",
+             "segments": segs, "items": self.items}
+        if self.speed_key():
+            d["speed"] = self.speed_key()
+            if self.speed_key() == "jp_pal":     # PAL版の録画を元の速さに戻す: 回転数を変える方式(高さも一緒に戻る)
+                d["jp_pitch"] = "follow"
+        return d
 
     def save_project(self, ask=True):
         old_path = self.proj_path
@@ -8498,6 +8622,7 @@ class App(_TkBase):
         self.en_var.set(str((base / d["en_video"])))
         self.jp_var.set(str((base / d["jp_media"])))
         self.jp_ast.set(d.get("jp_audio_stream", 0))
+        self.speed_mode.set(SPEED_MODES.get(d.get("speed", ""), SPEED_MODES[""])[0])
         self.out_path.set(str(base / d["output"]) if d.get("output") else "")
         self.items = d.get("items", [])
         self.auto_flags = None

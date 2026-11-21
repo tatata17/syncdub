@@ -146,10 +146,21 @@ def cases():
         return (np.concatenate([both(a[:k]), extra, both(a[k:])]), np.concatenate([sound(rng, 5), both(a)]),
                 [(0, 45, 5.0, 1.0), (45.4, 90.4, 50.0, 1.0)], 3, 9.0)
 
+    PAL = 25.0 / (24000.0 / 1001.0)
+
+    def c9():      # 英語版が PAL版(約4%速い)。日本語側に CM (30秒)。答えの英語の時刻は 1/PAL 倍、日本語は PAL 倍の速さで進む
+        en_x, jp_x, truth, _n = c2()
+        return (stretch(en_x, 1 / PAL), jp_x, [(s / PAL, e / PAL, j, PAL) for s, e, j, _r in truth], 2, MARGIN, PAL)
+
+    def c10():     # 日本語の録画が PAL版(約4%速い)。日本語側に CM
+        en_x, jp_x, truth, _n = c2()
+        return (en_x, stretch(jp_x, 1 / PAL), [(s, e, j / PAL, 1 / PAL) for s, e, j, _r in truth], 2, MARGIN, 1 / PAL)
+
     return [(1, "一定のずれだけ", c1), (2, "日本語側だけ CM (30秒) が入る", c2), (3, "英語側だけの場面 (8秒)", c3),
             (4, "後半ほどずれる (0.1% のドリフト)", c4), (5, "12秒未満の短い CM (8秒)", c5),
             (6, "英語側だけの場面が2か所 (6秒と10秒)", c6), (7, "途中が声だけの場面 (15秒。切り出さない)", c7),
-            (8, "音の途中で、英語側だけ 0.4秒長い (伸ばしてつなぐ)", c8)]
+            (8, "音の途中で、英語側だけ 0.4秒長い (伸ばしてつなぐ)", c8),
+            (9, "英語版が PAL版 (約4%速い)", c9), (10, "日本語の録画が PAL版 (約4%速い)", c10)]
 
 
 # いまの自動合わせでは通らないと分かっているケースの番号。NG でも終了コードには数えない(通るようになったら、ここから外す)。
@@ -226,8 +237,11 @@ def main():
                 pe, pj = tmp / f"en{num}.mkv", tmp / f"jp{num}.mkv"
                 write_media(pe, en_x)
                 write_media(pj, jp_x)
-                segs = mod.align_for_record(mod.Media(str(pe)), mod.Media(str(pj)), "音")
-                ok, lines = judge(segs, truth, n_exp, *more)
+                if len(more) > 1:       # 速さの違う版: 速さの割合を指定して合わせる
+                    segs, _info = mod.align_speed(mod.Media(str(pe)), mod.Media(str(pj)), False, more[1])
+                else:
+                    segs = mod.align_for_record(mod.Media(str(pe)), mod.Media(str(pj)), "音")
+                ok, lines = judge(segs, truth, n_exp, *more[:1])
             except Exception as e:          # 合わせられなかった・素材を作れなかった、も NG として数える
                 ok, lines = False, [f"    NG: {type(e).__name__}: {e}"]
             known = num in KNOWN_NG
